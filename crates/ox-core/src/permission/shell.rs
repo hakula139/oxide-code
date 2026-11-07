@@ -15,8 +15,7 @@ mod wrapper;
 use std::path::Path;
 
 use self::walk::{DIRECTORY_CHANGERS, EnteredDirs, Walk, basename, spelled_from};
-use self::wrapper::INPUT_WORD;
-use crate::permission::{PathResolver, PathTarget, Workspace, fold_name};
+use crate::permission::{PathResolver, PathTarget, Workspace};
 
 // ── Command Target ──
 
@@ -117,7 +116,7 @@ pub(super) struct Segment {
     /// The words an allow rule must name, without redirections. Leading assignments of
     /// [safe variables](wrapper::SAFE_VARIABLES) and transparent wrappers are left out, up to the
     /// first other assignment or wrapper, which starts the list and keeps every word after it.
-    /// Ends in [`INPUT_WORD`] when `xargs` appends its input words.
+    /// Ends in [`wrapper::INPUT_WORD`] when `xargs` appends its input words.
     named: Vec<ShellWord>,
     /// Where the program may start in `named`, first past every assignment and wrapper, then at
     /// each word past a wrapper option the analysis does not know.
@@ -145,6 +144,7 @@ impl Segment {
     }
 
     /// Returns whether this is a known-safe read-only command.
+    #[cfg(test)]
     pub(super) const fn is_safe(&self) -> bool {
         self.safe
     }
@@ -155,42 +155,6 @@ impl Segment {
 
     pub(super) const fn reads_anything(&self) -> bool {
         self.reads_anything
-    }
-
-    /// Returns whether this may run `rm` with both its recursive and force options before any `--`,
-    /// in one short cluster or two, such as `-rf` or `-R -f`, or as `--recursive` and `--force` or
-    /// a prefix GNU `rm` takes for either. A word that expands, the program name included, may
-    /// become any of them, and the input words `xargs` runs as the program may hold them all. GNU
-    /// `rm` reads options after operands too, so `rm / -rf` counts.
-    pub(super) fn removes_recursively_by_force(&self) -> bool {
-        self.programs().any(|program| {
-            let (name, args) = program
-                .split_first()
-                .expect("a simple command runs a program");
-            if name.is_input() {
-                return true;
-            }
-            if name.literal && fold_name(basename(&name.text)) != "rm" {
-                return false;
-            }
-            let (mut recursive, mut force) = (false, false);
-            for arg in args {
-                if !arg.literal {
-                    return true;
-                }
-                if arg.text == "--" {
-                    break;
-                }
-                if let Some(long) = arg.text.strip_prefix("--") {
-                    recursive |= !long.is_empty() && "recursive".starts_with(long);
-                    force |= !long.is_empty() && "force".starts_with(long);
-                } else if let Some(cluster) = arg.text.strip_prefix('-') {
-                    recursive |= cluster.contains(['r', 'R']);
-                    force |= cluster.contains('f');
-                }
-            }
-            recursive && force
-        })
     }
 }
 
@@ -287,11 +251,6 @@ pub(super) struct ShellWord {
 impl ShellWord {
     pub(super) fn text(&self) -> &str {
         &self.text
-    }
-
-    /// Returns whether this stands for the input words `xargs` appends.
-    fn is_input(&self) -> bool {
-        !self.literal && self.text == INPUT_WORD
     }
 
     pub(super) const fn is_literal(&self) -> bool {
@@ -1443,56 +1402,6 @@ mod tests {
                         texts(command).contains(&"rm -rf /".to_owned()),
                         "{command:?}: {:?}",
                         texts(command)
-                    );
-                }
-            }
-        }
-    }
-
-    mod segment {
-        use super::*;
-
-        mod removes_recursively_by_force {
-            use super::*;
-
-            #[test]
-            fn reads_both_options_in_every_spelling_before_a_double_dash() {
-                for command in [
-                    "rm -rf /",
-                    "rm -fr x",
-                    "rm -rfv /",
-                    "rm -Rf x",
-                    "rm -f -R x",
-                    "rm -r --force /",
-                    "rm --recursive --force x",
-                    "rm --rec --f x",
-                    "rm / -rf",
-                    "RM -Rf x",
-                    "/bin/rm -rf x",
-                    "nice -n 5 rm -rf x",
-                    "rm $FLAGS x",
-                    "$RM -rf x",
-                    "xargs sudo",
-                    "sudo FOO=1 -u root rm -rf x",
-                ] {
-                    assert!(
-                        parse(command).segments[0].removes_recursively_by_force(),
-                        "{command:?}"
-                    );
-                }
-                for command in [
-                    "rm -r x",
-                    "rm -f x",
-                    "rm --recursive x",
-                    "rm -- -rf",
-                    "rm -f -- -r",
-                    "rm --forced -r x",
-                    "rmdir -rf x",
-                    "$RM x",
-                ] {
-                    assert!(
-                        !parse(command).segments[0].removes_recursively_by_force(),
-                        "{command:?}"
                     );
                 }
             }

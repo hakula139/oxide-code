@@ -8,6 +8,7 @@ use super::transport::{post_messages, with_retry};
 use super::wire::{ContentBlockInfo, OutputConfig, OutputFormat, RequestMessages};
 use super::{Client, RequestKind, RequestSpec};
 use crate::auth::Auth;
+use crate::client::StopReason;
 use crate::message::Message;
 use crate::model::{Effort, ModelSpec, TokenUsage};
 
@@ -27,16 +28,20 @@ pub(crate) struct SideQuery<'a> {
     pub(crate) output_format: Option<&'a OutputFormat>,
 }
 
+#[derive(Debug)]
+pub(crate) struct Completion {
+    pub(crate) text: String,
+    pub(crate) usage: Option<TokenUsage>,
+    pub(crate) stop_reason: Option<StopReason>,
+}
+
 // ── Client::complete ──
 
 impl Client {
     /// Sends `query` without streaming and returns the concatenated assistant text, dropping
     /// tool-use and thinking blocks, with the usage the response reported. The request carries no
     /// agentic betas or `context_management` directive.
-    pub(crate) async fn complete(
-        &self,
-        query: SideQuery<'_>,
-    ) -> Result<(String, Option<TokenUsage>)> {
+    pub(crate) async fn complete(&self, query: SideQuery<'_>) -> Result<Completion> {
         let SideQuery {
             session_id,
             auth,
@@ -67,7 +72,11 @@ impl Client {
                 breakpoint: None,
             },
         })?;
-        let CompletionResponse { content, usage } = with_retry(
+        let CompletionResponse {
+            content,
+            usage,
+            stop_reason,
+        } = with_retry(
             |retry| async move {
                 let response = post_messages(&self.http, request, retry).await?;
                 Ok(response
@@ -78,7 +87,11 @@ impl Client {
             |_| {},
         )
         .await?;
-        Ok((join_text_blocks(content), usage))
+        Ok(Completion {
+            text: join_text_blocks(content),
+            usage,
+            stop_reason,
+        })
     }
 }
 
@@ -98,6 +111,7 @@ fn join_text_blocks(content: Vec<ContentBlockInfo>) -> String {
 struct CompletionResponse {
     content: Vec<ContentBlockInfo>,
     usage: Option<TokenUsage>,
+    stop_reason: Option<StopReason>,
 }
 
 #[cfg(test)]
@@ -152,7 +166,7 @@ mod tests {
                 .await;
                 let client = test_client(server.uri());
 
-                let (text, usage) = client
+                let Completion { text, usage, .. } = client
                     .complete(query(&api_key(), "sys", "user input"))
                     .await
                     .unwrap();
@@ -307,7 +321,7 @@ mod tests {
                 .await;
                 let client = test_client(server.uri());
 
-                let (text, _) = client
+                let Completion { text, .. } = client
                     .complete(query(&api_key(), "sys", "user input"))
                     .await
                     .unwrap();

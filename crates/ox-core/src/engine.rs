@@ -2,6 +2,7 @@
 //! [`EngineHandle`], sending ops on a bounded channel and reading events from an unbounded one.
 
 mod abort;
+mod classifier;
 mod compaction;
 mod dispatch;
 mod estimate;
@@ -131,6 +132,7 @@ pub struct Engine {
     shells: Arc<BackgroundShells>,
     /// The configured policy plus the session allow rules granted since the live session began.
     policy: Policy,
+    permission_auto: crate::config::permission_auto::AutoPermissionConfig,
     /// `None` means the agent loop runs without a per-turn round cap.
     max_tool_rounds: Option<u32>,
     /// Compaction settings resolved for the active model.
@@ -189,6 +191,7 @@ impl Engine {
             instruction_warnings,
             shells,
             policy: config.permission.clone(),
+            permission_auto: config.permission_auto.clone(),
             max_tool_rounds: config.max_tool_rounds,
             compaction: config.compaction,
             workspace,
@@ -412,6 +415,15 @@ impl Engine {
             workspace: Arc::clone(&self.workspace),
             session: self.transcript.session().clone(),
             tracker: Arc::clone(&self.transcript.file_tracker),
+            classifier: classifier::ClassifierContext {
+                client: &self.client,
+                auth,
+                config: &self.permission_auto,
+                cache_ttl: self.settings.prompt_cache_ttl(),
+                context_window: self.settings.model().context_window(),
+                user_prompts: Vec::new(),
+            },
+            usage: &mut self.usage,
         };
         turn::agent_turn(
             TurnContext {
@@ -618,7 +630,6 @@ mod tests {
     use crate::model;
     use crate::model::{Effort, ModelSpec, PromptCacheTtl, TokenUsage};
     use crate::permission::PermissionClass;
-    use crate::permission::defaults::Shipped;
     use crate::permission::rule::Rule;
     use crate::protocol::local_testing::CapturingSink;
     use crate::protocol::testing::{model_pick, op_id};
@@ -854,10 +865,8 @@ mod tests {
                     deny,
                     Vec::new(),
                     Vec::new(),
-                    Shipped::VARIANTS,
                     &config.workspace,
-                )
-                .unwrap();
+                );
                 let ctx = ctx(dir.path());
 
                 let engine = Engine::new(

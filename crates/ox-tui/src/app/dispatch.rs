@@ -576,7 +576,6 @@ mod tests {
     use ox_core::config::ThemeConfig;
     use ox_core::config::provenance::Source;
     use ox_core::model::Effort;
-    use ox_core::permission::defaults::Shipped;
     use ox_core::permission::{Basis, Mode};
     use ox_core::protocol::testing::{OpReceiver, model_pick, text_result};
     use ox_core::protocol::{
@@ -1368,7 +1367,7 @@ mod tests {
                     title: "Bash(rm -rf /)".to_owned(),
                     body: ApprovalBody::Command("rm -rf /".to_owned()),
                 },
-                basis: Basis::Builtin(Shipped::Rm),
+                basis: Basis::Mode(Mode::Manual),
                 grant: None,
             });
 

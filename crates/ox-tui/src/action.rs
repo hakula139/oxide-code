@@ -112,9 +112,10 @@ mod tests {
         #[test]
         fn steps_through_every_mode_and_wraps_at_both_ends() {
             for (start, forward, backward) in [
-                (Mode::Manual, Mode::Plan, Mode::Yolo),
+                (Mode::Auto, Mode::Manual, Mode::Yolo),
+                (Mode::Manual, Mode::Plan, Mode::Auto),
                 (Mode::Plan, Mode::Yolo, Mode::Manual),
-                (Mode::Yolo, Mode::Manual, Mode::Plan),
+                (Mode::Yolo, Mode::Auto, Mode::Plan),
             ] {
                 assert_eq!(
                     next_mode(start, Direction::Forward),

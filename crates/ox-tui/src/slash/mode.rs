@@ -166,7 +166,7 @@ mod tests {
                     .into_iter()
                     .map(|(value, _)| value)
                     .collect::<Vec<_>>(),
-                ["manual", "plan", "yolo"]
+                ["auto", "manual", "plan", "yolo"]
             );
             assert_eq!(
                 rows("Y"),
@@ -195,7 +195,7 @@ mod tests {
         fn unknown_mode_errors_listing_valid_options() {
             assert_eq!(
                 run_execute(&ModeCmd, "turbo").unwrap_err(),
-                "Unknown mode: `turbo`. Valid: manual, plan, yolo."
+                "Unknown mode: `turbo`. Valid: auto, manual, plan, yolo."
             );
         }
     }

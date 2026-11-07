@@ -390,7 +390,7 @@ fn usage_style(percent: f64) -> SegmentStyle {
 
 fn permission_mode_label(mode: Mode) -> (&'static str, SegmentStyle) {
     let style = match mode {
-        Mode::Manual => SegmentStyle::Muted,
+        Mode::Auto | Mode::Manual => SegmentStyle::Muted,
         Mode::Plan => SegmentStyle::Accent,
         Mode::Yolo => SegmentStyle::Error,
     };

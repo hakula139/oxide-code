@@ -53,7 +53,7 @@ impl UsageLedger {
     }
 
     /// Adds the estimated cost of `records` to the session total.
-    fn bill(&mut self, records: &[UsageRecord]) {
+    pub(super) fn bill(&mut self, records: &[UsageRecord]) {
         self.total_estimated_cost_usd += estimate_cost_usd(records);
     }
 
@@ -67,7 +67,7 @@ impl UsageLedger {
 
     /// Shows the context usage against `context_window` and the session cost, first adding the
     /// title request's cost once its usage lands.
-    fn emit_update(&mut self, sink: &dyn EventSink, context_window: Option<u32>) {
+    pub(super) fn emit_update(&mut self, sink: &dyn EventSink, context_window: Option<u32>) {
         self.absorb_title_usage();
         let estimated_cost_usd =
             (self.total_estimated_cost_usd > 0.0).then_some(self.total_estimated_cost_usd);

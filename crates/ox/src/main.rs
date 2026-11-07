@@ -704,7 +704,7 @@ mod tests {
             assert!(
                 invalid
                     .to_string()
-                    .contains("[possible values: manual, plan, yolo]"),
+                    .contains("[possible values: auto, manual, plan, yolo]"),
                 "{invalid}",
             );
         }
@@ -714,6 +714,7 @@ mod tests {
             let help = Cli::command().render_long_help().to_string();
 
             for line in [
+                "- auto:   Use a model to approve tool calls or ask for confirmation",
                 "- manual: Ask before tool calls that no permission rule allows or denies",
                 "- plan:   Read-only: deny edits and commands",
                 "- yolo:   Run tool calls unless a deny rule or your ask rules hold them",
@@ -739,7 +740,7 @@ mod tests {
                 invalid.to_string(),
                 formatdoc! {"
                     error: invalid value '{replacement}' for '--mode <MODE>'
-                      [possible values: manual, plan, yolo]
+                      [possible values: auto, manual, plan, yolo]
 
                     For more information, try '--help'.
                 "},

@@ -11,6 +11,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::abort::{AbortResult, Mailbox, TurnAbort};
+use super::classifier::{Action, Assessment, AssessmentDecision, ClassifierContext};
+use super::usage::UsageLedger;
 use crate::file_tracker::FileTracker;
 use crate::message::ContentBlock;
 use crate::permission::rule::Rule;
@@ -28,6 +30,8 @@ pub(super) struct DispatchContext<'a> {
     pub(super) workspace: Arc<Workspace>,
     pub(super) session: SessionHandle,
     pub(super) tracker: Arc<FileTracker>,
+    pub(super) classifier: ClassifierContext<'a>,
+    pub(super) usage: &'a mut UsageLedger,
 }
 
 impl DispatchContext<'_> {
@@ -337,7 +341,33 @@ impl<'r> Dispatcher<'r, '_, '_> {
         let name = spec.definition.name.as_str();
         let class = spec.class;
         self.mailbox.apply_mode(self.dispatch_ctx.policy);
-        let verdict = self.dispatch_ctx.policy.verdict(class, &prepared.access);
+        let mut verdict = self.dispatch_ctx.policy.verdict(class, &prepared.access);
+        if verdict.decision == Decision::Classify {
+            let assessment = self.classify(name, prepared).await?;
+            self.mailbox.apply_mode(self.dispatch_ctx.policy);
+            verdict = self.dispatch_ctx.policy.verdict(class, &prepared.access);
+            if verdict.decision == Decision::Classify {
+                match assessment.decision {
+                    AssessmentDecision::Allow => {
+                        self.sink.emit(Event::Notice(format!(
+                            "Auto approved {name}: {}",
+                            assessment.reason
+                        )));
+                        return Ok(None);
+                    }
+                    AssessmentDecision::Ask => {
+                        verdict.decision = if self.dispatch_ctx.policy.attended() {
+                            Decision::Ask
+                        } else {
+                            Decision::Unapproved
+                        };
+                        verdict.basis = Basis::Classifier {
+                            reason: assessment.reason,
+                        };
+                    }
+                }
+            }
+        }
         debug!(
             tool = name,
             id,
@@ -347,6 +377,7 @@ impl<'r> Dispatcher<'r, '_, '_> {
         );
         match verdict.decision {
             Decision::Allow => Ok(None),
+            Decision::Classify => unreachable!("the automatic decision was settled above"),
             Decision::Deny => Ok(Some(match verdict.basis {
                 Basis::Mode(Mode::Plan) => plan_denied_output(name, self.tools),
                 basis => denied_output(name, format_args!("by {basis}")),
@@ -392,6 +423,31 @@ impl<'r> Dispatcher<'r, '_, '_> {
                 }
             }
         }
+    }
+
+    async fn classify(&mut self, name: &str, prepared: &Prepared) -> AbortResult<Assessment> {
+        let ctx = &mut *self.dispatch_ctx;
+        let result = self
+            .mailbox
+            .race(
+                ctx.classifier.classify(
+                    Action {
+                        name,
+                        input: &prepared.input,
+                        access: &prepared.access,
+                    },
+                    &ctx.workspace,
+                    &ctx.session,
+                    ctx.usage,
+                    self.sink,
+                ),
+                self.sink,
+            )
+            .await?;
+        Ok(result.unwrap_or_else(|error| Assessment {
+            decision: AssessmentDecision::Ask,
+            reason: format!("Automatic approval could not decide: {error:#}"),
+        }))
     }
 
     /// Adds the frontend's `rule` to the session allow rules once the call's own `grant` admits it,
@@ -460,16 +516,6 @@ fn unapproved_output(name: &str, basis: &Basis, fix: Option<&ConfigFix>) -> Tool
             "To allow it, ask the user to add {} in the user config.",
             allow_entry(rule)
         ),
-        (Some(ConfigFix::Disable { group, allow }), _) => {
-            let allow = allow
-                .as_ref()
-                .map(|rule| format!(" and add {}", allow_entry(rule)))
-                .unwrap_or_default();
-            format!(
-                "To allow it, ask the user to set `permission.defaults.{group} = false`{allow} \
-                 in the user config."
-            )
-        }
         (None, Basis::Mode(_)) => "To allow it, ask the user to add a pattern \
                                    for each of its commands under `permission.allow` \
                                    in the user config, \
@@ -535,7 +581,6 @@ mod tests {
 
     use super::*;
     use crate::engine::local_testing::{EchoTool, dispatch_with, inert_mailbox};
-    use crate::permission::defaults::Shipped;
     use crate::permission::testing::exec_grant;
     use crate::permission::{PermissionClass, Tier};
     use crate::protocol::OpSender;
@@ -1462,9 +1507,11 @@ mod tests {
                      and set a variable for one command in the prefix form `NAME=value cmd`.",
                 ),
                 (
-                    &Basis::Builtin(Shipped::Ssh),
+                    &Basis::Classifier {
+                        reason: "Authorization is unclear".to_owned(),
+                    },
                     None,
-                    "It needs approval because of the built-in `ssh` rule. \
+                    "It needs approval because of the automatic approval check: Authorization is unclear. \
                      Do not retry it as written. \
                      Choose a different approach or ask the user to adjust permissions.",
                 ),

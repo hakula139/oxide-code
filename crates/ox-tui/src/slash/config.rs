@@ -99,6 +99,16 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
             &sources.permission_mode,
         ),
         row(
+            "Auto Approval Model",
+            cfg.permission_auto.model.id().to_owned(),
+            &sources.permission_auto_model,
+        ),
+        row(
+            "Auto Approval Instructions",
+            join_or(&cfg.permission_auto.instructions, labels::NONE),
+            &sources.permission_auto_instructions,
+        ),
+        row(
             "Show Thinking",
             labels::on_off(cfg.show_thinking).to_owned(),
             &sources.show_thinking,
@@ -130,7 +140,6 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
     KvOverview::new("Configuration", sections)
 }
 
-/// The extra roots, rule patterns, and turned-off default groups the config files set.
 fn permission_rows(sources: &Provenance) -> Vec<(String, String, String)> {
     let roots = sources.extra_roots.iter().map(|root| {
         (
@@ -151,14 +160,7 @@ fn permission_rows(sources: &Provenance) -> Vec<(String, String, String)> {
             rule.source.to_string(),
         )
     });
-    let defaults = sources.disabled_defaults.iter().map(|group| {
-        (
-            format!("defaults.{}", group.value),
-            labels::on_off(false).to_owned(),
-            group.source.to_string(),
-        )
-    });
-    roots.chain(rules).chain(defaults).collect()
+    roots.chain(rules).collect()
 }
 
 /// `items` joined with commas, or `empty` when there are none.
@@ -206,7 +208,6 @@ mod tests {
     use ox_core::config::StatusLineSegment;
     use ox_core::config::provenance::Sourced;
     use ox_core::model::ModelSpec;
-    use ox_core::permission::defaults::Shipped;
     use ox_core::permission::{PermissionClass, Tier};
     use ox_core::util::path::testing::HOME_VAR;
 
@@ -257,10 +258,6 @@ mod tests {
                     pattern: "./secrets/**".to_owned(),
                 },
                 source: Source::File(project),
-            }];
-            sources.disabled_defaults = vec![Sourced {
-                value: Shipped::Git,
-                source: Source::File(user),
             }];
             let mut modal = build_modal(&info, None);
 

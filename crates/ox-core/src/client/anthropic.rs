@@ -1274,7 +1274,7 @@ mod tests {
                     effort: None,
                     output_format: None,
                 };
-                let (title, _) = client.complete(query).await.unwrap();
+                let title = client.complete(query).await.unwrap().text;
 
                 assert_eq!(stored["claudeAiOauth"]["accessToken"], "fresh-access");
                 assert_eq!(stored["claudeAiOauth"]["refreshToken"], "fresh-refresh");

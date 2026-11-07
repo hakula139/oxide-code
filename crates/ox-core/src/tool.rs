@@ -516,7 +516,6 @@ pub(crate) mod local_testing {
     use super::spill::run_capped;
     use super::{Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec};
     use crate::file_tracker::FileTracker;
-    use crate::permission::defaults::Shipped;
     use crate::permission::rule::Rule;
     use crate::permission::{Mode, PermissionClass, Policy, ReadFilter, Workspace};
 
@@ -570,16 +569,7 @@ pub(crate) mod local_testing {
             .map(|pattern| Rule::parse(PermissionClass::Read, pattern).unwrap())
             .collect();
         let workspace = Workspace::new(cwd);
-        Policy::resolve(
-            Mode::Manual,
-            deny,
-            Vec::new(),
-            Vec::new(),
-            Shipped::VARIANTS,
-            &workspace,
-        )
-        .unwrap()
-        .read_filter()
+        Policy::resolve(Mode::Manual, deny, Vec::new(), Vec::new(), &workspace).read_filter()
     }
 
     /// The root a search call in `cwd` that names `path` walks, resolved the way the search tools'
@@ -673,7 +663,6 @@ mod tests {
     use super::testing::bash_registry;
     use super::view::NumberedLine;
     use super::*;
-    use crate::permission::defaults::Shipped;
     use crate::permission::rule::Rule;
     use crate::permission::{Decision, Mode, PathTarget, PermissionClass, Policy, Zone};
     use crate::util::fs::testing::{symlink_dir, symlink_file};
@@ -764,10 +753,8 @@ mod tests {
                 deny.to_vec(),
                 Vec::new(),
                 Vec::new(),
-                Shipped::VARIANTS,
                 &Workspace::new(dir.path()),
-            )
-            .unwrap();
+            );
             let cases = [
                 ("read", serde_json::json!({"file_path": ".env"})),
                 ("grep", serde_json::json!({"pattern": ".", "path": ".env"})),

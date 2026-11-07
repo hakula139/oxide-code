@@ -4,7 +4,6 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::permission::defaults::Shipped;
 use crate::permission::{PermissionClass, Tier};
 
 // ── Layer ──
@@ -125,6 +124,8 @@ pub struct Provenance {
     pub prompt_cache_ttl: Source,
     pub compaction: Source,
     pub permission_mode: Source,
+    pub permission_auto_model: Source,
+    pub permission_auto_instructions: Source,
     pub show_thinking: Source,
     pub show_welcome: Source,
     pub status_line: Source,
@@ -135,8 +136,6 @@ pub struct Provenance {
     pub extra_roots: Vec<Sourced<String>>,
     /// The `deny`, `ask`, and `allow` patterns the config files add, grouped by tier and class.
     pub rules: Vec<Sourced<TierPattern>>,
-    /// The shipped rule groups that `[permission.defaults]` turns off.
-    pub disabled_defaults: Vec<Sourced<Shipped>>,
 }
 
 /// One pattern in a config file's `deny`, `ask`, or `allow` table.

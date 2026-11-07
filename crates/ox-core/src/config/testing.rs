@@ -38,6 +38,7 @@ pub(crate) fn test_config(url: impl AsRef<str>, auth: Auth, model: &str) -> Conf
         prompt_cache_ttl: PromptCacheTtl::OneHour,
         compaction: CompactionConfig::disabled(),
         permission: Policy::default(),
+        permission_auto: super::permission_auto::AutoPermissionConfig::default(),
         workspace: Workspace::new(Path::new("/repo")),
         show_thinking: false,
         show_welcome: true,

@@ -207,6 +207,8 @@ pub(super) async fn agent_turn(
             return TurnOutcome::stopped(report, TurnStop::Replied);
         }
 
+        dispatch_ctx.classifier.user_prompts =
+            super::classifier::user_prompts(transcript.messages());
         let mut round =
             dispatch::run_tool_round(tools, tool_uses, &parse_errors, sink, mailbox, dispatch_ctx)
                 .await;

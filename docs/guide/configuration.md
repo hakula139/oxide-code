@@ -8,7 +8,7 @@ oxide-code loads configuration from multiple sources, merged in order of increas
 4. **Project config file**: `.ox/config.toml` in the nearest directory from the working directory up to the project root that has one. The project root is the nearest directory at or above the working directory that holds a `.git` directory or file, or the working directory outside a repository.
 5. **[Environment variables](#environment-variables)**: override every file. A command-line flag such as `--mode` overrides them in turn.
 
-Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$OX_MODEL`, `--mode` for the permission mode set by that flag, or `session` after a `/model`, `/effort`, `/mode`, or `/theme` change or a **Tab** or **Shift+Tab** mode switch. [Permissions](permissions.md) covers the extra roots, rules, and turned-off default groups it also lists, each with the layer that added it.
+Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$OX_MODEL`, `--mode` for the permission mode set by that flag, or `session` after a `/model`, `/effort`, `/mode`, or `/theme` change or a **Tab** or **Shift+Tab** mode switch. [Permissions](permissions.md) covers the classifier settings, extra roots, and rules it also lists, each with the layer that added it.
 
 ## Layers
 
@@ -166,7 +166,7 @@ Segments with no data, such as a missing git branch, an unopened pull request, c
 | `session-cost`        | `Cost: $0.43` running USD estimate                            | Per turn        |
 | `five-hour-limit`     | `5h: 42%` of a subscription's five-hour usage limit           | Per request     |
 | `weekly-limit`        | `7d: 13%` of a subscription's weekly usage limit              | Per request     |
-| `permission-mode`     | `manual`, `plan`, or `yolo`                                   | On switch       |
+| `permission-mode`     | `auto`, `manual`, `plan`, or `yolo`                           | On switch       |
 | `run-state`           | `Ready` / spinner + label / **Ctrl+C** exit hint              | On state change |
 | `queued-prompts`      | `Queued: 2` while prompts wait for the running turn           | On change       |
 | `task-progress`       | `Tasks: 2/5` completed while the session keeps a task list    | On change       |
@@ -196,7 +196,7 @@ See [Theming](theming.md) for the full slot reference, color value formats (hex,
 
 ### `[permission]`: Tool Approval
 
-`[permission]` sets the permission mode, the deny, ask, and allow rules, the extra workspace roots, and which built-in rules apply. [Permissions](permissions.md) describes each key, the modes, the approval prompt, and the pattern grammar.
+`[permission]` sets the permission mode, the deny, ask, and allow rules, the extra workspace roots, and the classifier's model and instructions. [Permissions](permissions.md) describes each key, the modes, the approval prompt, and the pattern grammar.
 
 ## Logs
 
@@ -227,12 +227,13 @@ Each key goes in the table its prefix names, so `client.compaction.auto_enabled`
 | `client.model`                             | string  | `"claude-opus-5-5"`             | [Model](#model-supported-models) to use                                                                     |
 | `client.prompt_cache_ttl`                  | string  | `"1h"`                          | [Prompt-cache TTL](#prompt_cache_ttl-cache-duration), `"5m"` or `"1h"`                                      |
 | `client.structured_outputs`                | boolean | `true`                          | Allow [title JSON schemas](authentication.md#llm-gateways), user config only                                |
+| `permission.auto.model`                    | string  | `"claude-haiku-5-5"`            | Approval classifier model, user config only                                                                 |
+| `permission.auto.instructions`             | array   | `[]`                            | Natural-language approval instructions, user config only                                                    |
 | `permission.allow`                         | table   | empty                           | [Calls that run without asking](permissions.md#rule-tables), user config only                               |
 | `permission.ask`                           | table   | empty                           | [Calls that ask first](permissions.md#rule-tables), even when an allow pattern matches                      |
-| `permission.defaults`                      | table   | all on                          | [Built-in rules](permissions.md#built-in-rules) to turn off by name, user config only                       |
 | `permission.deny`                          | table   | empty                           | [Calls that never run](permissions.md#rule-tables), in every mode                                           |
-| `permission.extra_roots`                   | array   | `[]`                            | [More directories](permissions.md#workspace-roots) whose edits run without asking, user config only         |
-| `permission.mode`                          | string  | `"manual"`                      | [Permission mode](permissions.md#modes), `"manual"`, `"plan"`, or `"yolo"`, user config only                |
+| `permission.extra_roots`                   | array   | `[]`                            | [Additional rule anchors and classifier context](permissions.md#workspace-roots), user config only          |
+| `permission.mode`                          | string  | `"auto"`                        | [Permission mode](permissions.md#modes), `"auto"`, `"manual"`, `"plan"`, or `"yolo"`, user config only      |
 | `tui.show_thinking`                        | boolean | `false`                         | [Show extended thinking](#tui-terminal-ui)                                                                  |
 | `tui.show_welcome`                         | boolean | `true`                          | [Paint the welcome splash](#tui-terminal-ui) on an empty chat                                               |
 | `tui.status_line`                          | array   | see [`[tui]`](#tui-terminal-ui) | Ordered status-line segments                                                                                |

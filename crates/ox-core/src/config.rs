@@ -10,6 +10,7 @@ pub(crate) mod credentials;
 pub mod gateway;
 pub mod load;
 mod merge;
+pub mod permission_auto;
 pub mod provenance;
 mod schema;
 #[cfg(any(test, feature = "testing"))]
@@ -36,7 +37,6 @@ use self::schema::{ClientAuth, FileConfig, PermissionTable, ThemeTable, TuiTable
 use crate::auth::oauth::ClaudeCodeKeychain;
 use crate::auth::{self, AuthSource, LoginUnavailable};
 use crate::model::{Effort, ModelSettings, ModelSpec, PromptCacheTtl};
-use crate::permission::defaults::Shipped;
 use crate::permission::{Mode, Policy, Workspace};
 use crate::util::env;
 use crate::util::path::{expand_absolute, expand_user, project_root, tildify};
@@ -67,6 +67,7 @@ pub struct ConfigSnapshot {
     pub prompt_cache_ttl: PromptCacheTtl,
     pub compaction: CompactionConfig,
     pub permission_mode: Mode,
+    pub permission_auto: self::permission_auto::AutoPermissionConfig,
     pub show_thinking: bool,
     pub show_welcome: bool,
     pub status_line: Vec<StatusLineSegment>,
@@ -222,6 +223,7 @@ pub struct Config {
     pub(crate) prompt_cache_ttl: PromptCacheTtl,
     pub(crate) compaction: CompactionConfig,
     pub(crate) permission: Policy,
+    pub(crate) permission_auto: self::permission_auto::AutoPermissionConfig,
     /// The launch directory and the workspace roots the tools run in.
     pub(crate) workspace: Workspace,
     /// Whether adaptive thinking opts into summarized text. The request's `thinking` field derives
@@ -331,6 +333,8 @@ impl Config {
             prompt_cache_ttl: prompt_cache_ttl.source,
             compaction: compaction.source,
             permission_mode: permission.mode_source,
+            permission_auto_model: permission.auto_model_source,
+            permission_auto_instructions: permission.auto_instructions_source,
             show_thinking: tui.show_thinking.source,
             show_welcome: tui.show_welcome.source,
             status_line: tui.status_line.source,
@@ -338,7 +342,6 @@ impl Config {
             theme_overrides: tui.theme_overrides,
             extra_roots: permission.extra_roots,
             rules: permission.rules,
-            disabled_defaults: permission.disabled_defaults,
         };
 
         Ok(Self {
@@ -357,6 +360,7 @@ impl Config {
             prompt_cache_ttl: prompt_cache_ttl.value,
             compaction: compaction.value,
             permission: permission.policy,
+            permission_auto: permission.auto,
             workspace: permission.workspace,
             show_thinking: tui.show_thinking.value,
             show_welcome: tui.show_welcome.value,
@@ -439,6 +443,7 @@ impl Config {
             prompt_cache_ttl: self.prompt_cache_ttl,
             compaction: self.compaction,
             permission_mode: self.permission.mode(),
+            permission_auto: self.permission_auto.clone(),
             show_thinking: self.show_thinking,
             show_welcome: self.show_welcome,
             status_line: self.status_line.clone(),
@@ -651,7 +656,9 @@ struct ResolvedPermission {
     mode_source: Source,
     extra_roots: Vec<Sourced<String>>,
     rules: Vec<Sourced<TierPattern>>,
-    disabled_defaults: Vec<Sourced<Shipped>>,
+    auto: self::permission_auto::AutoPermissionConfig,
+    auto_model_source: Source,
+    auto_instructions_source: Source,
 }
 
 /// Resolves the permission policy and the workspace launched in `cwd` from the file config and
@@ -673,27 +680,24 @@ fn resolve_permission(
         .or_else(|| origins.sourced("permission.mode", file.mode))
         .unwrap_or_else(|| Sourced::fallback(Mode::default()));
 
-    let disabled_defaults: Vec<_> = file
-        .defaults
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|&(_, on)| !on)
-        .map(|(group, _)| {
-            Sourced::new(
-                group,
-                origins.source(&format!("permission.defaults.{group}")),
-            )
-        })
-        .collect();
-    let disabled: Vec<_> = disabled_defaults.iter().map(|group| group.value).collect();
-    let policy = Policy::resolve(mode.value, deny, ask, allow, &disabled, &workspace)?;
+    let auto_model = origins.sourced("permission.auto.model", file.auto.model);
+    let auto = self::permission_auto::AutoPermissionConfig {
+        model: auto_model.as_ref().map_or_else(
+            || self::permission_auto::AutoPermissionConfig::default().model,
+            |model| ModelSpec::resolve(&model.value),
+        ),
+        instructions: file.auto.instructions,
+    };
+    let policy = Policy::resolve(mode.value, deny, ask, allow, &workspace);
     Ok(ResolvedPermission {
         policy,
         workspace,
         mode_source: mode.source,
         extra_roots,
         rules,
-        disabled_defaults,
+        auto,
+        auto_model_source: auto_model.map_or(Source::Default, |model| model.source),
+        auto_instructions_source: origins.source("permission.auto.instructions"),
     })
 }
 
