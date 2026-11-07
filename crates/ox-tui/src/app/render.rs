@@ -683,7 +683,7 @@ mod tests {
         }
 
         #[test]
-        fn input_footer_names_manual_from_yolo() {
+        fn input_footer_names_auto_from_yolo() {
             let (mut app, _rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Op(Op::SetMode(Mode::Yolo)));
             app.chat.push_system_message("Chat stays visible");
@@ -693,7 +693,7 @@ mod tests {
             let rows = buffer_rows(backend.buffer());
             assert_eq!(
                 rows.last().unwrap().trim_end(),
-                "  Tab to manual · Enter to send · Shift+Enter to add a line · / to show commands",
+                "  Tab to auto · Enter to send · Shift+Enter to add a line · / to show commands",
             );
         }
 

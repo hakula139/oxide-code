@@ -99,12 +99,12 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
             &sources.permission_mode,
         ),
         row(
-            "Auto Approval Model",
+            "Auto Model",
             cfg.permission_auto.model.id().to_owned(),
             &sources.permission_auto_model,
         ),
         row(
-            "Auto Approval Instructions",
+            "Auto Instructions",
             join_or(&cfg.permission_auto.instructions, labels::NONE),
             &sources.permission_auto_instructions,
         ),

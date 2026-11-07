@@ -2609,6 +2609,9 @@ mod tests {
             assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Manual)));
 
             app.handle_crossterm_event(&key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
+            assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Auto)));
+
+            app.handle_crossterm_event(&key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
             assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Yolo)));
         }
     }

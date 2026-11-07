@@ -21,6 +21,8 @@ expression: "render_modal(&mut modal, 80, u16::MAX)"
     "Prompt Cache TTL    1h                           default",
     "Auto-Compaction     at 155000 tokens             default",
     "Permission Mode     manual                       default",
+    "Auto Model          claude-haiku-5-5             default",
+    "Auto Instructions   none                         default",
     "Show Thinking       off                          default",
     "Show Welcome        on                           default",
     "Status Line         current-dir, git-branch, pull-request,  default",
