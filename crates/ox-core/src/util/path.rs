@@ -102,15 +102,11 @@ pub fn expand_user(raw: &str) -> Result<PathBuf> {
     Ok(home.join(tail.trim_start_matches(std::path::is_separator)))
 }
 
-/// Expands `raw` like [`expand_user`] and requires an absolute path other than the home directory
-/// itself, so a configured path cannot depend on the working directory. Errors never quote `raw`,
-/// which may hold a pasted secret.
+/// Expands `raw` like [`expand_user`] and requires an absolute path, so a configured path cannot
+/// depend on the working directory. Errors never quote `raw`, which may hold a pasted secret.
 pub(crate) fn expand_absolute(raw: &str) -> Result<PathBuf> {
     let path = expand_user(raw)?;
-    ensure!(
-        path.is_absolute() && raw.trim_end_matches(std::path::is_separator) != "~",
-        "expected an absolute or `~/` path"
-    );
+    ensure!(path.is_absolute(), "expected an absolute or `~/` path");
     Ok(path)
 }
 
