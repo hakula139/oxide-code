@@ -4,7 +4,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::is_workspace;
+use super::resolve;
 
 /// Why a file a checkout supplies may not be read.
 #[derive(Debug, thiserror::Error)]
@@ -28,10 +28,24 @@ pub(crate) fn resolve_project_file(path: &Path, root: &Path) -> Result<PathBuf, 
     if !resolved.starts_with(&canonical_root) {
         return Err(ProjectFileError::Outside);
     }
-    if !is_workspace(&canonical_root) && passes_through_link(path, root) {
+    if contains_home(&canonical_root) && passes_through_link(path, root) {
         return Err(ProjectFileError::Linked);
     }
     Ok(resolved)
+}
+
+/// Includes filesystem aliases of home's ancestors, such as macOS firmlinks.
+fn contains_home(root: &Path) -> bool {
+    root.parent().is_none()
+        || std::env::home_dir().is_some_and(|home| {
+            let home = resolve(&home).unwrap_or(home);
+            home.starts_with(root)
+                || home.ancestors().any(|ancestor| {
+                    home.strip_prefix(ancestor).is_ok_and(|rest| {
+                        same_file::is_same_file(root.join(rest), &home).unwrap_or(false)
+                    })
+                })
+        })
 }
 
 /// Returns whether `path`, or a directory between it and `root`, is a symlink.
