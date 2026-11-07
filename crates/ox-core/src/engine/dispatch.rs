@@ -430,7 +430,7 @@ impl<'r> Dispatcher<'r, '_, '_> {
         let result = self
             .mailbox
             .race(
-                ctx.classifier.classify(
+                Box::pin(ctx.classifier.classify(
                     Action {
                         name,
                         input: &prepared.input,
@@ -440,7 +440,7 @@ impl<'r> Dispatcher<'r, '_, '_> {
                     &ctx.session,
                     ctx.usage,
                     self.sink,
-                ),
+                )),
                 self.sink,
             )
             .await?;
