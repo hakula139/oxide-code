@@ -579,7 +579,7 @@ impl<'r> Dispatcher<'r, '_, '_> {
         let reply = await_approval(id, self.mailbox, self.sink, settings).await?;
         if reply.source == ReplySource::Timeout {
             self.sink.emit(Event::Notice(format!(
-                "Permission prompt timed out: {}.",
+                "Permission prompt timed out: {}",
                 settings.on_timeout
             )));
         }

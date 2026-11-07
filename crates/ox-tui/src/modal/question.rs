@@ -73,17 +73,6 @@ impl QuestionModal {
             None,
         );
         lines.push(Line::default());
-        if let Some(deadline) = self.deadline {
-            lines.extend(wrap_line(
-                Line::from(Span::styled(
-                    format!("After {}s: {}.", deadline.timeout_seconds, deadline.action),
-                    dim,
-                )),
-                width,
-                0,
-                None,
-            ));
-        }
         let mut selected_row = lines.len();
         for (index, option) in self.question.options.iter().enumerate() {
             if index == self.selected {
@@ -118,7 +107,24 @@ impl QuestionModal {
         (lines, selected_row)
     }
 
-    fn footer_rows(width: u16, overflow: bool) -> Vec<String> {
+    fn footer_rows(&self, width: u16, overflow: bool) -> Vec<String> {
+        let width = usize::from(width).max(1);
+        let mut rows = self
+            .deadline
+            .into_iter()
+            .flat_map(|deadline| {
+                wrap_line(
+                    Line::from(format!(
+                        "After {}s: {}",
+                        deadline.timeout_seconds, deadline.action
+                    )),
+                    width,
+                    0,
+                    None,
+                )
+            })
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
         let mut hints = vec![
             "↑/↓ choose",
             "Tab type",
@@ -129,7 +135,8 @@ impl QuestionModal {
         if overflow {
             hints.push("PgUp/PgDn scroll");
         }
-        wrap_hints(&hints, usize::from(width).max(1))
+        rows.extend(wrap_hints(&hints, width));
+        rows
     }
 }
 
@@ -144,7 +151,7 @@ impl Modal for QuestionModal {
     }
 
     fn height(&mut self, width: u16, max_height: u16) -> u16 {
-        let rows = self.body(width, None).0.len() + 2 + Self::footer_rows(width, false).len();
+        let rows = self.body(width, None).0.len() + 2 + self.footer_rows(width, false).len();
         saturating_u16(rows).min(max_height)
     }
 
@@ -154,9 +161,9 @@ impl Modal for QuestionModal {
         lines.push(Line::from(Span::styled("Your answer:", theme.text())));
         let editor_row = lines.len();
         lines.push(self.editor.line(area.width, theme));
-        let mut footer = Self::footer_rows(area.width, false);
+        let mut footer = self.footer_rows(area.width, false);
         if lines.len() + footer.len() > usize::from(area.height) {
-            footer = Self::footer_rows(area.width, true);
+            footer = self.footer_rows(area.width, true);
         }
         let body_area = above(area, saturating_u16(footer.len()));
         let footer_area = Rect {

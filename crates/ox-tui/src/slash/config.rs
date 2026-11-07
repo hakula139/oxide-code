@@ -174,6 +174,7 @@ fn interaction_rows(info: &LiveSessionInfo) -> Vec<(String, String, String)> {
     .map(|(label, value, source)| (label.to_owned(), value, source.to_string()))
     .collect()
 }
+
 fn permission_rows(sources: &Provenance) -> Vec<(String, String, String)> {
     let roots = sources.extra_roots.iter().map(|root| {
         (

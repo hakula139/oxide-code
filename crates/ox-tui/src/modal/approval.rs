@@ -231,7 +231,7 @@ impl ApprovalModal {
             .map(|reason| Line::from(reveal(reason, palette.reason, palette.marker, false)));
         let deadline = self.deadline.map(|deadline| {
             Line::from(format!(
-                "After {}s: {}.",
+                "After {}s: {}",
                 deadline.timeout_seconds, deadline.action,
             ))
         });
