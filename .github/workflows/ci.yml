@@ -207,7 +207,9 @@ jobs:
               --paginate \
               --slurp |
               jq -r --argjson gate "$GATE_ID" '
-                [.[].jobs[]] | group_by(.name) | map(max_by(.run_attempt)) as $jobs
+                [.[].jobs[]]
+                | group_by(.name)
+                | map(max_by(.run_attempt)) as $jobs
                 | first($jobs[] | select(.id == $gate))
                   // error("job \($gate) is missing from this workflow run")
                 # Jobs of a calling workflow share this run, so check only names with this prefix.
