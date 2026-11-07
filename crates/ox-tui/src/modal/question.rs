@@ -285,6 +285,9 @@ impl Modal for QuestionModal {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
+    use ox_core::protocol::PromptTimeoutAction;
     use ox_core::tool::ask::QuestionOption;
 
     use super::*;
@@ -327,45 +330,77 @@ mod tests {
 
         #[test]
         fn a_short_narrow_view_keeps_wrapped_controls_visible_while_the_question_scrolls() {
-            let mut modal = modal();
-            modal.question.question = "Review the output before choosing a color. ".repeat(8);
-            modal.question.options = (0..12)
-                .map(|index| QuestionOption {
-                    label: format!("Choice {index}"),
-                    description: Some("Consider the generated output carefully. ".repeat(4)),
-                })
-                .collect();
-            modal.selected = 0;
-            let before = render_rows(&mut modal, 30, 12);
-            modal.acceptance.expire();
+            for timeout_seconds in [None, NonZeroU32::new(120)] {
+                let deadline = timeout_seconds.map(|timeout_seconds| PromptDeadline {
+                    timeout_seconds,
+                    action: PromptTimeoutAction::Recommended,
+                });
+                let mut modal = modal().with_deadline(deadline);
+                modal.question.question = "Review the output before choosing a color. ".repeat(8);
+                modal.question.options = (0..12)
+                    .map(|index| QuestionOption {
+                        label: format!("Choice {index}"),
+                        description: Some("Consider the generated output carefully. ".repeat(4)),
+                    })
+                    .collect();
+                let before = render_rows(&mut modal, 30, 12);
+                modal.acceptance.expire();
 
-            assert!(matches!(
-                modal.handle_key(&KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
-                ModalKey::Consumed
-            ));
-            let after = render_rows(&mut modal, 30, 12);
+                assert!(matches!(
+                    modal.handle_key(&KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
+                    ModalKey::Consumed
+                ));
+                let after_page = render_rows(&mut modal, 30, 12);
+                modal.acceptance.expire();
 
-            for rows in [&before, &after] {
-                for hint in [
-                    "↑/↓ choose",
-                    "Tab type",
-                    "Enter answer",
-                    "Ctrl+S skip",
-                    "Esc abort",
-                    "PgUp/PgDn scroll",
-                ] {
-                    assert!(
-                        rows.iter().any(|row| row.contains(hint)),
-                        "missing {hint}: {rows:?}"
-                    );
+                assert!(matches!(
+                    modal.handle_key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                    ModalKey::Consumed
+                ));
+                let after_tab = render_rows(&mut modal, 30, 12);
+
+                for rows in [&before, &after_page, &after_tab] {
+                    for hint in [
+                        "↑/↓ choose",
+                        "Tab type",
+                        "Enter answer",
+                        "Ctrl+S skip",
+                        "Esc abort",
+                        "PgUp/PgDn scroll",
+                    ] {
+                        assert!(
+                            rows.iter().any(|row| row.contains(hint)),
+                            "missing {hint}: {rows:?}"
+                        );
+                    }
+                    if let Some(deadline) = deadline {
+                        let policy =
+                            format!("After {}s: {}", deadline.timeout_seconds, deadline.action);
+                        let visible = rows
+                            .iter()
+                            .map(|row| row.trim())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        assert!(visible.contains(&policy), "missing {policy}: {rows:?}");
+                    }
                 }
+                let footer_start = if deadline.is_some() {
+                    "After 120s:"
+                } else {
+                    "↑/↓ choose"
+                };
+                let footer = before
+                    .iter()
+                    .position(|row| row.contains(footer_start))
+                    .unwrap();
+                assert_eq!(&before[footer..], &after_page[footer..]);
+                assert_eq!(&before[footer..], &after_tab[footer..]);
+                assert_ne!(&before[..footer], &after_page[..footer]);
+                assert!(
+                    after_tab.iter().any(|row| row.contains("Your answer:")),
+                    "{after_tab:?}"
+                );
             }
-            let footer = before
-                .iter()
-                .position(|row| row.contains("↑/↓ choose"))
-                .unwrap();
-            assert_eq!(&before[footer..], &after[footer..]);
-            assert_ne!(&before[..footer], &after[..footer]);
         }
     }
 

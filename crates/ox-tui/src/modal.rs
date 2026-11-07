@@ -633,8 +633,8 @@ mod tests {
             );
 
             for (mut modal, hint) in [
-                (question, "After 3s: use the recommended answer, or skip."),
-                (approval, "After 3s: deny the call."),
+                (question, "After 3s: use the recommended answer, or skip"),
+                (approval, "After 3s: deny the call"),
             ] {
                 let rows = render_rows(&mut *modal, 70, 15);
                 assert!(rows.iter().any(|row| row.contains(hint)), "{rows:?}");
