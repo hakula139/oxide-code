@@ -261,6 +261,70 @@ mod permission_gate {
         }
     }
 
+    async fn assert_gate_case(
+        name: &str,
+        response: ResponseTemplate,
+        decision: ApprovalDecision,
+        attended: bool,
+        expected_runs: usize,
+        expected_asks: usize,
+    ) {
+        let server = MockServer::start().await;
+        mount_classifier(&server, response).await;
+        mount_tool_turn(&server).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut engine =
+            engine(server.uri(), &store, dir.path())
+                .await
+                .with_tools(ToolRegistry::new(vec![Box::new(ProbeTool(Arc::clone(
+                    &runs,
+                )))]));
+        engine.policy.set_mode(Mode::Auto);
+        if !attended {
+            engine = engine.unattended();
+        }
+        let mut handle = engine.spawn();
+
+        handle
+            .ops
+            .submit(Op::prompt("Run the probe."))
+            .await
+            .unwrap();
+        let events = resolve_turn(&mut handle, decision).await;
+
+        assert!(
+            matches!(
+                events.last(),
+                Some(Event::OpEnded {
+                    end: OpEnd::Completed,
+                    ..
+                })
+            ),
+            "{name}: {events:?}"
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), expected_runs, "{name}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::ApprovalRequested { .. }))
+                .count(),
+            expected_asks,
+            "{name}"
+        );
+        let requests = request_bodies(&server).await;
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request["model"] == HAIKU)
+                .count(),
+            1,
+            "{name}"
+        );
+        assert_eq!(handle.shutdown().await.unwrap(), None, "{name}");
+    }
+
     #[tokio::test]
     async fn allows_or_requests_user_approval_and_keeps_failed_classification_unapproved() {
         with_pinned_home(async {
@@ -330,60 +394,15 @@ mod permission_gate {
                     0,
                 ),
             ] {
-                let server = MockServer::start().await;
-                mount_classifier(&server, response).await;
-                mount_tool_turn(&server).await;
-                let dir = tempfile::tempdir().unwrap();
-                let store = test_store(dir.path());
-                let runs = Arc::new(AtomicUsize::new(0));
-                let mut engine =
-                    engine(server.uri(), &store, dir.path())
-                        .await
-                        .with_tools(ToolRegistry::new(vec![Box::new(ProbeTool(Arc::clone(
-                            &runs,
-                        )))]));
-                engine.policy.set_mode(Mode::Auto);
-                if !attended {
-                    engine = engine.unattended();
-                }
-                let mut handle = engine.spawn();
-
-                handle
-                    .ops
-                    .submit(Op::prompt("Run the probe."))
-                    .await
-                    .unwrap();
-                let events = resolve_turn(&mut handle, decision).await;
-
-                assert!(
-                    matches!(
-                        events.last(),
-                        Some(Event::OpEnded {
-                            end: OpEnd::Completed,
-                            ..
-                        })
-                    ),
-                    "{name}: {events:?}"
-                );
-                assert_eq!(runs.load(Ordering::SeqCst), expected_runs, "{name}");
-                assert_eq!(
-                    events
-                        .iter()
-                        .filter(|event| matches!(event, Event::ApprovalRequested { .. }))
-                        .count(),
+                assert_gate_case(
+                    name,
+                    response,
+                    decision,
+                    attended,
+                    expected_runs,
                     expected_asks,
-                    "{name}"
-                );
-                let requests = request_bodies(&server).await;
-                assert_eq!(
-                    requests
-                        .iter()
-                        .filter(|request| request["model"] == HAIKU)
-                        .count(),
-                    1,
-                    "{name}"
-                );
-                assert_eq!(handle.shutdown().await.unwrap(), None, "{name}");
+                )
+                .await;
             }
         })
         .await;
