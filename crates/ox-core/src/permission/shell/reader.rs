@@ -368,6 +368,7 @@ pub(super) fn reader_operands(name: &str, args: &[Word], cwd: &Path) -> (Vec<Ope
     let mut groups = Vec::new();
     for (index, word) in args.iter().enumerate() {
         if let Some(pattern) = word.value.as_deref().filter(|_| word.glob) {
+            anything |= pattern.contains('{');
             match expand_glob(pattern, cwd) {
                 Some(matches) if !matches.is_empty() => {
                     if matches.len() > 1 {
@@ -491,8 +492,8 @@ pub(super) struct ReaderArgs {
     pub(super) script: ScriptArgs,
     /// Words that supply an option's value in any supported argument order or build.
     option_values: Vec<usize>,
-    /// Whether it may read a file the arguments do not name: a word expands, or an option names a
-    /// file that lists the files to read.
+    /// Whether it may read a file the arguments do not name: a word expands, a recursive reader
+    /// follows child symlinks, or an option names a file that lists the files to read.
     unknown: bool,
 }
 
@@ -571,15 +572,18 @@ impl ReaderArgs {
 /// The gate cannot tell whether a GNU or a BSD build of `name` runs, or whether getopt stops
 /// reading options at the first operand, as BSD and `POSIXLY_CORRECT` make it, so it counts each
 /// file any of them would read as one it reads. A word that expands may split into any words, so
-/// it leaves what the reader reads unknown wherever it stands, as does `find -files0-from`, which
-/// reads the paths to search from a file.
+/// it leaves what the reader reads unknown wherever it stands, as do `find -files0-from`, which
+/// reads the paths to search from a file, and recursive traversal that follows child symlinks.
 pub(super) fn reader_args(name: &str, values: &[Option<&str>]) -> ReaderArgs {
     let grammar = reader_grammar(name);
     let mut args = ReaderArgs {
         fixed_values: (0..values.len()).collect(),
         operands: (0..values.len()).collect(),
         unknown: values.iter().any(Option::is_none)
-            || name == "find" && values.contains(&Some("-files0-from")),
+            || name == "find"
+                && values
+                    .iter()
+                    .any(|value| matches!(value, Some("-files0-from" | "-follow"))),
         ..ReaderArgs::default()
     };
     let orders: &[bool] = if grammar.getopt {
@@ -671,11 +675,13 @@ impl ReaderGrammar {
         let mut operands = Vec::new();
         let mut pattern_given = false;
         let mut recursive = self.operands == OperandKind::Find;
+        let mut follows_tree_links = false;
         let mut take = |args: &mut ReaderArgs, role: Role, index: usize, value: Option<&str>| {
             pattern_given |= matches!(role, Role::Pattern | Role::PatternFile);
             args.script.from_file |= matches!(role, Role::PatternFile);
             args.script.in_place |= matches!(role, Role::InPlace);
             args.script.follows_links |= matches!(role, Role::FollowsLinks);
+            follows_tree_links |= matches!(role, Role::TreeLinks | Role::RecursiveLinks);
             if matches!(role, Role::InPlace)
                 && value != Some("")
                 && (value.is_some() || values[index].is_none())
@@ -762,7 +768,10 @@ impl ReaderGrammar {
             }
         }
         let leading_pattern = self.pattern && !pattern_given && !unplaced;
-        self.place_operands(args, dialect, values, &operands, leading_pattern, recursive)
+        let mut args =
+            self.place_operands(args, dialect, values, &operands, leading_pattern, recursive);
+        args.unknown |= recursive && follows_tree_links;
+        args
     }
 
     /// Completes `args` with the `operands` [`Self::read`] found among `values`, the first of them
@@ -966,7 +975,7 @@ const FIND_GRAMMAR: ReaderGrammar = ReaderGrammar {
         takes("-D"),
         switch("-E"),
         switch("-H"),
-        switch("-L"),
+        switch("-L").with(Role::TreeLinks),
         takes("-O"),
         switch("-P"),
         switch("-X"),
@@ -991,7 +1000,8 @@ const GREP_GRAMMAR: ReaderGrammar = ReaderGrammar {
         takes("-f").with(Role::PatternFile),
         takes("-m"),
         switch("-r").with(Role::Recursive),
-        switch("-R").with(Role::Recursive),
+        switch("-R").with(Role::RecursiveLinks),
+        switch("-S").with(Role::TreeLinks),
         takes("--after-context"),
         takes("--before-context"),
         takes("--binary-files"),
@@ -1000,7 +1010,7 @@ const GREP_GRAMMAR: ReaderGrammar = ReaderGrammar {
         attached("--colour"),
         takes("--context").bsd(Value::Optional),
         takes("--devices"),
-        switch("--dereference-recursive").with(Role::Recursive),
+        switch("--dereference-recursive").with(Role::RecursiveLinks),
         takes("--directories").with(Role::Directories),
         takes("--exclude"),
         takes("--exclude-dir"),
@@ -1029,11 +1039,13 @@ const LS_GRAMMAR: ReaderGrammar = ReaderGrammar {
     options: &[
         takes("-D").bsd_only(),
         takes("-I").gnu_only(),
+        switch("-L").with(Role::TreeLinks),
         switch("-R").with(Role::Recursive),
         takes("-T").gnu_only(),
         takes("-w").gnu_only(),
         takes("--block-size"),
         attached("--color"),
+        switch("--dereference").with(Role::TreeLinks),
         takes("--format"),
         takes("--hide"),
         attached("--hyperlink"),
@@ -1218,8 +1230,12 @@ enum Role {
     FollowsLinks,
     /// A directory supplied through a `find -f` option.
     Directory,
+    /// A flag that follows child symlinks during recursive traversal.
+    TreeLinks,
     /// A flag that recursively traverses directory operands.
     Recursive,
+    /// A flag that recursively traverses directory operands and follows child symlinks.
+    RecursiveLinks,
     /// A value selecting whether `grep` traverses directories.
     Directories,
 }
@@ -1227,7 +1243,7 @@ enum Role {
 impl Role {
     fn recurses(self, value: Option<&str>) -> bool {
         match self {
-            Self::Recursive => true,
+            Self::Recursive | Self::RecursiveLinks => true,
             Self::Directories => {
                 value.is_some_and(|value| !value.is_empty() && "recurse".starts_with(value))
             }

@@ -4684,6 +4684,133 @@ mod tests {
                 (verdict.decision, verdict.basis)
             }
 
+            fn assert_reader_decisions(cwd: &Path, commands: &[(&str, bool)]) {
+                let workspace = Workspace::new(cwd);
+                for (tier, deny, ask) in [
+                    (Some(Tier::Deny), &[(READ, "./vault/key")][..], &[][..]),
+                    (Some(Tier::Ask), &[][..], &[(READ, "./vault/key")][..]),
+                    (None, &[][..], &[][..]),
+                ] {
+                    for mode in [Mode::Manual, Mode::Yolo] {
+                        for attended in [true, false] {
+                            let mut p = resolved_policy(
+                                mode,
+                                deny,
+                                ask,
+                                &[(EXEC, "grep *"), (EXEC, "find *"), (EXEC, "ls *")],
+                                &[Shipped::Ssh, Shipped::Credentials],
+                                &workspace,
+                            );
+                            if !attended {
+                                p.set_unattended();
+                            }
+                            for &(command, possible) in commands {
+                                let expected = if possible && tier.is_some() && mode == Mode::Manual
+                                {
+                                    if attended {
+                                        Decision::Ask
+                                    } else {
+                                        Decision::Unapproved
+                                    }
+                                } else {
+                                    Decision::Allow
+                                };
+                                let access = Access::for_command(command, &workspace);
+
+                                let actual = p.verdict(EXEC, &access);
+
+                                assert_eq!(
+                                    actual.decision, expected,
+                                    "{tier:?}, {mode:?}, attended={attended}: {command}"
+                                );
+                                if expected != Decision::Allow {
+                                    assert_eq!(
+                                        actual.basis,
+                                        rule_basis(tier.unwrap(), READ, "./vault/key"),
+                                        "{command}"
+                                    );
+                                }
+                            }
+                            let expected = match tier {
+                                Some(Tier::Deny) => Decision::Deny,
+                                Some(Tier::Ask) if attended => Decision::Ask,
+                                Some(Tier::Ask) => Decision::Unapproved,
+                                _ => Decision::Allow,
+                            };
+
+                            for command in [
+                                "grep needle vault/key",
+                                "grep {-r,-n} needle vault/key",
+                                "grep -R needle vault/key",
+                            ] {
+                                let actual = decide_command(&p, command, &workspace);
+
+                                assert_eq!(
+                                    actual, expected,
+                                    "{tier:?}, {mode:?}, attended={attended}: {command}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            #[test]
+            fn brace_options_hold_possible_reads_without_matching_option_filenames() {
+                let dir = canonical_tempdir();
+                let cwd = dir.path();
+                for file in ["vault/key", "src/file"] {
+                    let path = cwd.join(file);
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, "needle").unwrap();
+                }
+
+                temp_env::with_var(HOME_VAR, Some(cwd), || {
+                    assert_reader_decisions(
+                        cwd,
+                        &[
+                            ("grep {-r,-n} needle vault", true),
+                            ("grep --{recursive,line-number} needle vault", true),
+                            ("grep -r -n needle vault", true),
+                            ("grep -r needle src", false),
+                        ],
+                    );
+                });
+            }
+
+            #[test]
+            fn recursive_readers_that_follow_child_links_hold_possible_reads() {
+                let dir = canonical_tempdir();
+                let cwd = dir.path();
+                for file in ["vault/key", "src/file"] {
+                    let path = cwd.join(file);
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, "needle").unwrap();
+                }
+                symlink_dir(Path::new("../vault"), &cwd.join("src/link"));
+
+                temp_env::with_var(HOME_VAR, Some(cwd), || {
+                    assert_reader_decisions(
+                        cwd,
+                        &[
+                            ("grep -R needle src", true),
+                            ("grep -RS needle src", true),
+                            ("grep -rS needle src", true),
+                            ("grep --dereference-recursive needle src", true),
+                            ("find -L src -type f -print", true),
+                            ("find src -follow -type f -print", true),
+                            ("ls -RL src", true),
+                            ("ls --recursive --dereference src", true),
+                            ("grep -r needle src", false),
+                            ("grep -S needle src", false),
+                            ("find src -type f -print", false),
+                            ("ls -R src", false),
+                            ("ls -L src", false),
+                        ],
+                    );
+                });
+            }
+
             #[test]
             fn recursive_readers_ask_for_shipped_descendants_outside_yolo() {
                 let dir = canonical_tempdir();
