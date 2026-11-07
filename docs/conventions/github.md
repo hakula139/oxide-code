@@ -16,7 +16,7 @@ Conventions for commits, branches, pull requests, and issues.
 - Fill in `.github/pull_request_template.md`. Start the Summary with prose describing the problem and resulting behavior, then cover each part of the change in a bullet with a bold label. In the Test plan, list the checks actually run and note any verification limits.
 - Add `Closes #N` for each resolved issue.
 - Do not request a review from the PR author because GitHub rejects the request.
-- Maintainers with triage access assign the PR to `hakula139`, set its milestone to match the issue it closes, and add one type label plus the `area:` labels for the areas it changes:
+- Maintainers with triage access assign the PR to `hakula139`, set its milestone to the linked issue's milestone or the planned delivery batch when no issue is linked, and add one type label plus the `area:` labels for the areas it changes:
 
 | Commit type               | Label                            |
 | ------------------------- | -------------------------------- |
@@ -47,4 +47,4 @@ Conventions for commits, branches, pull requests, and issues.
 - Close out-of-scope requests as not planned, pointing to the Scope section of `README.md`.
 - Close an issue as completed when its PR merges, and tick each acceptance criterion the merged work satisfies. Leave an unmet criterion unchecked, and track it in a follow-up issue.
 - Before starting new feature work, audit open issues and their epics for unmet acceptance criteria and unfinished sub-issues, and resolve those first.
-- The `v0.1.0` milestone includes all work that must land before the first stable release. Add an issue when it concerns a bug in shipped behavior or the maintainer accepts it into the release. Otherwise, leave it out of any milestone.
+- Assign issues accepted for a planned delivery batch to that release's milestone, including prereleases. Keep work required for the first stable release in `v0.1.0` until it joins an earlier delivery batch. Leave unplanned work without a milestone.

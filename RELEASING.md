@@ -8,10 +8,11 @@ To restore a published tag's cache pin, run `gh workflow run nix-cache.yml -f ta
 
 ## Versioning
 
-- **Through 0.1.0:** tag `v0.1.0-alpha.N` from `main` whenever a user-visible batch or a fix for shipped behavior lands. Once only the release gates remain open in the [`v0.1.0` milestone](https://github.com/hakula139/oxide-code/milestone/1), tag `v0.1.0-rc.1`. There is no beta stage.
+- **Through 0.1.0:** tag `v0.1.0-alpha.N` from `main` whenever a user-visible batch or a fix for shipped behavior lands. Once the [rc gates](#stable-gates-for-010) are met, tag `v0.1.0-rc.1`. There is no beta stage.
 - **Soak:** each rc starts a seven-day soak. A bug found during the soak joins the milestone, its fix ships in the next rc, and the soak restarts. Once a soak ends without a new bug, tag `main` as `v0.1.0`.
 - **Main during a soak:** merge only `fix`, `docs`, `test`, and `chore(release)` PRs. Feature and refactor PRs wait for the stable tag, so the stable commit matches the soaked rc plus its fixes. Renovate automerges dependency bumps, so set `"enabled": false` in `.github/renovate.json` when the soak starts and revert it after the stable tag, both through `ci(renovate)` PRs.
-- **After 0.1.0:** a breaking change to the [stability surface](#stability-surface) bumps the minor version, and every other change bumps the patch version. Give a stable version a milestone (`v0.2.0`) once its scope is planned. Patch releases and prereleases get no milestone, and prereleases of the next minor (`v0.2.0-alpha.N`) follow the rules above.
+- **After 0.1.0:** a breaking change to the [stability surface](#stability-surface) bumps the minor version, and every other change bumps the patch version. Prereleases of the next minor (`v0.2.0-alpha.N`) follow the rules above.
+- **Milestones:** each planned release batch, including a patch release or prerelease, has its own milestone, such as `v0.2.0` or `v0.2.0-alpha.1`.
 - **Breaking changes:** a PR that breaks the stability surface marks its title with [`!`](docs/conventions/github.md#commits-and-branches) both before and after 0.1.0. Before 0.1.0, the version still advances within the prerelease sequence.
 - **MSRV:** the CI MSRV job checks `rust-version`. A bump affects `cargo install` users and Nix source builds, so it ships as a normal change that names the new floor in its PR title. The Nix jobs fail when the floor passes the Rust release of the flake's nixpkgs.
 
@@ -150,7 +151,7 @@ Either way, the new run updates the open formula PR with the new checksums, or o
 
 Before tagging `v0.1.0-rc.1`:
 
-- The [`v0.1.0` milestone](https://github.com/hakula139/oxide-code/milestone/1) holds no open issue except the release work for these gates.
+- All planned prerelease work is complete, and the [`v0.1.0` milestone](https://github.com/hakula139/oxide-code/milestone/1) holds no open issue except the release work for these gates.
 - CI on `main` passes the full test suite on Linux, macOS, and Windows ([#127](https://github.com/hakula139/oxide-code/issues/127)).
 - Each auth mode works live in a TUI turn that calls a tool, a `-p` run, and a `--no-tui` run: Claude Code OAuth login, a long-lived OAuth token ([#121](https://github.com/hakula139/oxide-code/issues/121)), an API key, and a gateway with a bearer token and custom headers ([#122](https://github.com/hakula139/oxide-code/issues/122)). Every Claude 5.5 model answers at least one turn. Record the matrix in the rc PR's Test plan.
 - The persisted formats are documented: the session store and export in [`docs/design/persistence.md`](docs/design/persistence.md), config keys in [`docs/guide/configuration.md`](docs/guide/configuration.md) and [`docs/guide/permissions.md`](docs/guide/permissions.md), and the theme TOML in [`docs/guide/theming.md`](docs/guide/theming.md).
