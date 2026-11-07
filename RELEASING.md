@@ -9,7 +9,7 @@ To restore a published tag's cache pin, run `gh workflow run nix-cache.yml -f ta
 ## Versioning
 
 - **Through 0.1.0:** tag `v0.1.0-alpha.N` from `main` whenever a user-visible batch or a fix for shipped behavior lands. Once the [rc gates](#stable-gates-for-010) are met, tag `v0.1.0-rc.1`. There is no beta stage.
-- **Soak:** each rc starts a seven-day soak. A bug found during the soak joins the milestone, its fix ships in the next rc, and the soak restarts. Once a soak ends without a new bug, tag `main` as `v0.1.0`.
+- **Soak:** each rc starts a seven-day soak. A bug found during the soak joins the next rc's milestone, its fix ships in the next rc, and the soak restarts. Once a soak ends without a new bug, tag `main` as `v0.1.0`.
 - **Main during a soak:** merge only `fix`, `docs`, `test`, and `chore(release)` PRs. Feature and refactor PRs wait for the stable tag, so the stable commit matches the soaked rc plus its fixes. Renovate automerges dependency bumps, so set `"enabled": false` in `.github/renovate.json` when the soak starts and revert it after the stable tag, both through `ci(renovate)` PRs.
 - **After 0.1.0:** a breaking change to the [stability surface](#stability-surface) bumps the minor version, and every other change bumps the patch version. Prereleases of the next minor (`v0.2.0-alpha.N`) follow the rules above.
 - **Milestones:** each planned release batch, including a patch release or prerelease, has its own milestone, such as `v0.2.0` or `v0.2.0-alpha.1`.
