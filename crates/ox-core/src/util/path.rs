@@ -400,21 +400,25 @@ mod tests {
             let home = std::env::temp_dir();
             let absolute = home.join("ca.pem");
             temp_env::with_var(HOME_VAR, Some(&home), || {
-                for raw in [absolute.to_str().unwrap(), "~/ca.pem"] {
-                    assert_eq!(expand_absolute(raw).unwrap(), absolute, "{raw:?}");
+                for (raw, expected) in [
+                    (absolute.to_str().unwrap(), absolute.as_path()),
+                    ("~/ca.pem", absolute.as_path()),
+                    (home.to_str().unwrap(), home.as_path()),
+                    ("~", home.as_path()),
+                    ("~/", home.as_path()),
+                ] {
+                    assert_eq!(expand_absolute(raw).unwrap(), expected, "{raw:?}");
                 }
             });
         }
 
         #[test]
-        fn rejects_a_relative_path_or_the_bare_home_directory_without_quoting_it() {
+        fn rejects_a_relative_path_without_quoting_it() {
             let home = std::env::temp_dir();
             let home = home.to_str().unwrap();
             for (home, raw) in [
                 (home, "certs/ca.pem"),
                 (home, "~alice/ca.pem"),
-                (home, "~"),
-                (home, "~/"),
                 ("relative-home", "~/ca.pem"),
             ] {
                 let err =
