@@ -26,7 +26,9 @@ use crate::protocol::{ApprovalDecision, Event, Op, OpEnd};
 use crate::session::handle;
 use crate::session::store::UsageRecord;
 use crate::session::store::testing::test_store;
+use crate::tool::ask::{AskTool, QuestionAnswer};
 use crate::tool::tasks::TasksTool;
+use crate::tool::testing::bash_registry;
 use crate::tool::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolRegistry, ToolSpec};
 
 const HAIKU: &str = "claude-haiku-5-5";
@@ -240,6 +242,33 @@ mod classify {
 
 mod permission_gate {
     use super::*;
+
+    async fn mount_question_and_bash_turn(server: &MockServer) {
+        let frames = [
+            json!({"type": "message_start", "message": {"id": "msg_1", "model": MODEL, "usage": {"input_tokens": 1_000, "output_tokens": 0}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "question-1", "name": "ask"}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": r#"{"question":"Choose a color."}"#}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "bash-1", "name": "bash"}}),
+            json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": r#"{"command":"printf requested"}"#}}),
+            json!({"type": "content_block_stop", "index": 1}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 100}}),
+            json!({"type": "message_stop"}),
+        ];
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(body_partial_json(json!({"model": MODEL, "stream": true})))
+            .respond_with(sse_response(sse_body(&frames)))
+            .up_to_n_times(1)
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(body_partial_json(json!({"model": MODEL, "stream": true})))
+            .respond_with(sse_response(text_stream_body("", "done")))
+            .mount(server)
+            .await;
+    }
 
     async fn resolve_turn(handle: &mut EngineHandle, decision: ApprovalDecision) -> Vec<Event> {
         let mut events = Vec::new();
@@ -572,6 +601,105 @@ mod permission_gate {
                 );
             }
             assert_eq!(handle.shutdown().await.unwrap(), None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn only_entered_answers_reach_the_classifier_for_a_later_call_in_the_same_round() {
+        with_pinned_home(async {
+            for answer in [
+                QuestionAnswer::Answered("  Blue\nKeep this spacing.  ".to_owned()),
+                QuestionAnswer::Answered(String::new()),
+                QuestionAnswer::Skipped,
+                QuestionAnswer::Aborted,
+            ] {
+                let server = MockServer::start().await;
+                mount_classifier(
+                    &server,
+                    classifier_reply(r#"{"decision":"allow","reason":"Requested"}"#),
+                )
+                .await;
+                mount_question_and_bash_turn(&server).await;
+                let dir = tempfile::tempdir().unwrap();
+                let store = test_store(dir.path());
+                let mut engine = engine(server.uri(), &store, dir.path())
+                    .await
+                    .with_tools(bash_registry(vec![Box::new(AskTool)]));
+                engine.policy.set_mode(Mode::Auto);
+                let mut handle = engine.spawn();
+                handle
+                    .ops
+                    .submit(Op::prompt("Ask, then run the command."))
+                    .await
+                    .unwrap();
+                let mut saw_question = false;
+                let mut bash_result = None;
+
+                loop {
+                    let event = handle.events.recv().await.expect("the turn finishes");
+                    match event {
+                        Event::QuestionAsked { id, .. } => {
+                            assert_eq!(id, "question-1");
+                            saw_question = true;
+                            handle
+                                .ops
+                                .submit(Op::AnswerQuestion {
+                                    id,
+                                    answer: answer.clone(),
+                                })
+                                .await
+                                .unwrap();
+                        }
+                        Event::ApprovalRequested { .. } => {
+                            panic!("the classifier allowed the call")
+                        }
+                        Event::ToolCallEnd(result) if result.id == "bash-1" => {
+                            bash_result = Some((result.content, result.is_error));
+                        }
+                        Event::OpEnded { end, .. } => {
+                            assert_eq!(end, OpEnd::Completed, "{answer:?}");
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+
+                assert!(saw_question, "{answer:?}");
+                assert_eq!(
+                    bash_result,
+                    Some(("requested".to_owned(), false)),
+                    "{answer:?}"
+                );
+                let requests = request_bodies(&server).await;
+                let classifiers: Vec<_> = requests
+                    .iter()
+                    .filter(|request| request["stream"] == false)
+                    .collect();
+                let [classifier] = classifiers.as_slice() else {
+                    panic!("one Bash classification: {requests:?}");
+                };
+                let action: serde_json::Value = serde_json::from_str(
+                    classifier["messages"][0]["content"][0]["text"]
+                        .as_str()
+                        .unwrap(),
+                )
+                .unwrap();
+                let mut expected = vec!["Ask, then run the command.".to_owned()];
+                if let QuestionAnswer::Answered(text) = &answer {
+                    expected.push(formatdoc! {"
+                        For the question:
+                        Choose a color.
+
+                        The user answered:
+                        {text}"
+                    });
+                }
+                assert_eq!(action["tool"], "bash");
+                assert_eq!(action["input"], json!({"command": "printf requested"}));
+                assert_eq!(action["user_prompts"], json!(expected), "{answer:?}");
+                assert_eq!(handle.shutdown().await.unwrap(), None);
+            }
         })
         .await;
     }
