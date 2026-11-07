@@ -328,6 +328,10 @@ impl<'r> Dispatcher<'r, '_, '_> {
     }
 
     async fn answer_question(&mut self, request: QuestionRequest) -> AbortResult<()> {
+        if !self.dispatch_ctx.policy.attended() {
+            _ = request.reply.send(QuestionAnswer::Aborted);
+            return Ok(());
+        }
         let QuestionRequest {
             id,
             question,

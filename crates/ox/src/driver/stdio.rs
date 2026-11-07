@@ -15,7 +15,6 @@ use tracing::debug;
 use ox_core::protocol::{Event, Op, OpEnd, OpSender, ToolCall, ToolResult, UsageSnapshot, notice};
 use ox_core::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
 use ox_core::session::store::listing::ArchiveState;
-use ox_core::tool::ask::QuestionAnswer;
 use ox_core::tool::tasks::{Progress, Task};
 use ox_core::util::text::{escape_controls, escape_line};
 use ox_tui::glyphs::{INTERRUPTED_MARKER, task_marker};
@@ -65,22 +64,6 @@ pub(super) async fn run_op<O: Write, E: Write>(
                 None => return RunEnd::EngineStopped,
             },
         };
-        if let Event::QuestionAsked { id, question } = event {
-            output.render(Event::QuestionAsked {
-                id: id.clone(),
-                question,
-            });
-            output.render(Event::Notice(
-                "Question unavailable: headless runs cannot receive answers.".to_owned(),
-            ));
-            _ = ops
-                .submit(Op::AnswerQuestion {
-                    id,
-                    answer: QuestionAnswer::Aborted,
-                })
-                .await;
-            continue;
-        }
         let end = event.end_of(op_id);
         output.render(event);
         if let Some(end) = end {

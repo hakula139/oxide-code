@@ -84,29 +84,28 @@ A turn reports usage when it ends and before each automatic compaction inside it
 
 Each `stream-json` line is an object with a `type` and, for most types, a `data` payload. The schema below is the compatibility surface scripts depend on. [Engine](../design/engine.md) describes the operation and event contract behind it, including which event ends each operation. Headless runs emit the following types:
 
-| `type`                      | `data`                                                                                               |
-| --------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `stream_token`              | The next chunk of reply text                                                                         |
-| `thinking_token`            | The next chunk of the model's thinking, when the model streams it                                    |
-| `progress_update`           | A note the model wrote before a tool call, which also appears in its thinking                        |
-| `retrying`                  | Notice that a request failed and will be sent again                                                  |
-| `tool_call_start`           | A tool call: `id`, `name`, the model's `input`, and its display `icon` and `label`                   |
-| `tool_call_end`             | The call's result: `id`, the `content` the model sees, `is_error`, a `title` or `null`, and `view`   |
-| `usage_updated`             | The usage object described under [Result](#result)                                                   |
-| `rate_limits_updated`       | A subscription's usage limits, described below                                                       |
-| `tasks_updated`             | The session's whole task list, described below                                                       |
-| `background_shells_updated` | Every open background shell, described below                                                         |
-| `question_asked`            | A running `ask` call's `id` and `question`, with its text, `options`, and optional recommended index |
-| `auto_compaction_started`   | No `data`. An automatic compaction started, before the prompt or between the turn's rounds           |
-| `summary_token`             | The next chunk of the compaction summary                                                             |
-| `summary_discarded`         | No `data`. The summary streamed so far was dropped, because a retry starts over or it failed         |
-| `session_compacted`         | The compaction finished, described below                                                             |
-| `notice`                    | A warning the run works around, such as an instruction file it cannot read                           |
-| `error`                     | A problem that does not end the turn, such as a session write failure                                |
-| `turn_complete`             | No `data`. The turn finished with a reply                                                            |
-| `prompt_unsent`             | No `data`. A failure or a cancel stopped the prompt before it reached the model                      |
-| `turn_rolled_back`          | No `data`. The model refused, so the turn was removed from the session                               |
-| `turn_failed`               | Why the turn failed, including a refused request                                                     |
+| `type`                      | `data`                                                                                             |
+| --------------------------- | -------------------------------------------------------------------------------------------------- |
+| `stream_token`              | The next chunk of reply text                                                                       |
+| `thinking_token`            | The next chunk of the model's thinking, when the model streams it                                  |
+| `progress_update`           | A note the model wrote before a tool call, which also appears in its thinking                      |
+| `retrying`                  | Notice that a request failed and will be sent again                                                |
+| `tool_call_start`           | A tool call: `id`, `name`, the model's `input`, and its display `icon` and `label`                 |
+| `tool_call_end`             | The call's result: `id`, the `content` the model sees, `is_error`, a `title` or `null`, and `view` |
+| `usage_updated`             | The usage object described under [Result](#result)                                                 |
+| `rate_limits_updated`       | A subscription's usage limits, described below                                                     |
+| `tasks_updated`             | The session's whole task list, described below                                                     |
+| `background_shells_updated` | Every open background shell, described below                                                       |
+| `auto_compaction_started`   | No `data`. An automatic compaction started, before the prompt or between the turn's rounds         |
+| `summary_token`             | The next chunk of the compaction summary                                                           |
+| `summary_discarded`         | No `data`. The summary streamed so far was dropped, because a retry starts over or it failed       |
+| `session_compacted`         | The compaction finished, described below                                                           |
+| `notice`                    | A warning the run works around, such as an instruction file it cannot read                         |
+| `error`                     | A problem that does not end the turn, such as a session write failure                              |
+| `turn_complete`             | No `data`. The turn finished with a reply                                                          |
+| `prompt_unsent`             | No `data`. A failure or a cancel stopped the prompt before it reached the model                    |
+| `turn_rolled_back`          | No `data`. The model refused, so the turn was removed from the session                             |
+| `turn_failed`               | Why the turn failed, including a refused request                                                   |
 
 ### Event Payloads
 
