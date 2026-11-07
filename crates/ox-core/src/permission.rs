@@ -1192,7 +1192,7 @@ mod tests {
     }
 
     /// A path target at `canonical`, spelled the same way, rooted at `relative` when given.
-    fn path(canonical: &str, relative: Option<&str>, zone: Zone) -> Access {
+    fn path(canonical: &str, relative: Option<&str>) -> Access {
         let rooted: Vec<String> = relative.map(str::to_owned).into_iter().collect();
         Access::Path(PathTarget {
             canonical: canonical.to_owned(),
@@ -1201,34 +1201,28 @@ mod tests {
             rooted: rooted.clone(),
             requested: canonical.to_owned(),
             deny_rooted: rooted,
-            zone,
         })
     }
 
     fn workspace(canonical: &str, relative: &str) -> Access {
-        path(canonical, Some(relative), Zone::Workspace)
+        path(canonical, Some(relative))
     }
 
     fn outside(canonical: &str) -> Access {
-        path(canonical, None, Zone::Outside)
+        path(canonical, None)
     }
 
     /// The canonical and relative spellings as paths, which compare equal across separators.
-    fn resolved(target: &Access) -> (&Path, Option<&Path>, Zone) {
+    fn resolved(target: &Access) -> (&Path, Option<&Path>) {
         let Access::Path(PathTarget {
             canonical,
             relative,
-            zone,
             ..
         }) = target
         else {
             panic!("expected a path target, got {target:?}");
         };
-        (
-            Path::new(canonical),
-            relative.as_deref().map(Path::new),
-            *zone,
-        )
+        (Path::new(canonical), relative.as_deref().map(Path::new))
     }
 
     fn rule_basis(tier: Tier, class: PermissionClass, pattern: &str) -> Basis {
@@ -1303,37 +1297,15 @@ mod tests {
             }
 
             #[test]
-            fn rejects_a_relative_or_too_broad_extra_root() {
-                let base_dir = canonical_tempdir();
-                let base = base_dir.path();
-                let (repo, home) = (base.join("repo"), base.join("home"));
-                std::fs::create_dir(&repo).unwrap();
-                std::fs::create_dir(&home).unwrap();
-                let too_broad = |raw: &str| {
-                    format!(
-                        "invalid extra root {raw:?}: \
-                         `/`, the home directory, and their ancestors cannot be workspace roots"
-                    )
-                };
-                let fs_root = slash_separated(base.ancestors().last().unwrap());
-                let base_raw = slash_separated(base);
-                let home_raw = slash_separated(&home);
+            fn requires_an_absolute_or_tilde_extra_root() {
+                let repo = canonical_tempdir();
 
-                temp_env::with_var(HOME_VAR, Some(&home), || {
-                    for (raw, expected) in [
-                        (
-                            "shared",
-                            r#"invalid extra root "shared": expected an absolute or `~/` path"#
-                                .to_owned(),
-                        ),
-                        (home_raw.as_str(), too_broad(&home_raw)),
-                        (fs_root.as_str(), too_broad(&fs_root)),
-                        (base_raw.as_str(), too_broad(&base_raw)),
-                    ] {
-                        let err = Workspace::resolve(&repo, &[raw.to_owned()]).unwrap_err();
-                        assert_eq!(format!("{err:#}"), expected, "{raw}");
-                    }
-                });
+                let err = Workspace::resolve(repo.path(), &["shared".to_owned()]).unwrap_err();
+
+                assert_eq!(
+                    format!("{err:#}"),
+                    r#"invalid extra root "shared": expected an absolute or `~/` path"#
+                );
             }
 
             #[test]
@@ -1375,56 +1347,54 @@ mod tests {
             }
 
             #[test]
-            fn has_no_roots_when_launched_from_home() {
-                // A launch from `$HOME` drops every root, so a configured extra root cannot
-                // auto-allow edits outside any project. Each extra root must still be valid.
-                let base_dir = canonical_tempdir();
-                let base = base_dir.path();
-                let (home, shared) = (base.join("home"), base.join("shared"));
+            fn keeps_explicit_extra_roots_when_launched_from_home() {
+                let dir = canonical_tempdir();
+                let home = dir.path().join("home");
+                let shared = dir.path().join("shared");
                 std::fs::create_dir(&home).unwrap();
                 std::fs::create_dir(&shared).unwrap();
 
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     let workspace = Workspace::resolve(&home, &[slash_separated(&shared)]).unwrap();
-                    assert_eq!(workspace.roots(), [] as [PathBuf; 0]);
-                    assert_eq!(workspace.anchors.len(), 1, "the cwd still anchors patterns");
-                    let target =
-                        Access::for_path(shared.join("a.rs").to_str().unwrap(), &workspace);
-                    assert_eq!(resolved(&target).2, Zone::Outside);
+                    let p = policy_in(Mode::Manual, &[], &[], &[(READ, "./docs/**")], &workspace);
+                    let target = Access::for_path(shared.join("docs/notes.md"), &workspace);
 
-                    let err = Workspace::resolve(&home, &["shared".to_owned()]).unwrap_err();
-                    assert_eq!(
-                        format!("{err:#}"),
-                        r#"invalid extra root "shared": expected an absolute or `~/` path"#,
-                    );
+                    assert_eq!(p.decide(READ, &target), Decision::Allow);
+                    assert_eq!(workspace.roots(), [home.clone(), shared.clone()]);
                 });
             }
 
             #[test]
-            fn rejects_home_and_its_parent_under_another_name() {
-                // A symlink to `$HOME` resolves to it. An alias `resolve` keeps, such as `up` here,
-                // still reaches `$HOME` through the trailing names, so it is caught too.
-                let base_dir = canonical_tempdir();
-                let base = base_dir.path();
-                let (repo, home) = (base.join("repo"), base.join("home"));
-                std::fs::create_dir(&repo).unwrap();
+            fn explicit_home_root_and_ancestor_anchors_match_configured_path_rules() {
+                let dir = canonical_tempdir();
+                let base = dir.path();
+                let home = base.join("home");
+                let repo = base.join("repo");
                 std::fs::create_dir(&home).unwrap();
-                symlink_dir(&home, &base.join("home-link"));
-                symlink_dir(base, &base.join("up"));
-                let link = slash_separated(&base.join("home-link"));
+                std::fs::create_dir(&repo).unwrap();
+                let home_link = base.join("home-link");
+                symlink_dir(&home, &home_link);
+                let fs_root = base.ancestors().last().unwrap();
 
                 temp_env::with_var(HOME_VAR, Some(&home), || {
-                    let err = Workspace::resolve(&repo, std::slice::from_ref(&link)).unwrap_err();
-                    assert_eq!(
-                        err.to_string(),
-                        format!(
-                            "invalid extra root {link:?}: \
-                             `/`, the home directory, and their ancestors cannot be workspace roots"
-                        ),
-                    );
-                    assert!(!is_workspace(&base.join("up")));
-                    assert!(!is_workspace(&base.join("up/home")));
-                    assert!(is_workspace(&base.join("up/repo")));
+                    for (raw, root) in [
+                        (slash_separated(&home), home.as_path()),
+                        ("~/".to_owned(), home.as_path()),
+                        (slash_separated(base), base),
+                        (slash_separated(fs_root), fs_root),
+                        (slash_separated(&home_link), home.as_path()),
+                    ] {
+                        let workspace = Workspace::resolve(&repo, &[raw.clone()]).unwrap();
+                        let p =
+                            policy_in(Mode::Manual, &[], &[], &[(READ, "./docs/**")], &workspace);
+                        let target = Access::for_path(root.join("docs/notes.md"), &workspace);
+
+                        assert_eq!(p.decide(READ, &target), Decision::Allow, "{raw}");
+                        assert!(
+                            workspace.roots().iter().any(|anchor| anchor == root),
+                            "{raw}"
+                        );
+                    }
                 });
             }
         }
@@ -1437,7 +1407,7 @@ mod tests {
             use super::*;
 
             #[test]
-            fn inside_an_extra_root_is_a_workspace_target_rooted_there() {
+            fn inside_an_extra_root_is_rooted_there() {
                 let base_dir = canonical_tempdir();
                 let base = base_dir.path();
                 let (repo, shared) = (base.join("repo"), base.join("shared"));
@@ -1445,16 +1415,16 @@ mod tests {
                 std::fs::create_dir(&shared).unwrap();
                 let workspace = Workspace::resolve(&repo, &[slash_separated(&shared)]).unwrap();
 
-                for (raw, zone, rooted) in [
-                    ("../shared/a.rs", Zone::Workspace, &["a.rs"][..]),
-                    ("../shared/.git/config", Zone::Workspace, &[".git/config"]),
-                    ("../elsewhere/a.rs", Zone::Outside, &[]),
+                for (raw, rooted) in [
+                    ("../shared/a.rs", &["a.rs"][..]),
+                    ("../shared/.git/config", &[".git/config"]),
+                    ("../elsewhere/a.rs", &[]),
                 ] {
                     let target = Access::for_path(raw, &workspace);
-                    let (canonical, relative, actual) = resolved(&target);
+                    let (canonical, relative) = resolved(&target);
                     assert_eq!(canonical, lexical_normalize(&repo.join(raw)), "{raw}");
                     assert_eq!(relative, None, "{raw}: outside the cwd");
-                    assert_eq!(actual, zone, "{raw}");
+
                     let Access::Path(PathTarget { rooted: actual, .. }) = &target else {
                         unreachable!();
                     };
@@ -1465,20 +1435,19 @@ mod tests {
             }
 
             #[test]
-            fn inside_cwd_is_a_workspace_target() {
+            fn inside_cwd_has_a_relative_pattern_target() {
                 let cwd_dir = canonical_tempdir();
                 let cwd = cwd_dir.path();
                 std::fs::write(cwd.join("a.rs"), "x").unwrap();
 
                 let target = Access::for_path("a.rs", &Workspace::new(cwd));
-                let (canonical, relative, zone) = resolved(&target);
+                let (canonical, relative) = resolved(&target);
                 assert_eq!(canonical, cwd.join("a.rs"));
                 assert_eq!(relative, Some(Path::new("a.rs")));
-                assert_eq!(zone, Zone::Workspace);
             }
 
             #[test]
-            fn brand_new_file_is_still_a_workspace_target() {
+            fn brand_new_file_keeps_its_cwd_relative_path() {
                 // A new file cannot canonicalize, but its missing tail still lands inside cwd.
                 let cwd_dir = canonical_tempdir();
                 let cwd = cwd_dir.path();
@@ -1488,7 +1457,6 @@ mod tests {
                     (
                         cwd.join("new/file.rs").as_path(),
                         Some(Path::new("new/file.rs")),
-                        Zone::Workspace,
                     ),
                 );
             }
@@ -1498,8 +1466,8 @@ mod tests {
                 let cwd_dir = canonical_tempdir();
                 let cwd = cwd_dir.path();
                 let target = Access::for_path("/etc/hosts", &Workspace::new(cwd));
-                let (_, relative, zone) = resolved(&target);
-                assert_eq!((relative, zone), (None, Zone::Outside));
+                let (_, relative) = resolved(&target);
+                assert_eq!(relative, None);
             }
 
             #[test]
@@ -1515,44 +1483,19 @@ mod tests {
                     let target = Access::for_path(raw, &Workspace::new(&cwd));
                     assert_eq!(
                         resolved(&target),
-                        (root.join("escape.rs").as_path(), None, Zone::Outside),
+                        (root.join("escape.rs").as_path(), None),
                         "{raw}",
                     );
                 }
             }
 
             #[test]
-            fn cwd_containing_home_is_not_a_workspace() {
-                // Launched from `$HOME` or any ancestor of it, "inside cwd" spans every dotfile, so
-                // edits there must not auto-allow. Anchored patterns still see the path.
-                let root_dir = canonical_tempdir();
-                let root = root_dir.path();
-                let home = root.join("home");
-                std::fs::create_dir(&home).unwrap();
-                let fs_root = root.ancestors().last().unwrap();
-
-                temp_env::with_var(HOME_VAR, Some(&home), || {
-                    for cwd in [home.as_path(), root, fs_root] {
-                        let target = Access::for_path("notes.md", &Workspace::new(cwd));
-                        let (_, relative, zone) = resolved(&target);
-                        assert_eq!(relative, Some(Path::new("notes.md")), "{cwd:?}");
-                        assert_eq!(zone, Zone::Outside, "{cwd:?}");
-                    }
-
-                    let project = home.join("project");
-                    std::fs::create_dir(&project).unwrap();
-                    let target = Access::for_path("notes.md", &Workspace::new(&project));
-                    assert_eq!(resolved(&target).2, Zone::Workspace);
-                });
-            }
-
-            #[test]
-            fn with_a_non_absolute_cwd_is_not_a_workspace_target() {
+            fn non_absolute_cwd_has_no_relative_pattern_target() {
                 // An empty cwd has no root, and `strip_prefix("")` succeeds for any path, so the
                 // target must get no cwd-relative form either.
                 let target = Access::for_path("a.rs", &Workspace::new(Path::new("")));
-                let (_, relative, zone) = resolved(&target);
-                assert_eq!((relative, zone), (None, Zone::Outside));
+                let (_, relative) = resolved(&target);
+                assert_eq!(relative, None);
             }
 
             #[test]
@@ -1567,13 +1510,9 @@ mod tests {
                             let target = Access::for_path(raw, &Workspace::new(Path::new(cwd)));
                             let absolute =
                                 Access::for_path(raw, &Workspace::new(&absolute_cwd.join(cwd)));
-                            let (_, relative, zone) = resolved(&target);
-                            let (_, absolute_relative, absolute_zone) = resolved(&absolute);
-                            assert_eq!(
-                                (relative, zone),
-                                (absolute_relative, absolute_zone),
-                                "{cwd:?}/{raw}",
-                            );
+                            let (_, relative) = resolved(&target);
+                            let (_, absolute_relative) = resolved(&absolute);
+                            assert_eq!(relative, absolute_relative, "{cwd:?}/{raw}",);
                             assert_eq!(
                                 policy.decide(EDIT, &target),
                                 policy.decide(EDIT, &absolute),
@@ -1585,7 +1524,7 @@ mod tests {
             }
 
             #[test]
-            fn deep_existing_file_stays_a_workspace_target() {
+            fn deep_existing_file_keeps_its_cwd_relative_path() {
                 // Windows canonicalizes a path past 260 chars to a `\\?\` spelling the cwd lacks.
                 let cwd_dir = canonical_tempdir();
                 let cwd = cwd_dir.path();
@@ -1599,32 +1538,7 @@ mod tests {
                         file.to_str().unwrap(),
                         &Workspace::new(cwd)
                     )),
-                    (&*cwd.join(&file), Some(&*file), Zone::Workspace),
-                );
-            }
-
-            #[test]
-            fn hard_linked_file_is_not_a_workspace_target() {
-                // The second link sits outside cwd, so an edit through `a.rs` would change it too.
-                let cwd_dir = canonical_tempdir();
-                let cwd = cwd_dir.path();
-                let outside_dir = canonical_tempdir();
-                let outside = outside_dir.path();
-                std::fs::write(outside.join("a.rs"), "x").unwrap();
-                std::fs::hard_link(outside.join("a.rs"), cwd.join("a.rs")).unwrap();
-                std::fs::write(cwd.join("b.rs"), "x").unwrap();
-
-                assert_eq!(
-                    resolved(&Access::for_path("a.rs", &Workspace::new(cwd))),
-                    (
-                        cwd.join("a.rs").as_path(),
-                        Some(Path::new("a.rs")),
-                        Zone::Outside
-                    ),
-                );
-                assert_eq!(
-                    resolved(&Access::for_path("b.rs", &Workspace::new(cwd))).2,
-                    Zone::Workspace
+                    (&*cwd.join(&file), Some(&*file)),
                 );
             }
 
@@ -1637,10 +1551,7 @@ mod tests {
                 symlink_dir(outside, &cwd.join("link"));
 
                 let target = Access::for_path("link/new.rs", &Workspace::new(cwd));
-                assert_eq!(
-                    resolved(&target),
-                    (outside.join("new.rs").as_path(), None, Zone::Outside),
-                );
+                assert_eq!(resolved(&target), (outside.join("new.rs").as_path(), None),);
             }
 
             #[test]
@@ -1654,10 +1565,7 @@ mod tests {
                 symlink_file(Path::new("../escape.txt"), &cwd.join("notes.md"));
 
                 let target = Access::for_path("notes.md", &Workspace::new(&cwd));
-                assert_eq!(
-                    resolved(&target),
-                    (root.join("escape.txt").as_path(), None, Zone::Outside),
-                );
+                assert_eq!(resolved(&target), (root.join("escape.txt").as_path(), None),);
             }
 
             #[test]
@@ -1675,11 +1583,7 @@ mod tests {
                 let target = Access::for_path("out/new.rs", &Workspace::new(&cwd));
                 assert_eq!(
                     resolved(&target),
-                    (
-                        root.join("elsewhere/dir/new.rs").as_path(),
-                        None,
-                        Zone::Outside,
-                    ),
+                    (root.join("elsewhere/dir/new.rs").as_path(), None,),
                 );
             }
 
@@ -1696,10 +1600,7 @@ mod tests {
                 symlink_dir(&cwd.join(".git/hooks"), &cwd.join("tools"));
 
                 let target = Access::for_path("missing/../link/x", &Workspace::new(cwd));
-                assert_eq!(
-                    resolved(&target),
-                    (outside.join("x").as_path(), None, Zone::Outside),
-                );
+                assert_eq!(resolved(&target), (outside.join("x").as_path(), None),);
 
                 let target = Access::for_path("x/../tools/pre-commit", &Workspace::new(cwd));
                 let p = policy_in(
@@ -1722,22 +1623,19 @@ mod tests {
                 symlink_file(Path::new("missing/../out/new"), &cwd.join("notes.md"));
 
                 let target = Access::for_path("notes.md", &Workspace::new(cwd));
-                assert_eq!(
-                    resolved(&target),
-                    (outside.join("new").as_path(), None, Zone::Outside),
-                );
+                assert_eq!(resolved(&target), (outside.join("new").as_path(), None),);
             }
 
             #[test]
-            fn symlink_loop_never_auto_allows() {
+            fn symlink_loop_has_no_relative_pattern_target() {
                 let cwd_dir = canonical_tempdir();
                 let cwd = cwd_dir.path();
                 symlink_file(Path::new("b"), &cwd.join("a"));
                 symlink_file(Path::new("a"), &cwd.join("b"));
 
                 let target = Access::for_path("a/new.rs", &Workspace::new(cwd));
-                let (_, relative, zone) = resolved(&target);
-                assert_eq!((relative, zone), (None, Zone::Outside));
+                let (_, relative) = resolved(&target);
+                assert_eq!(relative, None);
             }
 
             #[test]
@@ -1752,18 +1650,14 @@ mod tests {
                 ] {
                     let target = Access::for_path(path.to_str().unwrap(), &Workspace::new(cwd));
 
-                    assert_eq!(
-                        resolved(&target),
-                        (&*cwd.join(&path), None, Zone::Outside),
-                        "{path:?}",
-                    );
+                    assert_eq!(resolved(&target), (&*cwd.join(&path), None), "{path:?}",);
                 }
             }
 
             // A Unix name is raw bytes, so only there can one fail to be UTF-8, as `caf\xe9` does.
             #[cfg(unix)]
             #[test]
-            fn resolving_to_a_name_that_is_not_utf8_never_auto_allows() {
+            fn preserves_non_utf8_paths_and_their_lossy_pattern_spellings() {
                 use std::ffi::OsStr;
                 use std::os::unix::ffi::OsStrExt as _;
                 let base_dir = canonical_tempdir();
@@ -1773,20 +1667,18 @@ mod tests {
                 let target = Access::for_path("notes.md", &Workspace::new(&cwd));
 
                 assert_eq!(target.resolved(), Some(cwd.join("notes.md")));
-                let (canonical, _, zone) = resolved(&target);
+                let (canonical, _) = resolved(&target);
                 assert_eq!(
                     canonical,
                     Path::new(&*cwd.join("notes.md").to_string_lossy())
                 );
-                assert_eq!(zone, Zone::Outside);
             }
 
             // Windows drops `..` lexically before a lookup, so only Unix stops at a file before it.
             #[cfg(unix)]
             #[test]
             fn dot_dot_past_a_file_is_not_resolved_lexically() {
-                // The kernel cannot step back out of the file `notes`, so the target keeps its
-                // spelling and never auto-allows as `x` or `link/x`.
+                // The kernel cannot step back out of a file.
                 let cwd_dir = canonical_tempdir();
                 let cwd = cwd_dir.path();
                 let outside_dir = canonical_tempdir();
@@ -1797,11 +1689,7 @@ mod tests {
                 for path in ["notes/../x", "notes/sub/../../link/x"] {
                     let target = Access::for_path(path, &Workspace::new(cwd));
 
-                    assert_eq!(
-                        resolved(&target),
-                        (&*cwd.join(path), None, Zone::Outside),
-                        "{path}",
-                    );
+                    assert_eq!(resolved(&target), (&*cwd.join(path), None), "{path}",);
                 }
             }
 
@@ -1817,7 +1705,7 @@ mod tests {
 
                 let target =
                     Access::for_path(r".git::$INDEX_ALLOCATION\config", &Workspace::new(cwd));
-                let (path, relative, _) = resolved(&target);
+                let (path, relative) = resolved(&target);
                 assert_eq!(path.as_os_str(), cwd.join(r".git\config").as_os_str());
                 assert_eq!(relative, Some(Path::new(r".git\config")));
                 let p = policy_in(
@@ -1830,7 +1718,7 @@ mod tests {
                 let target = Access::for_path(r"secrets-store\key::$DATA", &Workspace::new(cwd));
                 assert_eq!(p.decide(EDIT, &target), Decision::Deny);
 
-                // The home directory spelled with a stream suffix is still never a workspace.
+                // The stream suffix names the same home directory.
                 let home = cwd.join("home-directory");
                 std::fs::create_dir(&home).unwrap();
                 temp_env::with_var(HOME_VAR, Some(&home), || {
@@ -1838,11 +1726,7 @@ mod tests {
                     let target = Access::for_path("notes.md", &Workspace::new(&home_alias));
                     assert_eq!(
                         resolved(&target),
-                        (
-                            &*home.join("notes.md"),
-                            Some(Path::new("notes.md")),
-                            Zone::Outside
-                        ),
+                        (&*home.join("notes.md"), Some(Path::new("notes.md")),),
                     );
                 });
             }
@@ -2708,14 +2592,7 @@ mod tests {
                 );
                 for (class, target) in [
                     (EDIT, workspace(&abs("/repo/Cargo.lock"), "Cargo.lock")),
-                    (
-                        EDIT,
-                        path(
-                            &abs("/repo/.git/config"),
-                            Some(".git/config"),
-                            Zone::Workspace,
-                        ),
-                    ),
+                    (EDIT, path(&abs("/repo/.git/config"), Some(".git/config"))),
                     (EXEC, command("git push origin")),
                 ] {
                     assert_eq!(p.decide(class, &target), Decision::Deny, "{target:?}");
