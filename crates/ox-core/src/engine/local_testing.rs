@@ -210,7 +210,7 @@ pub(super) fn dispatch_with(
     allow: &[&str],
     cwd: &Path,
 ) -> DispatchContext<'static> {
-    let rules = |patterns: &[&str]| {
+    let rules = |patterns: &[&str]| -> Vec<Rule> {
         patterns
             .iter()
             .map(|pattern| Rule::parse(PermissionClass::Exec, pattern).expect("pattern parses"))

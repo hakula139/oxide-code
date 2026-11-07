@@ -11,7 +11,7 @@ The dispatcher caps every tool output at `MAX_OUTPUT_BYTES = 128 KiB`, including
 - **Location**: `store::artifact_dir` designates the directory that holds a session's artifacts, `$XDG_DATA_HOME/ox/artifacts/<session-id>/`, with spill files placed in its `tool-results/` child. The engine passes the live handle's directory with each dispatch, so new spills land with the session in use after `/clear`, `/resume`, or a [lazy fork](persistence.md#lazy-fork). Tool results a fork copied still name the source session's spills.
 - **Creation**: The first write creates the directory and the file and refuses to replace an existing file, so a result that fits leaves nothing on disk. On Unix, the directory gets `0700` perms and the file gets `0600`.
 - **Size**: A file keeps at most `MAX_SPILL_BYTES`, equal to `MAX_TRACKED_FILE_SIZE` so `read` can open every spill, and beyond that limit the marker says `first 10 MiB of output saved to <path>`. If creating or writing the file fails, the result is still truncated, and the marker names the error in place of the path.
-- **Access and cleanup**: `read` and `grep` open spill files without prompting, while editing them prompts, since they lie in oxide-code's data directory ([built-in rules](../guide/permissions.md#built-in-rules)). `/delete` removes the session's directory along with its rows, and archiving keeps both.
+- **Access and cleanup**: reads and edits of spill files follow the [permission rules and mode](../guide/permissions.md). `/delete` removes the session's directory along with its rows, and archiving keeps both.
 
 ## Per-Tool View-Shape Caps
 

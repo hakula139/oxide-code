@@ -23,7 +23,7 @@ Layers are ordered from shared primitives to orchestration. A module imports fro
 | Services   | `client`, `command`, `protocol`, `session`, `tool`       | Model transport, shared slash-command parsing, the frontend contract, persistent sessions, and tool implementations |
 | Engine     | `engine`                                                 | Operation scheduling, agent turns, tool dispatch, compaction, and the live transcript                               |
 
-`permission` decides whether an access is allowed. `engine::dispatch` applies that policy to calls, obtains approvals, and invokes tools. `tool` owns their preparation and execution.
+`permission` evaluates configured rules and the active mode. `engine::dispatch` applies that policy to calls, uses `engine::classifier` for automatic decisions, obtains approvals, and invokes tools. `tool` owns their preparation and execution.
 
 `session` owns storage and saved-session queries. `engine::transcript::LiveTranscript` coordinates changes to live messages with the writes that record them. Session-changing behavior belongs in the engine so every frontend observes the same result.
 

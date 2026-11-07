@@ -509,7 +509,6 @@ pub(crate) mod local_testing {
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 
-    use strum::VariantArray as _;
     use tokio_util::sync::CancellationToken;
 
     use super::search::{SearchRoot, search_arg};
@@ -657,7 +656,6 @@ mod tests {
     use std::fs;
 
     use serde_json::Value;
-    use strum::VariantArray as _;
 
     use super::local_testing::{ctx, deny_reads, temp_ctx};
     use super::testing::bash_registry;
@@ -884,15 +882,8 @@ mod tests {
             temp_env::with_var(HOME_VAR, Some(&home), || {
                 let deny = vec![Rule::parse(PermissionClass::Read, "~/.aws/**").unwrap()];
                 let ctx = ctx(&cwd);
-                let policy = Policy::resolve(
-                    Mode::Manual,
-                    deny,
-                    Vec::new(),
-                    Vec::new(),
-                    &[],
-                    &ctx.workspace,
-                )
-                .unwrap();
+                let policy =
+                    Policy::resolve(Mode::Manual, deny, Vec::new(), Vec::new(), &ctx.workspace);
                 let (spec, read) = tools.get("read").unwrap();
                 let prepare = |path: &str| {
                     read.prepare(serde_json::json!({"file_path": path}), &ctx)

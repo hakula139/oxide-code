@@ -2,6 +2,8 @@
 
 Every tool call passes a permission check before running. Explicit deny rules block calls, ask rules require approval, and allow rules or session grants permit matching calls. Unmatched calls use the selected mode. The default `auto` mode asks a separate model whether to approve the action or request your confirmation.
 
+Read operations confined to session state, such as checking a shell task's output, run after the deny and ask checks without classification or approval.
+
 ## Modes
 
 - **`auto`**, the default, uses a classifier for calls the configured rules leave open. It can allow the action or ask for approval. An invalid response or failed request asks.
@@ -34,6 +36,8 @@ Session rules live in memory until you exit, `/clear`, `/archive`, or `/resume` 
 ## Settings
 
 Set `mode`, `extra_roots`, the `deny`, `ask`, and `allow` rule tables, and the `auto` table under `[permission]` in user config or a drop-in. A project's `.ox/config.toml` accepts only `deny` and `ask`. The classifier's model and natural-language instructions are user-only. [Config Keys](configuration.md#config-keys) lists their types and defaults.
+
+Remove the former `permission.defaults` table when upgrading, since it is no longer accepted. Existing explicit `permission.mode` settings keep their mode. To use automatic classification, set it to `"auto"` or remove it.
 
 ```toml
 # ~/.config/ox/config.toml

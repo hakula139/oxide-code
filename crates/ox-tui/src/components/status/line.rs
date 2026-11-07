@@ -325,7 +325,7 @@ fn segment_utility(segment: StatusLineSegment, mode: Mode) -> u8 {
         StatusLineSegment::WeeklyLimit => 12,
         StatusLineSegment::FiveHourLimit => 13,
         StatusLineSegment::ContextUsed => 14,
-        StatusLineSegment::PermissionMode if mode == Mode::Manual => 15,
+        StatusLineSegment::PermissionMode if matches!(mode, Mode::Auto | Mode::Manual) => 15,
         StatusLineSegment::Model => 16,
         StatusLineSegment::ModelWithEffort => 17,
         StatusLineSegment::PermissionMode => 18,

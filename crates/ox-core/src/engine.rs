@@ -592,7 +592,6 @@ mod tests {
 
     use anyhow::anyhow;
     use indoc::indoc;
-    use strum::VariantArray as _;
     use tokio::sync::Notify;
     use tokio::sync::oneshot;
     use tokio_util::sync::CancellationToken;

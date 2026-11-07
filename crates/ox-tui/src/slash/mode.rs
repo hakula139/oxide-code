@@ -217,9 +217,10 @@ mod tests {
                         "Select permission mode",
                         "Switch the permission mode for this session. Restarting returns to your config.",
                         "",
-                        "  1. manual    Ask before tool calls that no permission rule allows or denies",
-                        "> 2. plan    ✓ Read-only: deny edits and commands",
-                        "  3. yolo      Run tool calls unless a deny rule or your ask rules hold them",
+                        "  1. auto      Use a model to approve tool calls or ask for confirmation",
+                        "  2. manual    Ask before tool calls that no permission rule allows or denies",
+                        "> 3. plan    ✓ Read-only: deny edits and commands",
+                        "  4. yolo      Run tool calls unless a deny rule or your ask rules hold them",
                         "",
                         "Enter to confirm  ·  Esc to cancel",
                     ]
@@ -251,11 +252,11 @@ mod tests {
                 );
                 assert_eq!(
                     submitted(Mode::Manual, &[KeyCode::Char('k')]),
-                    Some(Op::SetMode(Mode::Yolo))
+                    Some(Op::SetMode(Mode::Auto))
                 );
                 assert_eq!(
                     submitted(Mode::Yolo, &[KeyCode::Char('1')]),
-                    Some(Op::SetMode(Mode::Manual))
+                    Some(Op::SetMode(Mode::Auto))
                 );
             }
 
