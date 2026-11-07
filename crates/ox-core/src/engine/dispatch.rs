@@ -1442,9 +1442,6 @@ mod tests {
         #[test]
         fn names_what_made_the_call_ask_and_the_config_fix_or_next_step() {
             let manual = Basis::Mode(Mode::Manual);
-            let unrecognized = Basis::Unrecognized {
-                construct: "$((1 + 2))".to_owned(),
-            };
             let allow = exec_grant(r#"echo "a\b""#).suggested().clone();
             let ask = Basis::Rule {
                 tier: Tier::Ask,
@@ -1467,15 +1464,6 @@ mod tests {
                      To allow it, ask the user to add a pattern for each of its commands \
                      under `permission.allow` in the user config, \
                      ending a pattern in `*` at a word that expands.",
-                ),
-                (
-                    &unrecognized,
-                    None,
-                    "It needs approval because of `$((1 + 2))`, which ox cannot analyze. \
-                     Do not retry it as written. \
-                     No permission rule can allow it. \
-                     Rewrite it as plain commands joined by `&&`, `||`, `;`, or `|`, \
-                     and set a variable for one command in the prefix form `NAME=value cmd`.",
                 ),
                 (
                     &Basis::Classifier {

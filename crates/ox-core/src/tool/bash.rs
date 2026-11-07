@@ -848,10 +848,7 @@ mod tests {
                 .prepare(serde_json::json!({"command": "ls -la"}), &ctx)
                 .unwrap();
 
-            assert_eq!(
-                prepared.access,
-                Access::for_command("ls -la", &ctx.workspace)
-            );
+            assert_eq!(prepared.access, Access::for_command("ls -la"));
         }
 
         #[test]
