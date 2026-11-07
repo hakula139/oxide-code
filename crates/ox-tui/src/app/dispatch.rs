@@ -1369,6 +1369,7 @@ mod tests {
                 },
                 basis: Basis::Mode(Mode::Manual),
                 grant: None,
+                deadline: None,
             });
 
             app.clear_modals();
@@ -2066,8 +2067,8 @@ mod tests {
         async fn sends_the_admitted_op_before_the_action_of_a_modal_it_closes() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             let mut modal = ScriptedModal::new();
-            modal.reply = Some(UpdateReply::Closed(ModalAction::Dispatch(Action::Op(
-                Op::Clear,
+            modal.reply = Some(UpdateReply::Closed(Some(ModalAction::Dispatch(
+                Action::Op(Op::Clear),
             ))));
             app.push_modal(Box::new(modal));
 

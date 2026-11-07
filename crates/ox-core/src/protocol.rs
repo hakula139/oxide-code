@@ -8,6 +8,7 @@
 pub mod notice;
 
 use std::fmt;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -177,6 +178,34 @@ pub enum ApprovalDecision {
     },
     /// Deny, and end the turn as [`Op::Interrupt`] does.
     Abort,
+}
+
+/// Whether a response was entered by the user or selected by their timeout policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplySource {
+    User,
+    Timeout,
+}
+
+/// The deadline and configured fallback a frontend shows beside a waiting prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PromptDeadline {
+    pub timeout_seconds: NonZeroU32,
+    pub action: PromptTimeoutAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::Display)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptTimeoutAction {
+    #[strum(to_string = "use the recommended answer, or skip")]
+    Recommended,
+    #[strum(to_string = "skip the question")]
+    Skip,
+    #[strum(to_string = "deny the call")]
+    Deny,
+    #[strum(to_string = "allow this call")]
+    Allow,
 }
 
 /// The model, the effort, or both that an [`Op::SetModel`] picks. An omitted model keeps its
@@ -374,9 +403,16 @@ pub enum Event {
         preview: ApprovalPreview,
         basis: Basis,
         grant: Option<Box<SessionGrant>>,
+        deadline: Option<PromptDeadline>,
     },
     /// A running `ask` call waits for the matching [`Op::AnswerQuestion`].
-    QuestionAsked { id: String, question: Question },
+    QuestionAsked {
+        id: String,
+        question: Question,
+        deadline: Option<PromptDeadline>,
+    },
+    /// The engine settled this interaction. A frontend closes its matching prompt without replying.
+    InteractionClosed { id: String },
     /// The user granted a session allow rule. Carries every session allow rule now in force.
     SessionRulesUpdated(Vec<Rule>),
     /// The full task list, after a `tasks` call sets it or a loaded session restores a non-empty

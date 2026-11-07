@@ -240,6 +240,7 @@ pub(super) fn dispatch_with(
     ));
     DispatchContext {
         policy,
+        interaction: crate::config::interaction::InteractionConfig::default(),
         workspace,
         session: handle::testing::unsaved(),
         tracker: tracker(),

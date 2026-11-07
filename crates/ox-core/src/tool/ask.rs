@@ -7,6 +7,7 @@ use tokio::sync::oneshot;
 
 use super::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolSpec};
 use crate::permission::{Access, PermissionClass};
+use crate::protocol::ReplySource;
 
 /// A question and the choices the frontend can offer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,7 +40,13 @@ pub enum QuestionAnswer {
 pub(crate) struct QuestionRequest {
     pub(crate) id: String,
     pub(crate) question: Question,
-    pub(crate) reply: oneshot::Sender<QuestionAnswer>,
+    pub(crate) reply: oneshot::Sender<QuestionReply>,
+}
+
+#[derive(Debug)]
+pub(crate) struct QuestionReply {
+    pub(crate) answer: QuestionAnswer,
+    pub(crate) source: ReplySource,
 }
 
 pub(crate) struct AskTool;
@@ -115,11 +122,17 @@ impl Tool for AskTool {
                 reply,
             };
             let answer = if ctx.questions.send(request).await.is_ok() {
-                answer.await.unwrap_or(QuestionAnswer::Aborted)
+                answer.await.ok()
             } else {
-                QuestionAnswer::Aborted
-            };
-            ToolOutput::success(serde_json::json!({"source": "user", "result": answer}).to_string())
+                None
+            }
+            .unwrap_or(QuestionReply {
+                answer: QuestionAnswer::Aborted,
+                source: ReplySource::User,
+            });
+            ToolOutput::success(
+                serde_json::json!({"source": answer.source, "result": answer.answer}).to_string(),
+            )
         })
     }
 }
@@ -189,7 +202,13 @@ mod tests {
                         request.question,
                         serde_json::from_value::<Question>(input).unwrap()
                     );
-                    request.reply.send(answer).unwrap();
+                    request
+                        .reply
+                        .send(QuestionReply {
+                            answer,
+                            source: ReplySource::User,
+                        })
+                        .unwrap();
                 });
 
                 assert!(!output.is_error, "{}", output.content);
