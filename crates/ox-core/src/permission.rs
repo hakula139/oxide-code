@@ -903,7 +903,7 @@ impl Policy {
     /// The verdict of the pipeline [`Self::verdict`] lists, as if a person attended the run.
     fn settle(&self, class: PermissionClass, target: &Access) -> Verdict {
         let verdict = |decision, basis| Verdict { decision, basis };
-        if let Some(rule) = held_by(&self.deny.iter(), class, target) {
+        if let Some(rule) = held_by(&self.deny, class, target) {
             return verdict(Decision::Deny, rule.basis(Tier::Deny));
         }
 
@@ -911,7 +911,7 @@ impl Policy {
             return verdict(Decision::Deny, Basis::Mode(self.mode));
         }
 
-        if let Some(rule) = held_by(&self.ask.iter(), class, target) {
+        if let Some(rule) = held_by(&self.ask, class, target) {
             return verdict(Decision::Ask, rule.basis(Tier::Ask));
         }
 
@@ -977,11 +977,11 @@ impl Policy {
 
 /// The first deny or ask rule that matches the call.
 fn held_by<'a>(
-    rules: &(impl Iterator<Item = &'a TierRule> + Clone),
+    rules: &'a [TierRule],
     class: PermissionClass,
     target: &Access,
 ) -> Option<&'a TierRule> {
-    rules.clone().find(|entry| entry.matches(class, target))
+    rules.iter().find(|entry| entry.matches(class, target))
 }
 
 /// An approval's "allow for this session" offer: the suggested rule, plus the call that any edit of

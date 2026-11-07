@@ -224,7 +224,10 @@ fn unquote_ansi_c(inner: &str) -> Option<String> {
             'x' => char::from_u32(take_digits(&mut chars, 16, 2)?.0).filter(char::is_ascii)?,
             'u' => char::from_u32(take_digits(&mut chars, 16, 4)?.0)?,
             'U' => char::from_u32(take_digits(&mut chars, 16, 8)?.0)?,
-            'c' => char::from_u32(u32::from(chars.next()?) & 0x1f)?,
+            'c' => match chars.next()? {
+                '?' => '\u{7f}',
+                control => char::from_u32(u32::from(control) & 0x1f)?,
+            },
             other => {
                 value.push('\\');
                 other
@@ -275,6 +278,7 @@ mod tests {
                 (r"\e[0m\E", "\u{1b}[0m\u{1b}"),
                 (r#"\'\"\\\?"#, r#"'"\?"#),
                 (r"\cA", "\u{1}"),
+                (r"\c?", "\u{7f}"),
                 (r"\q", r"\q"),
             ] {
                 assert_eq!(unquote_ansi_c(inner).as_deref(), Some(value), "{inner:?}");

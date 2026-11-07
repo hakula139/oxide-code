@@ -511,19 +511,13 @@ fn unapproved_output(name: &str, basis: &Basis, fix: Option<&Rule>) -> ToolOutpu
         Basis::Mode(_) => "No allow pattern matches it.".to_owned(),
         basis => format!("It needs approval because of {basis}."),
     };
-    let next = match (fix, basis) {
-        (Some(rule), _) => format!(
+    let next = match fix {
+        Some(rule) => format!(
             "To allow it, ask the user to add {} in the user config.",
             allow_entry(rule)
         ),
-        (None, Basis::Mode(_)) => "To allow it, ask the user to add a pattern \
-                                   for each of its commands under `permission.allow` \
-                                   in the user config, \
-                                   ending a pattern in `*` at a word that expands."
+        None => "Ask the user to approve the call in an interactive run or adjust permissions."
             .to_owned(),
-        (None, _) => {
-            "Choose a different approach or ask the user to adjust permissions.".to_owned()
-        }
     };
     ToolOutput::error(format!(
         "The {name} call was denied because it needs approval and this run cannot ask for it. \
@@ -1461,9 +1455,7 @@ mod tests {
                     None,
                     "No allow pattern matches it. \
                      Do not retry it as written. \
-                     To allow it, ask the user to add a pattern for each of its commands \
-                     under `permission.allow` in the user config, \
-                     ending a pattern in `*` at a word that expands.",
+                     Ask the user to approve the call in an interactive run or adjust permissions.",
                 ),
                 (
                     &Basis::Classifier {
@@ -1472,14 +1464,14 @@ mod tests {
                     None,
                     "It needs approval because of the automatic approval check: Authorization is unclear. \
                      Do not retry it as written. \
-                     Choose a different approach or ask the user to adjust permissions.",
+                     Ask the user to approve the call in an interactive run or adjust permissions.",
                 ),
                 (
                     &ask,
                     None,
                     "It needs approval because of the `ask.exec` pattern `git push *`. \
                      Do not retry it as written. \
-                     Choose a different approach or ask the user to adjust permissions.",
+                     Ask the user to approve the call in an interactive run or adjust permissions.",
                 ),
             ];
 
