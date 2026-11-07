@@ -11,7 +11,8 @@ use super::provenance::{Provenance, Source};
 use super::{BaseUrl, Config, ConfigSnapshot, DEFAULT_THEME, StatusLineSegment, ThemeConfig};
 use crate::auth::{Auth, AuthSource};
 use crate::model::{ModelSpec, PromptCacheTtl};
-use crate::permission::{Policy, Workspace};
+use crate::permission::rule::Rule;
+use crate::permission::{Mode, PermissionClass, Policy, Workspace};
 
 /// A [`BaseUrl`] parsed from `raw`, for fixtures that supply a valid URL.
 pub(crate) fn base_url(raw: impl AsRef<str>) -> BaseUrl {
@@ -19,9 +20,21 @@ pub(crate) fn base_url(raw: impl AsRef<str>) -> BaseUrl {
 }
 
 /// Minimal [`Config`] signed in with `auth` against `url`: compaction off, a 128-token output cap,
-/// and the default permission policy in `/repo`. The effort stays unset, so the model settings
-/// built from it take the model's default.
+/// and manual permissions allowing reads and workspace edits in `/repo`. The effort stays unset,
+/// so the model settings built from it take the model's default.
 pub(crate) fn test_config(url: impl AsRef<str>, auth: Auth, model: &str) -> Config {
+    let workspace = Workspace::new(Path::new("/repo"));
+    let permission = Policy::resolve(
+        Mode::Manual,
+        Vec::new(),
+        Vec::new(),
+        vec![
+            Rule::parse(PermissionClass::Read, "*").expect("the test read rule parses"),
+            Rule::parse(PermissionClass::Edit, "./**").expect("the test edit rule parses"),
+        ],
+        &workspace,
+    );
+
     Config {
         auth: AuthState::Ready(auth),
         base_url: base_url(url),
@@ -37,9 +50,9 @@ pub(crate) fn test_config(url: impl AsRef<str>, auth: Auth, model: &str) -> Conf
         max_tool_rounds: None,
         prompt_cache_ttl: PromptCacheTtl::OneHour,
         compaction: CompactionConfig::disabled(),
-        permission: Policy::default(),
+        permission,
         permission_auto: super::permission_auto::AutoPermissionConfig::default(),
-        workspace: Workspace::new(Path::new("/repo")),
+        workspace,
         show_thinking: false,
         show_welcome: true,
         status_line: StatusLineSegment::DEFAULT.to_vec(),

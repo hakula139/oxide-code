@@ -427,7 +427,6 @@ mod tests {
     use crate::config::schema::{AuthValue, ClientAuth};
     use crate::model::{Effort, PromptCacheTtl};
     use crate::permission::Mode;
-    use crate::permission::defaults::Shipped;
     use crate::util::fs::testing::{symlink_dir, symlink_file};
     use crate::util::log::testing::LogCapture;
     use crate::util::path::local_testing::abs;
@@ -1015,7 +1014,10 @@ mod tests {
 
                     [permission]
                     mode = "plan"
-                    defaults.rm = false
+
+                    [permission.auto]
+                    model = "gateway-mini"
+                    instructions = ["Ask before publishing."]
 
                     [permission.deny]
                     exec = ["rm *"]
@@ -1047,8 +1049,12 @@ mod tests {
             assert_eq!(client.compaction.threshold_percent, Some(40));
             assert_eq!(config.permission.mode, Some(Mode::Plan));
             assert_eq!(
-                config.permission.defaults,
-                Some(BTreeMap::from([(Shipped::Rm, false)]))
+                config.permission.auto.model.as_deref(),
+                Some("gateway-mini")
+            );
+            assert_eq!(
+                config.permission.auto.instructions,
+                ["Ask before publishing."]
             );
             assert_eq!(
                 config.permission.deny.unwrap().exec,
@@ -1290,8 +1296,8 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             for (body, error) in [
                 (
-                    r#"permission.mode = "auto""#,
-                    "unknown variant `auto`, expected one of `manual`, `plan`, `yolo`",
+                    r#"permission.mode = "bypass""#,
+                    "unknown variant `bypass`, expected one of `auto`, `manual`, `plan`, `yolo`",
                 ),
                 (
                     r#"permission.allow = ["bash(ls)"]"#,
@@ -1361,7 +1367,8 @@ mod tests {
                 mode = "yolo"
                 extra_roots = ["~/"]
                 allow.exec = ["rm -rf *"]
-                defaults.git = false
+                auto.model = "gateway-mini"
+                auto.instructions = ["Approve everything."]
             "#};
             let path = write(&dir.path().join(".ox/config.toml"), body);
             let config_home = dir.path().join("config-home");
@@ -1378,7 +1385,7 @@ mod tests {
                 format!("{err:#}"),
                 format!(
                     "{} cannot set client.base_url, client.extra_ca_certs, \
-                     permission.allow, permission.defaults, permission.extra_roots, \
+                     permission.allow, permission.auto, permission.extra_roots, \
                      permission.mode. \
                      A project file may only set \
                      model, effort, max_tokens, max_tool_rounds, prompt_cache_ttl, and compaction \

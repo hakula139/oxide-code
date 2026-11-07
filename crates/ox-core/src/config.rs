@@ -1058,7 +1058,9 @@ mod tests {
             assert!(config.gateway.structured_outputs);
             assert_eq!(config.theme.base, DEFAULT_THEME);
             assert!(config.theme.overrides.is_empty());
-            assert_eq!(config.permission.mode(), Mode::Manual);
+            assert_eq!(config.permission.mode(), Mode::Auto);
+            assert_eq!(config.permission_auto.model.id(), "claude-haiku-5-5");
+            assert_eq!(config.permission_auto.instructions, [] as [&str; 0]);
             assert_eq!(
                 config.provenance,
                 Provenance {
@@ -2314,7 +2316,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn permission_resolves_each_tier_and_the_defaults_across_layers() {
+        async fn permission_resolves_each_tier_across_layers() {
             let dir = tempfile::tempdir().unwrap();
             write_user_config(
                 dir.path(),
@@ -2328,12 +2330,13 @@ mod tests {
                     [permission.allow]
                     exec = ["git *", "cargo *", "rm *"]
 
-                    [permission.defaults]
-                    git = false
-                    rm = false
                 "#},
             );
-            write_drop_in(dir.path(), "10-team.toml", "permission.defaults.git = true");
+            write_drop_in(
+                dir.path(),
+                "10-team.toml",
+                r#"permission.ask.edit = [".git/config"]"#,
+            );
 
             let config = load_with(&dir, &[]).await.unwrap();
 
@@ -2354,7 +2357,7 @@ mod tests {
             assert_eq!(
                 decide(PermissionClass::Exec, command("rm -rf target")),
                 Decision::Allow,
-                "`rm = false` turns the shipped `rm` rule off"
+                "an explicit allow rule covers the command"
             );
             assert_eq!(
                 decide(
@@ -2362,13 +2365,14 @@ mod tests {
                     Access::for_path(".git/config", &config.workspace)
                 ),
                 Decision::Ask,
-                "a later layer turns the `git` default back on"
+                "a later layer adds an explicit ask rule"
             );
         }
 
         #[tokio::test]
         async fn permission_denies_ssh_reads_under_a_home_spelled_with_a_trailing_slash_or_dot() {
             let dir = tempfile::tempdir().unwrap();
+            write_user_config(dir.path(), r#"permission.deny.read = ["~/.ssh"]"#);
             let home = dunce::canonicalize(dir.path()).unwrap().join("home");
             std::fs::create_dir(&home).unwrap();
             let key = home.join(".ssh").join("id_ed25519");
@@ -2394,29 +2398,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn permission_invalid_built_in_pattern_errors() {
-            let dir = tempfile::tempdir().unwrap();
-
-            let config_home = dir.path().join("config");
-            let err = Box::pin(temp_env::async_with_vars(
-                [
-                    (HOME_VAR, Some(Path::new("!home"))),
-                    ("XDG_CONFIG_HOME", Some(&config_home)),
-                ],
-                load_with(&dir, &[]),
-            ))
-            .await
-            .expect_err("a built-in pattern that fails to parse must fail the load");
-
-            assert_eq!(
-                format!("{err:#}"),
-                "invalid built-in `git` pattern \"!home/.git-credentials\": \
-                 a pattern cannot start with `!`, since patterns have no negation. \
-                 Write the paths to match instead, or turn off the built-in rule that covers them."
-            );
-        }
-
-        #[tokio::test]
         async fn permission_mode_env_beats_file() {
             let dir = tempfile::tempdir().unwrap();
             write_user_config(
@@ -2433,6 +2414,55 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn permission_auto_resolves_user_settings_and_their_sources() {
+            let dir = tempfile::tempdir().unwrap();
+            let user = write_user_config(
+                dir.path(),
+                indoc! {r#"
+                    [permission]
+                    mode = "manual"
+
+                    [permission.auto]
+                    model = "gateway-mini"
+                    instructions = ["Ask before publishing."]
+                "#},
+            );
+            let drop_in = write_drop_in(
+                dir.path(),
+                "10-team.toml",
+                indoc! {r#"
+                    [permission.auto]
+                    model = "gateway-review"
+                    instructions = ["Ask before deploying."]
+                "#},
+            );
+
+            let config = load_with(&dir, &[]).await.unwrap();
+            let snapshot = config.snapshot();
+
+            assert_eq!(config.permission.mode(), Mode::Manual);
+            assert_eq!(config.permission_auto.model.id(), "gateway-review");
+            assert_eq!(
+                config.permission_auto.instructions,
+                ["Ask before deploying."]
+            );
+            assert_eq!(config.provenance.permission_mode, Source::File(user));
+            assert_eq!(
+                config.provenance.permission_auto_model,
+                Source::File(drop_in.clone())
+            );
+            assert_eq!(
+                config.provenance.permission_auto_instructions,
+                Source::File(drop_in)
+            );
+            assert_eq!(snapshot.permission_auto.model.id(), "gateway-review");
+            assert_eq!(
+                snapshot.permission_auto.instructions,
+                ["Ask before deploying."]
+            );
+        }
+
+        #[tokio::test]
         async fn permission_invalid_mode_env_errors() {
             let dir = tempfile::tempdir().unwrap();
             let err = load_with(&dir, &[("OX_PERMISSION_MODE", "bypass")])
@@ -2440,7 +2470,7 @@ mod tests {
                 .expect_err("invalid mode must propagate");
             assert_eq!(
                 format!("{err:#}"),
-                r#"invalid OX_PERMISSION_MODE "bypass": expected one of manual, plan, yolo"#,
+                r#"invalid OX_PERMISSION_MODE "bypass": expected one of auto, manual, plan, yolo"#,
             );
         }
 
@@ -2632,8 +2662,6 @@ mod tests {
                     [permission]
                     deny.exec = ["git push *"]
                     allow.exec = ["cargo *"]
-                    defaults.rm = false
-                    defaults.ssh = false
                 "#},
             );
             let drop_in = write_drop_in(
@@ -2642,8 +2670,6 @@ mod tests {
                 indoc! {r#"
                     [permission]
                     deny.exec = ["curl *"]
-                    defaults.git = false
-                    defaults.ssh = true
                 "#},
             );
             let project = write_project_config(
@@ -2683,14 +2709,6 @@ mod tests {
                     ),
                     rule(Tier::Allow, PermissionClass::Exec, "cargo *", &user),
                 ],
-            );
-            assert_eq!(
-                config.provenance.disabled_defaults,
-                [
-                    Sourced::new(Shipped::Git, Source::File(drop_in)),
-                    Sourced::new(Shipped::Rm, Source::File(user)),
-                ],
-                "a later layer turns `ssh` back on",
             );
         }
 

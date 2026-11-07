@@ -1353,7 +1353,7 @@ mod tests {
             .collect()
     }
 
-    /// A policy in `/repo` with given tiers and the device, SSH, and credential groups disabled.
+    /// A policy in `/repo` with the given tiers.
     fn policy(
         mode: Mode,
         deny: &[(PermissionClass, &str)],
@@ -1377,34 +1377,7 @@ mod tests {
         allow: &[(PermissionClass, &str)],
         workspace: &Workspace,
     ) -> Policy {
-        resolved_policy(
-            mode,
-            deny,
-            ask,
-            allow,
-            &[Shipped::Devices, Shipped::Ssh, Shipped::Credentials],
-            workspace,
-        )
-    }
-
-    /// [`Policy::resolve`] in `workspace`, with the shipped defaults in `disabled` off.
-    fn resolved_policy(
-        mode: Mode,
-        deny: &[(PermissionClass, &str)],
-        ask: &[(PermissionClass, &str)],
-        allow: &[(PermissionClass, &str)],
-        disabled: &[Shipped],
-        workspace: &Workspace,
-    ) -> Policy {
-        Policy::resolve(
-            mode,
-            rules(deny),
-            rules(ask),
-            rules(allow),
-            disabled,
-            workspace,
-        )
-        .unwrap()
+        Policy::resolve(mode, rules(deny), rules(ask), rules(allow), workspace)
     }
 
     fn command(s: &str) -> Access {
@@ -1459,28 +1432,6 @@ mod tests {
         )
     }
 
-    /// The shipped groups whose built-in ask rules hold an edit of `target` in `workspace`, each
-    /// once and in [`Shipped::VARIANTS`] order.
-    fn protected(target: &Access, workspace: &Workspace) -> Vec<Shipped> {
-        let policy = Policy::resolve(
-            Mode::Manual,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            &[],
-            workspace,
-        )
-        .unwrap();
-        let mut groups: Vec<Shipped> = policy
-            .ask
-            .iter()
-            .filter(|entry| entry.rule.matches(EDIT, target, entry.discipline()))
-            .filter_map(|entry| entry.builtin)
-            .collect();
-        groups.dedup();
-        groups
-    }
-
     fn rule_basis(tier: Tier, class: PermissionClass, pattern: &str) -> Basis {
         Basis::Rule {
             tier,
@@ -1510,7 +1461,7 @@ mod tests {
             #[test]
             fn names_every_valid_value_for_an_unknown_one() {
                 let err = "bypass".parse::<Mode>().unwrap_err().to_string();
-                assert_eq!(err, "expected one of manual, plan, yolo");
+                assert_eq!(err, "expected one of auto, manual, plan, yolo");
             }
         }
     }
@@ -1702,10 +1653,8 @@ mod tests {
                         rules(&[(READ, ".env")]),
                         Vec::new(),
                         Vec::new(),
-                        &[],
                         &workspace,
-                    )
-                    .unwrap();
+                    );
                     let run = |command: &str| {
                         policy.decide(EXEC, &Access::for_command(command, &workspace))
                     };
@@ -1728,22 +1677,16 @@ mod tests {
                 std::fs::create_dir(&shared).unwrap();
                 let workspace = Workspace::resolve(&repo, &[slash_separated(&shared)]).unwrap();
 
-                for (raw, zone, groups, rooted) in [
-                    ("../shared/a.rs", Zone::Workspace, &[][..], &["a.rs"][..]),
-                    (
-                        "../shared/.git/config",
-                        Zone::Workspace,
-                        &[Shipped::Git],
-                        &[".git/config"],
-                    ),
-                    ("../elsewhere/a.rs", Zone::Outside, &[], &[]),
+                for (raw, zone, rooted) in [
+                    ("../shared/a.rs", Zone::Workspace, &["a.rs"][..]),
+                    ("../shared/.git/config", Zone::Workspace, &[".git/config"]),
+                    ("../elsewhere/a.rs", Zone::Outside, &[]),
                 ] {
                     let target = Access::for_path(raw, &workspace);
                     let (canonical, relative, actual) = resolved(&target);
                     assert_eq!(canonical, lexical_normalize(&repo.join(raw)), "{raw}");
                     assert_eq!(relative, None, "{raw}: outside the cwd");
                     assert_eq!(actual, zone, "{raw}");
-                    assert_eq!(protected(&target, &workspace), groups, "{raw}");
                     let Access::Path(PathTarget { rooted: actual, .. }) = &target else {
                         unreachable!();
                     };
@@ -1764,7 +1707,6 @@ mod tests {
                 assert_eq!(canonical, cwd.join("a.rs"));
                 assert_eq!(relative, Some(Path::new("a.rs")));
                 assert_eq!(zone, Zone::Workspace);
-                assert_eq!(protected(&target, &Workspace::new(cwd)), []);
             }
 
             #[test]
@@ -1809,47 +1751,6 @@ mod tests {
                         "{raw}",
                     );
                 }
-            }
-
-            #[test]
-            fn records_the_group_of_a_protected_name_inside_cwd() {
-                let cwd_dir = canonical_tempdir();
-                let cwd = cwd_dir.path();
-                let target = Access::for_path(".vscode/tasks.json", &Workspace::new(cwd));
-                let (_, relative, zone) = resolved(&target);
-                assert_eq!(relative, Some(Path::new(".vscode/tasks.json")));
-                assert_eq!(zone, Zone::Workspace);
-                assert_eq!(protected(&target, &Workspace::new(cwd)), [Shipped::Editors]);
-            }
-
-            #[test]
-            fn app_dirs_belong_to_the_ox_group() {
-                let root_dir = canonical_tempdir();
-                let root = root_dir.path();
-                temp_env::with_vars(
-                    [
-                        ("XDG_CONFIG_HOME", Some(root.join("config"))),
-                        ("XDG_DATA_HOME", Some(root.join("data"))),
-                        ("XDG_STATE_HOME", Some(root.join("state"))),
-                    ],
-                    || {
-                        for raw in [
-                            "config/ox/config.toml",
-                            "data/ox/sessions.db",
-                            "state/ox/log/oxide-code.log",
-                        ] {
-                            let target = Access::for_path(raw, &Workspace::new(root));
-                            assert_eq!(
-                                protected(&target, &Workspace::new(root)),
-                                [Shipped::Ox],
-                                "{raw}"
-                            );
-                        }
-                        let sibling =
-                            Access::for_path("config/other/x.toml", &Workspace::new(root));
-                        assert_eq!(protected(&sibling, &Workspace::new(root)), []);
-                    },
-                );
             }
 
             #[test]
@@ -2033,13 +1934,11 @@ mod tests {
                 );
 
                 let target = Access::for_path("x/../tools/pre-commit", &Workspace::new(cwd));
-                assert_eq!(protected(&target, &Workspace::new(cwd)), [Shipped::Git]);
-                let p = resolved_policy(
+                let p = policy_in(
                     Mode::Manual,
                     &[],
-                    &[],
+                    &[(EDIT, "./.git/**")],
                     &[(EDIT, "*")],
-                    &[],
                     &Workspace::new(cwd),
                 );
                 assert_eq!(p.decide(EDIT, &target), Decision::Ask);
@@ -2059,54 +1958,6 @@ mod tests {
                     resolved(&target),
                     (outside.join("new").as_path(), None, Zone::Outside),
                 );
-            }
-
-            #[test]
-            fn symlinked_protected_name_protects_both_spellings() {
-                // `.vscode -> tools/vscode` at the top and `sub/.idea -> ../tools/idea` deeper: the
-                // link target named directly and the nested link named as spelled must both ask.
-                let cwd_dir = canonical_tempdir();
-                let cwd = cwd_dir.path();
-                std::fs::create_dir_all(cwd.join("tools/vscode")).unwrap();
-                std::fs::create_dir_all(cwd.join("tools/idea")).unwrap();
-                std::fs::create_dir(cwd.join("sub")).unwrap();
-                symlink_dir(Path::new("tools/vscode"), &cwd.join(".vscode"));
-                symlink_dir(Path::new("../tools/idea"), &cwd.join("sub/.idea"));
-
-                for raw in [
-                    ".vscode/tasks.json",
-                    "tools/vscode/tasks.json",
-                    "sub/.idea/workspace.xml",
-                ] {
-                    let target = Access::for_path(raw, &Workspace::new(cwd));
-                    assert_eq!(
-                        protected(&target, &Workspace::new(cwd)),
-                        [Shipped::Editors],
-                        "{raw}"
-                    );
-                }
-                let sibling = Access::for_path("tools/other.rs", &Workspace::new(cwd));
-                assert_eq!(protected(&sibling, &Workspace::new(cwd)), []);
-            }
-
-            #[test]
-            fn symlinked_protected_name_in_an_extra_root_protects_its_target() {
-                let base_dir = canonical_tempdir();
-                let base = base_dir.path();
-                let (repo, shared) = (base.join("repo"), base.join("shared"));
-                std::fs::create_dir(&repo).unwrap();
-                std::fs::create_dir_all(shared.join("tools/vscode")).unwrap();
-                symlink_dir(Path::new("tools/vscode"), &shared.join(".vscode"));
-                let workspace = Workspace::resolve(&repo, &[slash_separated(&shared)]).unwrap();
-
-                for (raw, groups) in [
-                    ("../shared/.vscode/tasks.json", &[Shipped::Editors][..]),
-                    ("../shared/tools/vscode/tasks.json", &[Shipped::Editors]),
-                    ("../shared/tools/other.rs", &[]),
-                ] {
-                    let target = Access::for_path(raw, &workspace);
-                    assert_eq!(protected(&target, &workspace), groups, "{raw}");
-                }
             }
 
             #[test]
@@ -2201,7 +2052,6 @@ mod tests {
                 let (path, relative, _) = resolved(&target);
                 assert_eq!(path.as_os_str(), cwd.join(r".git\config").as_os_str());
                 assert_eq!(relative, Some(Path::new(r".git\config")));
-                assert_eq!(protected(&target, &Workspace::new(cwd)), [Shipped::Git]);
                 let p = policy_in(
                     Mode::Manual,
                     &[(EDIT, "secrets-store/key")],
@@ -2366,17 +2216,17 @@ mod tests {
                     Basis::Session(make.clone()),
                     "the session `allow.exec` pattern `make *`",
                 ),
-                (Basis::Builtin(Shipped::Ssh), "the built-in `ssh` rule"),
-                (Basis::Mode(Mode::Plan), "`plan` mode"),
-                (Basis::Read, "the default for reads"),
                 (
-                    Basis::Workspace,
-                    "the default for edits inside the workspace",
+                    Basis::Classifier {
+                        reason: "Needs approval".to_owned(),
+                    },
+                    "the automatic approval check: Needs approval",
                 ),
-                (Basis::SafeRead, "a known-safe read"),
+                (Basis::Internal, "a session-local operation"),
+                (Basis::Mode(Mode::Plan), "`plan` mode"),
                 (
-                    Basis::Command(vec![Basis::SafeRead, Basis::Session(make)]),
-                    "a known-safe read, the session `allow.exec` pattern `make *`",
+                    Basis::Command(vec![Basis::Session(make)]),
+                    "the session `allow.exec` pattern `make *`",
                 ),
                 (
                     Basis::Unrecognized {
@@ -2407,8 +2257,12 @@ mod tests {
                     Some("Asks because of the `ask.exec` pattern `git push *`"),
                 );
                 assert_eq!(
-                    Basis::Builtin(Shipped::Git).reason().as_deref(),
-                    Some("Asks because of the built-in `git` rule"),
+                    Basis::Classifier {
+                        reason: "Needs approval".to_owned()
+                    }
+                    .reason()
+                    .as_deref(),
+                    Some("Needs approval"),
                 );
                 assert_eq!(Basis::Mode(Mode::Manual).reason(), None);
             }
@@ -2480,187 +2334,6 @@ mod tests {
             use super::*;
 
             #[test]
-            fn shipped_defaults_each_hold_a_call_they_name_until_disabled() {
-                let root_dir = canonical_tempdir();
-                let root = root_dir.path();
-                let (cwd, home, data, config) = (
-                    root.join("repo"),
-                    root.join("home"),
-                    root.join("data"),
-                    root.join("config"),
-                );
-                for dir in [&cwd, &home, &data] {
-                    std::fs::create_dir(dir).unwrap();
-                }
-                let ssh_key = slash_separated(&home.join(".ssh/id_ed25519"));
-                let credentials = slash_separated(&data.join("ox/credentials.json"));
-                let claude = slash_separated(&home.join(".claude/.credentials.json"));
-                let git_store = slash_separated(&home.join(".git-credentials"));
-                let xdg_git_store = slash_separated(&config.join("git/credentials"));
-                let mut cases = vec![
-                    (Shipped::Rm, EXEC, command("rm -rf target"), Decision::Ask),
-                    (Shipped::Rm, EXEC, command("rm -fr /tmp/x"), Decision::Ask),
-                    (Shipped::Ssh, READ, outside(&ssh_key), Decision::Deny),
-                    (
-                        Shipped::Credentials,
-                        READ,
-                        outside(&credentials),
-                        Decision::Deny,
-                    ),
-                    (Shipped::Credentials, READ, outside(&claude), Decision::Deny),
-                    (
-                        Shipped::Credentials,
-                        READ,
-                        outside(&git_store),
-                        Decision::Deny,
-                    ),
-                    (
-                        Shipped::Credentials,
-                        READ,
-                        outside(&xdg_git_store),
-                        Decision::Deny,
-                    ),
-                ];
-                if cfg!(unix) {
-                    cases.push((
-                        Shipped::Devices,
-                        EXEC,
-                        command("echo x > /dev/sda"),
-                        Decision::Ask,
-                    ));
-                }
-
-                temp_env::with_vars(
-                    [
-                        (HOME_VAR, Some(&home)),
-                        ("XDG_DATA_HOME", Some(&data)),
-                        ("XDG_CONFIG_HOME", Some(&config)),
-                        ("CLAUDE_CONFIG_DIR", None),
-                    ],
-                    || {
-                        let workspace = Workspace::new(&cwd);
-                        let allow_all = [(READ, "*"), (EDIT, "*"), (EXEC, "*")];
-                        for (group, class, target, held) in &cases {
-                            let resolve = |disabled: &[Shipped]| {
-                                resolved_policy(
-                                    Mode::Manual,
-                                    &[],
-                                    &[],
-                                    &allow_all,
-                                    disabled,
-                                    &workspace,
-                                )
-                            };
-                            assert_eq!(resolve(&[]).decide(*class, target), *held, "{group:?}");
-                            assert_eq!(
-                                resolve(&[*group]).decide(*class, target),
-                                Decision::Allow,
-                                "{group:?} off"
-                            );
-                        }
-                    },
-                );
-            }
-
-            #[test]
-            fn protects_the_user_git_ssh_cloud_and_claude_code_config_until_disabled() {
-                let root_dir = canonical_tempdir();
-                let root = root_dir.path();
-                let (cwd, home, config, claude) = (
-                    root.join("repo"),
-                    root.join("home"),
-                    root.join("config"),
-                    root.join("claude-work"),
-                );
-                std::fs::create_dir(&cwd).unwrap();
-                temp_env::with_vars(
-                    [
-                        (HOME_VAR, Some(&home)),
-                        ("XDG_CONFIG_HOME", Some(&config)),
-                        ("CLAUDE_CONFIG_DIR", Some(&claude)),
-                    ],
-                    || {
-                        let workspace = Workspace::new(&cwd);
-                        let resolve = |disabled: &[Shipped]| {
-                            resolved_policy(
-                                Mode::Manual,
-                                &[],
-                                &[],
-                                &[(EDIT, "*")],
-                                disabled,
-                                &workspace,
-                            )
-                        };
-                        let edit =
-                            |path: PathBuf| Access::for_path(slash_separated(&path), &workspace);
-
-                        for (path, group) in [
-                            (config.join("git/config"), Shipped::Git),
-                            (config.join("git/credentials"), Shipped::Git),
-                            (home.join(".git-credentials"), Shipped::Git),
-                            (home.join(".ssh/config"), Shipped::Ssh),
-                            (home.join(".ssh/authorized_keys"), Shipped::Ssh),
-                            (home.join(".ssh/authorized_keys2"), Shipped::Ssh),
-                            (home.join(".ssh/rc"), Shipped::Ssh),
-                            (home.join(".ssh/environment"), Shipped::Ssh),
-                            (home.join(".aws/config"), Shipped::Cloud),
-                            (home.join(".azure/config"), Shipped::Cloud),
-                            (
-                                home.join(".config/gcloud/configurations/config_default"),
-                                Shipped::Cloud,
-                            ),
-                            (home.join(".docker/config.json"), Shipped::Cloud),
-                            (home.join(".kube/config"), Shipped::Cloud),
-                            (claude.join("settings.json"), Shipped::Agents),
-                            (claude.join("hooks/pre.sh"), Shipped::Agents),
-                        ] {
-                            let target = edit(path.clone());
-                            assert_eq!(
-                                resolve(&[]).decide(EDIT, &target),
-                                Decision::Ask,
-                                "{path:?}"
-                            );
-                            assert_eq!(
-                                resolve(&[group]).decide(EDIT, &target),
-                                Decision::Allow,
-                                "{path:?} with {group} off"
-                            );
-                        }
-                        let append = Access::for_command(
-                            &format!(
-                                "echo key >> {}",
-                                slash_separated(&home.join(".ssh/authorized_keys2"))
-                            ),
-                            &workspace,
-                        );
-                        assert_eq!(resolve(&[]).decide(EXEC, &append), Decision::Ask);
-                        let notes = edit(home.join("notes.txt"));
-                        assert_eq!(resolve(&[]).decide(EDIT, &notes), Decision::Allow);
-                    },
-                );
-            }
-
-            #[test]
-            fn disables_one_protected_group_and_keeps_the_rest() {
-                let cwd_dir = canonical_tempdir();
-                let cwd = cwd_dir.path();
-                let workspace = Workspace::new(cwd);
-                let p = resolved_policy(Mode::Manual, &[], &[], &[], &[Shipped::Cargo], &workspace);
-
-                let cargo = Access::for_path(".cargo/config.toml", &workspace);
-                let git = Access::for_path(".git/config", &workspace);
-                assert_eq!(p.decide(EDIT, &cargo), Decision::Allow);
-                assert_eq!(p.decide(EDIT, &git), Decision::Ask);
-                assert_eq!(
-                    p.decide(
-                        EXEC,
-                        &Access::for_command("echo x > .cargo/config", &workspace)
-                    ),
-                    Decision::Allow
-                );
-            }
-
-            #[test]
             fn deny_and_ask_rules_also_cover_where_their_literal_prefix_resolves() {
                 // `secrets -> ../vault` and `alias -> real`: naming the link targets directly must
                 // still hold the call back, for an anchored rule and an absolute one alike.
@@ -2674,11 +2347,10 @@ mod tests {
                 symlink_dir(Path::new("real"), &root.join("alias"));
 
                 let alias = slash_separated(&root.join("alias"));
-                let p = resolved_policy(
+                let p = policy_in(
                     Mode::Manual,
                     &[(READ, "secrets/**")],
                     &[(READ, &alias)],
-                    &[],
                     &[],
                     &Workspace::new(&cwd),
                 );
@@ -2709,8 +2381,7 @@ mod tests {
                     symlink_dir(Path::new("real"), &root.join(name));
                     let pattern = format!("./{}/**", escaped(Path::new(name)));
 
-                    let p =
-                        resolved_policy(Mode::Yolo, &[(READ, &pattern)], &[], &[], &[], &workspace);
+                    let p = policy_in(Mode::Yolo, &[(READ, &pattern)], &[], &[], &workspace);
                     let target = Access::for_path("real/key", &workspace);
 
                     assert_eq!(p.decide(READ, &target), Decision::Deny, "{name}");
@@ -2736,8 +2407,7 @@ mod tests {
                     #[cfg(unix)]
                     r"./secrets\/key",
                 ] {
-                    let p =
-                        resolved_policy(Mode::Yolo, &[(READ, pattern)], &[], &[], &[], &workspace);
+                    let p = policy_in(Mode::Yolo, &[(READ, pattern)], &[], &[], &workspace);
                     let filter = p.read_filter();
                     let walk = filter.walk(root, root, &workspace);
 
@@ -2767,7 +2437,7 @@ mod tests {
                 symlink_dir(Path::new("vault"), &root.join("alias"));
                 let workspace = Workspace::new(&root.join("work"));
                 let pattern = format!("./{{{}}}/**", escaped(&root.join("alias")));
-                let p = resolved_policy(Mode::Yolo, &[(READ, &pattern)], &[], &[], &[], &workspace);
+                let p = policy_in(Mode::Yolo, &[(READ, &pattern)], &[], &[], &workspace);
 
                 let target = Access::for_path(root.join("vault/key"), &workspace);
 
@@ -2777,24 +2447,6 @@ mod tests {
                         .walk(&root.join("vault"), &root.join("vault"), &workspace)
                         .withholds(&root.join("vault/key"))
                 );
-            }
-
-            #[test]
-            fn escaped_home_directories_keep_shipped_symlink_targets_protected() {
-                let root_dir = canonical_tempdir();
-                let root = root_dir.path();
-                let home = root.join("home[1]");
-                std::fs::create_dir(&home).unwrap();
-                std::fs::create_dir(root.join("vault")).unwrap();
-                symlink_dir(Path::new("../vault"), &home.join(".ssh"));
-
-                temp_env::with_var(HOME_VAR, Some(&home), || {
-                    let workspace = Workspace::new(root);
-                    let p = resolved_policy(Mode::Yolo, &[], &[], &[], &[], &workspace);
-                    let target = Access::for_path("vault/key", &workspace);
-
-                    assert_eq!(p.decide(READ, &target), Decision::Deny);
-                });
             }
 
             #[test]
@@ -2808,7 +2460,7 @@ mod tests {
                 let link = root.join("secrets[1]");
                 symlink_dir(Path::new("first"), &link);
                 let pattern = format!("./{}/**", globset::escape("secrets[1]"));
-                let p = resolved_policy(Mode::Yolo, &[(READ, &pattern)], &[], &[], &[], &workspace);
+                let p = policy_in(Mode::Yolo, &[(READ, &pattern)], &[], &[], &workspace);
 
                 #[cfg(unix)]
                 std::fs::remove_file(&link).unwrap();
@@ -2835,14 +2487,7 @@ mod tests {
                 let root = root_dir.path();
                 let workspace = Workspace::new(root);
                 std::fs::create_dir(root.join("real")).unwrap();
-                let p = resolved_policy(
-                    Mode::Yolo,
-                    &[(READ, "./secrets/**")],
-                    &[],
-                    &[],
-                    &[],
-                    &workspace,
-                );
+                let p = policy_in(Mode::Yolo, &[(READ, "./secrets/**")], &[], &[], &workspace);
 
                 symlink_dir(Path::new("real"), &root.join("secrets"));
                 let target = Access::for_path("real/key", &workspace);
@@ -2861,7 +2506,7 @@ mod tests {
                 let root = root_dir.path();
                 let workspace = Workspace::new(root);
                 std::fs::write(root.join("real"), "fixture").unwrap();
-                let p = resolved_policy(Mode::Yolo, &[(READ, "./key")], &[], &[], &[], &workspace);
+                let p = policy_in(Mode::Yolo, &[(READ, "./key")], &[], &[], &workspace);
 
                 symlink_file(Path::new("real"), &root.join("key"));
                 let target = Access::for_path("real", &workspace);
@@ -2879,14 +2524,7 @@ mod tests {
                 let root_dir = canonical_tempdir();
                 let root = root_dir.path();
                 let workspace = Workspace::new(root);
-                let p = resolved_policy(
-                    Mode::Yolo,
-                    &[(EDIT, "./secrets/key")],
-                    &[],
-                    &[],
-                    &[],
-                    &workspace,
-                );
+                let p = policy_in(Mode::Yolo, &[(EDIT, "./secrets/key")], &[], &[], &workspace);
 
                 symlink_dir(Path::new("missing"), &root.join("secrets"));
                 let target = Access::for_path("missing/key", &workspace);
@@ -2922,8 +2560,7 @@ mod tests {
                                         },
                                     ),
                                 ] {
-                                    let p =
-                                        resolved_policy(mode, &deny, &ask, &[], &[], &workspace);
+                                    let p = policy_in(mode, &deny, &ask, &[], &workspace);
                                     let filter = p.read_filter();
                                     let walk = filter.walk(requested, requested, &workspace);
                                     for name in ["secrets", "secrets/key", "secrets/new/deep/key"] {
@@ -2958,8 +2595,7 @@ mod tests {
                 let workspace = Workspace::new(&root.join("repo"));
                 let pattern = slash_separated(&root.join("notes"));
                 let alias = Path::new("/System/Volumes/Data").join(root.strip_prefix("/").unwrap());
-                let p =
-                    resolved_policy(Mode::Manual, &[], &[], &[(EDIT, &pattern)], &[], &workspace);
+                let p = policy_in(Mode::Manual, &[], &[], &[(EDIT, &pattern)], &workspace);
 
                 let exact = Access::for_path(root.join("notes/key"), &workspace);
                 let aliased = Access::for_path(alias.join("notes/key"), &workspace);
@@ -2975,108 +2611,13 @@ mod tests {
                 let root = root_dir.path();
                 let workspace = Workspace::new(root);
                 let pattern = slash_separated(&root.join("secrets"));
-                let p = resolved_policy(Mode::Yolo, &[(READ, &pattern)], &[], &[], &[], &workspace);
+                let p = policy_in(Mode::Yolo, &[(READ, &pattern)], &[], &[], &workspace);
                 let alias = Path::new("/System/Volumes/Data").join(root.strip_prefix("/").unwrap());
 
                 symlink_dir(Path::new("missing"), &root.join("secrets"));
                 let target = Access::for_path(alias.join("secrets/key"), &workspace);
 
                 assert_eq!(p.decide(READ, &target), Decision::Deny);
-            }
-
-            #[cfg(target_os = "macos")]
-            #[test]
-            fn volume_aliases_keep_shipped_home_rules_effective() {
-                let home_dir = tempfile::tempdir_in("/private/tmp").unwrap();
-                let home = home_dir.path();
-                std::fs::create_dir(home.join(".ssh")).unwrap();
-                let alias = Path::new("/System/Volumes/Data").join(home.strip_prefix("/").unwrap());
-
-                temp_env::with_var(HOME_VAR, Some(home), || {
-                    let workspace = Workspace::new(&home.join("repo"));
-                    for &mode in Mode::VARIANTS {
-                        let p = resolved_policy(mode, &[], &[], &[(EDIT, "*")], &[], &workspace);
-                        let target = Access::for_path(alias.join(".ssh/fixture"), &workspace);
-
-                        assert_eq!(p.decide(READ, &target), Decision::Deny, "{mode}");
-                        assert_eq!(
-                            p.decide(EDIT, &target),
-                            if mode == Mode::Plan {
-                                Decision::Deny
-                            } else if mode == Mode::Yolo {
-                                Decision::Allow
-                            } else {
-                                Decision::Ask
-                            },
-                            "{mode}"
-                        );
-                    }
-                });
-            }
-
-            #[cfg(unix)]
-            #[test]
-            fn denies_reading_a_process_environment_until_credentials_are_off() {
-                let base_dir = canonical_tempdir();
-                let cwd = base_dir.path().to_path_buf();
-                let workspace = Workspace::new(&cwd);
-                let resolve = |disabled: &[Shipped]| {
-                    Policy::resolve(
-                        Mode::Manual,
-                        Vec::new(),
-                        Vec::new(),
-                        Vec::new(),
-                        disabled,
-                        &workspace,
-                    )
-                    .unwrap()
-                };
-
-                for path in ["/proc/1/environ", "/proc/1/task/2/environ"] {
-                    assert_eq!(
-                        resolve(&[]).decide(READ, &outside(path)),
-                        Decision::Deny,
-                        "{path}"
-                    );
-                    assert_eq!(
-                        resolve(&[Shipped::Credentials]).decide(READ, &outside(path)),
-                        Decision::Allow,
-                        "{path}"
-                    );
-                }
-                assert_eq!(
-                    resolve(&[]).decide(READ, &outside("/proc/1/status")),
-                    Decision::Allow
-                );
-            }
-
-            #[cfg(target_os = "linux")]
-            #[test]
-            fn holds_back_a_process_environment_reached_through_a_link() {
-                let base_dir = canonical_tempdir();
-                let cwd = base_dir.path().to_path_buf();
-                symlink_file(Path::new("/proc/self/environ"), &cwd.join("env"));
-                symlink_file(
-                    Path::new("/proc/thread-self/environ"),
-                    &cwd.join("thread-env"),
-                );
-                let workspace = Workspace::new(&cwd);
-                let p = Policy::resolve(
-                    Mode::Manual,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    &[],
-                    &workspace,
-                )
-                .unwrap();
-
-                for name in ["env", "thread-env"] {
-                    let target = Access::for_path(name, &workspace);
-                    assert_eq!(p.decide(READ, &target), Decision::Deny, "{name}");
-                }
-                let cat = Access::for_command("cat env", &workspace);
-                assert_eq!(p.decide(EXEC, &cat), Decision::Deny);
             }
         }
 
@@ -3121,8 +2662,6 @@ mod tests {
                     &Workspace::new(cwd),
                 );
 
-                let protected = Access::for_path(".git/config", &Workspace::new(cwd));
-                assert!(p.session_grant(EDIT, &protected).is_none());
                 assert!(p.session_grant(EXEC, &command("git push origin")).is_none());
                 assert!(p.session_grant(EXEC, &command("ls *.rs")).is_none());
             }
@@ -3132,37 +2671,7 @@ mod tests {
             use super::*;
 
             #[test]
-            fn turns_off_the_group_alone_when_the_call_then_runs() {
-                let p = policy(Mode::Manual, &[], &[], &[(EXEC, "rm *")]);
-
-                let fix = p.config_fix(EXEC, &command("rm -rf build"));
-
-                assert_eq!(
-                    fix,
-                    Some(ConfigFix::Disable {
-                        group: Shipped::Rm,
-                        allow: None,
-                    }),
-                );
-            }
-
-            #[test]
-            fn adds_the_allow_rule_the_mode_still_needs_once_the_group_is_off() {
-                let p = policy(Mode::Manual, &[], &[], &[]);
-
-                let fix = p.config_fix(EXEC, &command("rm -rf build"));
-
-                assert_eq!(
-                    fix,
-                    Some(ConfigFix::Disable {
-                        group: Shipped::Rm,
-                        allow: Some(Rule::parse(EXEC, "rm -rf build").unwrap()),
-                    }),
-                );
-            }
-
-            #[test]
-            fn suggests_the_allow_rule_for_a_call_no_group_holds() {
+            fn suggests_the_allow_rule_for_an_unmatched_call() {
                 let p = policy(Mode::Manual, &[], &[], &[]);
 
                 let fix = p.config_fix(EXEC, &command("cargo test"));
@@ -3170,53 +2679,6 @@ mod tests {
                 assert_eq!(
                     fix,
                     Some(ConfigFix::Allow(Rule::parse(EXEC, "cargo test").unwrap()))
-                );
-            }
-
-            #[test]
-            fn offers_nothing_for_a_group_that_guards_secrets_or_a_call_still_held() {
-                temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
-                    let workspace = Workspace::new(Path::new(&abs("/repo")));
-                    let p = resolved_policy(Mode::Manual, &[], &[], &[], &[], &workspace);
-                    let held = command("rm -rf build > .git/log");
-                    let key = Access::for_path(abs("/home/u/.ssh/id_rsa"), &workspace);
-                    let ssh_rc = Access::for_path(abs("/home/u/.ssh/rc"), &workspace);
-                    assert_eq!(p.verdict(EXEC, &held).basis, Basis::Builtin(Shipped::Git));
-                    assert_eq!(p.verdict(READ, &key).basis, Basis::Builtin(Shipped::Ssh));
-                    assert_eq!(p.verdict(EDIT, &ssh_rc).basis, Basis::Builtin(Shipped::Ssh));
-
-                    assert_eq!(p.config_fix(EXEC, &held), None);
-                    assert_eq!(p.config_fix(READ, &key), None);
-                    assert_eq!(p.config_fix(EDIT, &ssh_rc), None);
-                });
-            }
-
-            #[cfg(unix)]
-            #[test]
-            fn drops_the_patterns_of_the_group_it_turns_off() {
-                let workspace = Workspace::new(Path::new("/repo"));
-                let p = resolved_policy(
-                    Mode::Manual,
-                    &[],
-                    &[],
-                    &[(EDIT, "/dev/**")],
-                    &[],
-                    &workspace,
-                );
-                let target = Access::for_path("/dev/null", &workspace);
-                assert_eq!(
-                    p.verdict(EDIT, &target).basis,
-                    Basis::Builtin(Shipped::Devices)
-                );
-
-                let fix = p.config_fix(EDIT, &target);
-
-                assert_eq!(
-                    fix,
-                    Some(ConfigFix::Disable {
-                        group: Shipped::Devices,
-                        allow: None,
-                    }),
                 );
             }
         }
@@ -3229,7 +2691,7 @@ mod tests {
                 let root_dir = canonical_tempdir();
                 let root = root_dir.path();
                 let workspace = Workspace::new(root);
-                let p = resolved_policy(Mode::Yolo, &[(READ, "*")], &[], &[], &[], &workspace);
+                let p = policy_in(Mode::Yolo, &[(READ, "*")], &[], &[], &workspace);
 
                 let filter = p.read_filter();
                 let walk = filter.walk(root, root, &workspace);
@@ -3244,11 +2706,10 @@ mod tests {
                 let cwd_dir = canonical_tempdir();
                 let cwd = cwd_dir.path();
                 let secrets = slash_separated(&cwd.join("secrets"));
-                let p = resolved_policy(
+                let p = policy_in(
                     Mode::Manual,
                     &[(READ, ".env"), (EDIT, "notes.md")],
                     &[(READ, &secrets)],
-                    &[],
                     &[],
                     &Workspace::new(cwd),
                 );
@@ -3267,7 +2728,7 @@ mod tests {
                     assert_eq!(walk.withholds(&cwd.join(name)), held.is_some(), "{name}");
                     assert_eq!(
                         p.decide(READ, &gate),
-                        held.unwrap_or(Decision::Allow),
+                        held.unwrap_or(Decision::Ask),
                         "{name}"
                     );
                 }
@@ -3282,15 +2743,6 @@ mod tests {
 
         mod decide {
             use super::*;
-
-            /// The decision in `mode` for a call only a built-in ask rule holds, which `yolo` runs.
-            fn held_by_builtin(mode: Mode) -> Decision {
-                if mode == Mode::Yolo {
-                    Decision::Allow
-                } else {
-                    Decision::Ask
-                }
-            }
 
             #[test]
             fn deny_beats_ask_and_ask_beats_allow_in_every_mode() {
@@ -3320,12 +2772,12 @@ mod tests {
             }
 
             #[test]
-            fn ask_rule_outranks_the_workspace_allow_and_a_session_grant() {
+            fn ask_rule_outranks_allow_and_session_grants() {
                 let mut p = policy(
                     Mode::Manual,
                     &[],
                     &[(EDIT, "Cargo.lock"), (EXEC, "git push *")],
-                    &[],
+                    &[(EDIT, "*"), (EXEC, "*")],
                 );
                 p.allow_for_session(Rule::parse(EXEC, "git *").unwrap());
                 p.allow_for_session(Rule::parse(EDIT, "*").unwrap());
@@ -3346,84 +2798,53 @@ mod tests {
             }
 
             #[test]
-            fn read_class_allows_unless_a_deny_or_ask_rule_holds_it() {
-                let p = policy(
-                    Mode::Manual,
-                    &[(READ, ".env")],
-                    &[(READ, &abs("/etc/**"))],
-                    &[],
-                );
-                assert_eq!(
-                    p.decide(READ, &outside(&abs("/usr/share/x"))),
-                    Decision::Allow
-                );
-                assert_eq!(
-                    p.decide(READ, &workspace("/repo/.env", ".env")),
-                    Decision::Deny
-                );
-                assert_eq!(p.decide(READ, &outside(&abs("/etc/hosts"))), Decision::Ask);
-            }
-
-            #[test]
-            fn star_holds_a_call_with_no_target() {
-                let p = policy(Mode::Manual, &[(READ, "*")], &[], &[]);
-                assert_eq!(p.decide(READ, &Access::None), Decision::Deny);
-                let p = policy(Mode::Manual, &[], &[(READ, "*")], &[]);
-                assert_eq!(p.decide(READ, &Access::None), Decision::Ask);
-                let p = policy(Mode::Manual, &[], &[], &[]);
-                assert_eq!(p.decide(READ, &Access::None), Decision::Allow);
-            }
-
-            #[test]
-            fn protected_edit_asks_under_a_broad_allow_and_runs_in_yolo() {
-                for mode in [Mode::Manual, Mode::Yolo] {
-                    let p = policy(mode, &[], &[], &[(EDIT, "*")]);
-                    let envrc = path("/repo/.envrc", Some(".envrc"), Zone::Workspace);
-                    assert_eq!(p.decide(EDIT, &envrc), held_by_builtin(mode), "{mode}");
-                    assert_eq!(
-                        p.decide(READ, &envrc),
+            fn unmatched_paths_and_commands_follow_the_mode_without_builtin_policy() {
+                for (mode, read, edit, exec) in [
+                    (
+                        Mode::Auto,
+                        Decision::Classify,
+                        Decision::Classify,
+                        Decision::Classify,
+                    ),
+                    (Mode::Manual, Decision::Ask, Decision::Ask, Decision::Ask),
+                    (
+                        Mode::Yolo,
                         Decision::Allow,
-                        "{mode}: reads pass"
-                    );
+                        Decision::Allow,
+                        Decision::Allow,
+                    ),
+                    (Mode::Plan, Decision::Allow, Decision::Deny, Decision::Deny),
+                ] {
+                    let p = policy(mode, &[], &[], &[]);
+
+                    for target in [
+                        workspace("/repo/.git/config", ".git/config"),
+                        outside(&abs("/home/u/.ssh/key")),
+                    ] {
+                        assert_eq!(p.decide(READ, &target), read, "{mode}: {target:?}");
+                        assert_eq!(p.decide(EDIT, &target), edit, "{mode}: {target:?}");
+                    }
+                    assert_eq!(p.decide(EXEC, &command("rm -rf build")), exec, "{mode}");
                 }
             }
 
             #[test]
-            fn spilled_tool_output_reads_freely_and_holds_an_edit_outside_yolo() {
-                let root_dir = canonical_tempdir();
-                let root = root_dir.path();
-                let (cwd, home, data) = (root.join("repo"), root.join("home"), root.join("data"));
-                std::fs::create_dir(&cwd).unwrap();
-                temp_env::with_vars(
-                    [(HOME_VAR, Some(&home)), ("XDG_DATA_HOME", Some(&data))],
-                    || {
-                        let workspace = Workspace::new(&cwd);
-                        let store = SessionStore::open(&cwd, &cwd).unwrap();
-                        let spill = store.artifact_dir("s1").join("tool-results/x.txt");
-                        let target = Access::for_path(slash_separated(&spill), &workspace);
-
-                        for mode in [Mode::Manual, Mode::Yolo] {
-                            let p =
-                                resolved_policy(mode, &[], &[], &[(EDIT, "*")], &[], &workspace);
-                            assert_eq!(p.decide(READ, &target), Decision::Allow, "{mode}");
-                            assert_eq!(p.decide(EDIT, &target), held_by_builtin(mode), "{mode}");
-                        }
-                    },
-                );
-            }
-
-            #[test]
-            fn workspace_edit_allows_and_an_outside_edit_needs_an_allow_rule() {
-                let p = policy(Mode::Manual, &[], &[], &[(EDIT, &abs("/tmp/**"))]);
-                assert_eq!(
-                    p.decide(EDIT, &workspace("/repo/new.rs", "new.rs")),
-                    Decision::Allow
-                );
-                assert_eq!(p.decide(EDIT, &outside(&abs("/etc/passwd"))), Decision::Ask);
-                assert_eq!(
-                    p.decide(EDIT, &outside(&abs("/tmp/scratch.txt"))),
-                    Decision::Allow
-                );
+            fn session_local_reads_run_unless_explicitly_held() {
+                for &mode in Mode::VARIANTS {
+                    let p = policy(mode, &[(READ, "*")], &[(READ, "*")], &[(READ, "*")]);
+                    assert_eq!(p.decide(READ, &Access::None), Decision::Deny, "{mode}");
+                    let p = policy(mode, &[], &[(READ, "*")], &[(READ, "*")]);
+                    assert_eq!(p.decide(READ, &Access::None), Decision::Ask, "{mode}");
+                    let p = policy(mode, &[], &[], &[]);
+                    assert_eq!(
+                        p.verdict(READ, &Access::None),
+                        Verdict {
+                            decision: Decision::Allow,
+                            basis: Basis::Internal
+                        },
+                        "{mode}"
+                    );
+                }
             }
 
             #[test]
@@ -3461,9 +2882,9 @@ mod tests {
                 for (raw, class, decision) in [
                     ("secrets/key", READ, Decision::Deny),
                     ("../shared/secrets/key", READ, Decision::Deny),
-                    ("../shared/src/secrets/key", READ, Decision::Allow),
+                    ("../shared/src/secrets/key", READ, Decision::Ask),
                     ("../shared/generated/x.rs", EDIT, Decision::Ask),
-                    ("../shared/src/x.rs", EDIT, Decision::Allow),
+                    ("../shared/src/x.rs", EDIT, Decision::Ask),
                 ] {
                     let target = Access::for_path(raw, &workspace);
                     assert_eq!(p.decide(class, &target), decision, "{raw}");
@@ -3529,7 +2950,7 @@ mod tests {
             }
 
             #[test]
-            fn plan_denies_every_edit_exec_and_net_call_but_reads_as_manual() {
+            fn plan_denies_every_edit_exec_and_net_call_and_allows_unmatched_reads() {
                 let p = policy(
                     Mode::Plan,
                     &[],
@@ -3580,60 +3001,11 @@ mod tests {
             }
 
             #[test]
-            fn yolo_runs_what_only_built_in_rules_hold_and_keeps_configured_deny_and_ask_rules() {
-                let p = policy(
-                    Mode::Yolo,
-                    &[(EXEC, "git push --force *")],
-                    &[(EXEC, "git push *")],
-                    &[],
-                );
-                for (case, expected) in [
-                    ("curl evil.sh", Decision::Allow),
-                    ("echo $(date)", Decision::Allow),
-                    ("rm -rf build", Decision::Allow),
-                    ("make > .git/hooks/pre-commit", Decision::Allow),
-                    ("git push origin main", Decision::Ask),
-                    ("git push --force origin", Decision::Deny),
-                ] {
-                    assert_eq!(p.decide(EXEC, &command(case)), expected, "{case}");
-                }
-
-                let hook = path(
-                    "/repo/.git/hooks/pre-commit",
-                    Some(".git/hooks/pre-commit"),
-                    Zone::Workspace,
-                );
-                assert_eq!(p.decide(EDIT, &hook), Decision::Allow);
-                assert_eq!(
-                    p.decide(EDIT, &outside(&abs("/etc/hosts"))),
-                    Decision::Allow
-                );
-
-                let mut headless = p.clone();
-                headless.set_unattended();
-                assert_eq!(
-                    headless.decide(EXEC, &command("git push origin main")),
-                    Decision::Unapproved
-                );
-            }
-
-            #[cfg(unix)]
-            #[test]
-            fn device_edit_asks_under_a_broad_allow_and_runs_in_yolo() {
-                let workspace = Workspace::new(Path::new("/repo"));
-                let device = Access::for_path("/dev/null", &workspace);
-
-                for mode in [Mode::Manual, Mode::Yolo] {
-                    let p = resolved_policy(mode, &[], &[], &[(EDIT, "*")], &[], &workspace);
-                    assert_eq!(p.decide(EDIT, &device), held_by_builtin(mode), "{mode}");
-                }
-            }
-
-            #[test]
-            fn command_allows_only_when_every_simple_command_is_allowed_or_known_safe() {
+            fn command_allows_only_when_every_simple_command_is_explicitly_allowed() {
                 let p = policy(Mode::Manual, &[], &[], &[(EXEC, "cargo test *")]);
                 for (case, expected) in [
-                    ("cargo test && cat Cargo.toml | wc -l", Decision::Allow),
+                    ("cargo test && cargo test --lib", Decision::Allow),
+                    ("cargo test && cat Cargo.toml | wc -l", Decision::Ask),
                     ("RUST_LOG=debug nice -n 5 cargo test --all", Decision::Allow),
                     ("CARGO_TARGET_DIR=/tmp cargo test", Decision::Ask),
                     ("cargo test && rm -rf target", Decision::Ask),
@@ -3666,25 +3038,9 @@ mod tests {
             }
 
             #[test]
-            fn command_holds_every_spelling_of_a_forced_recursive_rm() {
+            fn explicit_allow_has_no_builtin_rm_exclusion() {
                 let p = policy(Mode::Manual, &[], &[], &[(EXEC, "*")]);
-                for case in [
-                    "rm -rfv /",
-                    "rm -r --force /",
-                    "rm / -rf",
-                    "rm -f -R x",
-                    "rm $'-rf' /",
-                    "$'rm' -rf /",
-                    "ls && /bin/rm --rec --f x",
-                    "sudo -u root rm -rf /",
-                    "busybox rm -rf x",
-                    "echo / | xargs rm -rf",
-                    "echo -rf / | xargs rm",
-                    r"find . -exec rm -rf {} \;",
-                ] {
-                    assert_eq!(p.decide(EXEC, &command(case)), Decision::Ask, "{case}");
-                }
-                for case in ["rm -r x", "rm -f x", "rm -- -rf", "rmdir -rf x"] {
+                for case in ["rm -rf build", "rm -r --force build", "rm build -rf"] {
                     assert_eq!(p.decide(EXEC, &command(case)), Decision::Allow, "{case}");
                 }
             }
@@ -3721,8 +3077,8 @@ mod tests {
                 for (case, expected) in [
                     ("./build.sh", Decision::Allow),
                     ("cd x && cargo build", Decision::Allow),
-                    ("cd x && cargo build 2>&1 | tail -20", Decision::Allow),
-                    ("cd x && cargo build | grep -A 5 error", Decision::Allow),
+                    ("cd x && cargo build 2>&1 | tail -20", Decision::Ask),
+                    ("cd x && cargo build | grep -A 5 error", Decision::Ask),
                     ("cd x && cargo build | tail -20 log", Decision::Ask),
                     ("cd /tmp/evil && ./build.sh", Decision::Ask),
                     ("cd x && ./build.sh", Decision::Ask),
@@ -3802,16 +3158,11 @@ mod tests {
                 ];
                 for mode in [Mode::Manual, Mode::Yolo] {
                     let p = policy(mode, &[(EXEC, "rm *")], &[], &[(EXEC, "*")]);
-                    for (case, construct) in unrecognized {
+                    for (case, _) in unrecognized {
                         let verdict = p.verdict(EXEC, &command(case));
                         let expected = match mode {
                             Mode::Yolo => (Decision::Allow, Basis::Mode(Mode::Yolo)),
-                            _ => (
-                                Decision::Ask,
-                                Basis::Unrecognized {
-                                    construct: construct.to_owned(),
-                                },
-                            ),
+                            _ => (Decision::Ask, Basis::Mode(Mode::Manual)),
                         };
                         assert_eq!(
                             (verdict.decision, verdict.basis),
@@ -3946,12 +3297,11 @@ mod tests {
                 let cwd = cwd_dir.path();
                 std::fs::create_dir(cwd.join(".git")).unwrap();
                 let outside = abs("/etc/hosts");
-                let p = resolved_policy(
+                let p = policy_in(
                     Mode::Manual,
                     &[(EDIT, "secret.txt")],
-                    &[(EDIT, "*.lock")],
-                    &[],
-                    &[],
+                    &[(EDIT, "*.lock"), (EDIT, ".envrc"), (EDIT, ".git/**")],
+                    &[(EXEC, "echo *"), (EDIT, "out.txt")],
                     &Workspace::new(cwd),
                 );
                 let workspace = Workspace::new(cwd);
@@ -3968,12 +3318,11 @@ mod tests {
 
                 let elsewhere = elsewhere_dir.path();
                 let notes = slash_separated(&elsewhere.join("notes.txt"));
-                let allowed = resolved_policy(
+                let allowed = policy_in(
                     Mode::Manual,
                     &[],
                     &[],
-                    &[(EDIT, &notes)],
-                    &[],
+                    &[(EXEC, "echo *"), (EDIT, &notes)],
                     &Workspace::new(cwd),
                 );
                 assert_eq!(
@@ -4025,18 +3374,13 @@ mod tests {
                 std::fs::write(home.join(".ssh/id_rsa"), "").unwrap();
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     let workspace = Workspace::new(&cwd);
-                    let resolve = |disabled: &[Shipped]| {
-                        resolved_policy(
-                            Mode::Manual,
-                            &[],
-                            &[],
-                            &[(EXEC, "cat *"), (EXEC, "grep *")],
-                            disabled,
-                            &workspace,
-                        )
-                    };
-
-                    let p = resolve(&[]);
+                    let p = policy_in(
+                        Mode::Manual,
+                        &[(READ, "~/.ssh")],
+                        &[(READ, "secrets")],
+                        &[(EXEC, "cat *"), (EXEC, "grep *")],
+                        &workspace,
+                    );
                     for (case, expected) in [
                         ("cat src/*.rs", Decision::Allow),
                         ("cat ~/*/id_rsa", Decision::Allow),
@@ -4054,7 +3398,8 @@ mod tests {
                     ] {
                         assert_eq!(decide_command(&p, case, &workspace), expected, "{case}");
                     }
-                    let unguarded = resolve(&[Shipped::Ssh, Shipped::Credentials]);
+                    let unguarded =
+                        policy_in(Mode::Manual, &[], &[], &[(EXEC, "cat *")], &workspace);
                     assert_eq!(
                         decide_command(&unguarded, "cat $F", &workspace),
                         Decision::Allow,
@@ -4075,11 +3420,10 @@ mod tests {
                 std::fs::write(cwd.join("notes"), "").unwrap();
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     let workspace = Workspace::new(&cwd);
-                    let yolo = resolved_policy(
+                    let yolo = policy_in(
                         Mode::Yolo,
-                        &[],
+                        &[(READ, "~/.ssh")],
                         &[(READ, "secrets")],
-                        &[],
                         &[],
                         &workspace,
                     );
@@ -4133,17 +3477,17 @@ mod tests {
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     let workspace = Workspace::new(&cwd);
                     for mode in [Mode::Manual, Mode::Yolo] {
-                        let p = resolved_policy(
+                        let p = policy_in(
                             mode,
                             &[
                                 (READ, "./secrets"),
                                 (EDIT, "./secrets"),
                                 (READ, "./sub/private"),
                                 (READ, "./vault/key"),
+                                (READ, "~/.ssh"),
                             ],
                             &[],
                             &[(EXEC, "*")],
-                            &[],
                             &workspace,
                         );
                         let moved = if mode == Mode::Yolo {
@@ -4215,12 +3559,15 @@ mod tests {
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     let workspace = Workspace::new(&cwd);
                     for mode in [Mode::Manual, Mode::Yolo] {
-                        let p = resolved_policy(
+                        let p = policy_in(
                             mode,
-                            &[(EDIT, "./locked"), (EDIT, "./docs/old/guide.md")],
-                            &[],
-                            &[(EXEC, "cd *"), (EXEC, "sed *")],
-                            &[],
+                            &[
+                                (READ, "~/.ssh"),
+                                (EDIT, "./locked"),
+                                (EDIT, "./docs/old/guide.md"),
+                            ],
+                            &[(EDIT, ".git/**")],
+                            &[(EXEC, "cd *"), (EXEC, "sed *"), (EDIT, "./**")],
                             &workspace,
                         );
                         let held = if mode == Mode::Yolo {
@@ -4256,7 +3603,7 @@ mod tests {
                             ),
                             (format!("sed -i'{elsewhere}/*' s/a/b/ README.md"), held),
                             ("sed -i $X s/a/b/ README.md".to_owned(), held),
-                            ("sed -i s/a/b/ .git/config".to_owned(), held),
+                            ("sed -i s/a/b/ .git/config".to_owned(), Decision::Ask),
                             ("sed '1e date' README.md".to_owned(), held),
                             ("sed -f script.sed README.md".to_owned(), held),
                             ("sed -f script.sed --x README.md".to_owned(), held),
@@ -4279,10 +3626,6 @@ mod tests {
                 });
             }
 
-            /// Checks each of the `cases` in `manual` and `yolo` under `deny.read = ["./secrets"]`
-            /// and `allow.exec = ["*"]`, with `secrets/key`, `env.sh`, and `~/.ssh/id_rsa` in
-            /// place. `cases` takes the decision a call the gate holds gets, which asks in `manual`
-            /// and runs in `yolo`.
             fn assert_script_decisions(cases: impl Fn(Decision) -> Vec<(&'static str, Decision)>) {
                 let root_dir = canonical_tempdir();
                 let root = root_dir.path();
@@ -4295,12 +3638,11 @@ mod tests {
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     let workspace = Workspace::new(&cwd);
                     for mode in [Mode::Manual, Mode::Yolo] {
-                        let p = resolved_policy(
+                        let p = policy_in(
                             mode,
-                            &[(READ, "./secrets")],
+                            &[(READ, "./secrets"), (READ, "~/.ssh")],
                             &[],
                             &[(EXEC, "*")],
-                            &[],
                             &workspace,
                         );
                         let held = if mode == Mode::Yolo {
@@ -4439,14 +3781,7 @@ mod tests {
                 let root = nix::unistd::User::from_name("root").unwrap().unwrap();
                 let secret = slash_separated(&root.dir.join("secret"));
                 for mode in [Mode::Manual, Mode::Yolo] {
-                    let p = resolved_policy(
-                        mode,
-                        &[(READ, &secret)],
-                        &[],
-                        &[(EXEC, "*")],
-                        &[],
-                        &workspace,
-                    );
+                    let p = policy_in(mode, &[(READ, &secret)], &[], &[(EXEC, "*")], &workspace);
 
                     assert_eq!(
                         decide_command(&p, "cat ~root/secret", &workspace),
@@ -4461,11 +3796,10 @@ mod tests {
                 let cwd_dir = canonical_tempdir();
                 let cwd = cwd_dir.path();
                 let workspace = Workspace::new(cwd);
-                let yolo = resolved_policy(
+                let yolo = policy_in(
                     Mode::Yolo,
                     &[],
                     &[(READ, &slash_separated(cwd))],
-                    &[],
                     &[],
                     &workspace,
                 );
@@ -4509,31 +3843,6 @@ mod tests {
                     assert_eq!(decide(case), expected, "{case}");
                 }
             }
-
-            #[test]
-            fn command_denies_a_read_of_a_shipped_read_deny_in_every_mode() {
-                let base_dir = canonical_tempdir();
-                let base = base_dir.path();
-                let home = base.join("home");
-                let key = slash_separated(&home.join(".ssh/id_ed25519"));
-                temp_env::with_var(HOME_VAR, Some(&home), || {
-                    let workspace = Workspace::new(base);
-                    for mode in [Mode::Manual, Mode::Yolo] {
-                        let p = resolved_policy(mode, &[], &[], &[], &[], &workspace);
-                        for case in [format!("cat < {key}"), format!("cat {key}")] {
-                            let access = Access::for_command(&case, &workspace);
-
-                            let verdict = p.verdict(EXEC, &access);
-
-                            assert_eq!(
-                                (verdict.decision, verdict.basis),
-                                (Decision::Deny, Basis::Builtin(Shipped::Ssh)),
-                                "{mode:?}: {case}"
-                            );
-                        }
-                    }
-                });
-            }
         }
 
         mod verdict {
@@ -4549,68 +3858,6 @@ mod tests {
             }
 
             #[test]
-            fn recursive_readers_ask_for_shipped_descendants_outside_yolo() {
-                let dir = canonical_tempdir();
-                let (cwd, home) = (dir.path().join("repo"), dir.path().join("home"));
-                std::fs::create_dir_all(cwd.join("src")).unwrap();
-                std::fs::create_dir_all(home.join(".ssh")).unwrap();
-                temp_env::with_var(HOME_VAR, Some(&home), || {
-                    let workspace = Workspace::new(&cwd);
-                    for (mode, expected) in
-                        [(Mode::Manual, Decision::Ask), (Mode::Yolo, Decision::Allow)]
-                    {
-                        let p = resolved_policy(
-                            mode,
-                            &[],
-                            &[],
-                            &[(EXEC, "grep *"), (EXEC, "find *"), (EXEC, "ls *")],
-                            &[],
-                            &workspace,
-                        );
-                        for case in [
-                            "grep -r PRIVATE ~",
-                            "grep -R PRIVATE ~",
-                            "grep -nr PRIVATE ~",
-                            "grep -d recurse PRIVATE ~",
-                            "grep --directories=recurse PRIVATE ~",
-                            "grep --rec PRIVATE ~",
-                            "grep --dereference-recursive PRIVATE ~",
-                            "nice timeout 5 grep -r PRIVATE ~",
-                            "sudo grep -r PRIVATE ~",
-                            "cd src && grep -r PRIVATE ~",
-                            r"find src -exec grep -r PRIVATE ~ \;",
-                            "/bin/grep -r PRIVATE ~",
-                            "find ~ -name id_rsa",
-                            "find -L ~ -name id_rsa",
-                            "find -HL ~ -name id_rsa",
-                            "find -f ~",
-                            "find -- ~ -name id_rsa",
-                            "ls -laR ~",
-                            "ls --recursive ~",
-                            "grep -r PRIVATE $HOME",
-                            "grep -r PRIVATE \"${HOME}\"",
-                        ] {
-                            let access = Access::for_command(case, &workspace);
-
-                            let verdict = p.verdict(EXEC, &access);
-
-                            assert_eq!(verdict.decision, expected, "{mode:?}: {case}");
-                            if mode == Mode::Manual {
-                                assert_eq!(verdict.basis, Basis::Builtin(Shipped::Ssh), "{case}");
-                            }
-                        }
-                        for case in ["grep -r TODO src", "find src -name needle", "ls -R src"] {
-                            assert_eq!(
-                                decide_command(&p, case, &workspace),
-                                Decision::Allow,
-                                "{mode:?}: {case}"
-                            );
-                        }
-                    }
-                });
-            }
-
-            #[test]
             fn recursive_readers_keep_configured_tiers_and_unattended_decisions() {
                 let dir = canonical_tempdir();
                 let cwd = dir.path();
@@ -4621,14 +3868,8 @@ mod tests {
                         (Tier::Ask, &[][..], &[(READ, "./vault/key")][..]),
                     ] {
                         for attended in [true, false] {
-                            let mut p = resolved_policy(
-                                Mode::Manual,
-                                deny,
-                                ask,
-                                &[(EXEC, "grep *")],
-                                &[Shipped::Ssh, Shipped::Credentials],
-                                &workspace,
-                            );
+                            let mut p =
+                                policy_in(Mode::Manual, deny, ask, &[(EXEC, "grep *")], &workspace);
                             if !attended {
                                 p.set_unattended();
                             }
@@ -4756,12 +3997,11 @@ mod tests {
                             (Tier::Deny, &[(READ, protected)][..], &[][..]),
                             (Tier::Ask, &[][..], &[(READ, protected)][..]),
                         ] {
-                            let p = resolved_policy(
+                            let p = policy_in(
                                 Mode::Manual,
                                 deny,
                                 ask,
                                 &[(EXEC, "grep *"), (EXEC, "find *"), (EXEC, "ls *")],
-                                &[Shipped::Ssh, Shipped::Credentials],
                                 &workspace,
                             );
 
@@ -4799,12 +4039,11 @@ mod tests {
                 temp_env::with_var(HOME_VAR, Some(cwd), || {
                     let workspace = Workspace::new(cwd);
                     for mode in [Mode::Manual, Mode::Yolo] {
-                        let p = resolved_policy(
+                        let p = policy_in(
                             mode,
                             &[(READ, "./aux/list"), (READ, "./aux/protected/key")],
                             &[],
                             &[(EXEC, "grep *"), (EXEC, "find *"), (EXEC, "ls *")],
-                            &[Shipped::Ssh, Shipped::Credentials],
                             &workspace,
                         );
                         for (case, unknown) in [
@@ -4844,12 +4083,11 @@ mod tests {
                 std::fs::write(cwd.join("src/file"), "needle").unwrap();
                 temp_env::with_var(HOME_VAR, Some(cwd), || {
                     let workspace = Workspace::new(cwd);
-                    let p = resolved_policy(
+                    let p = policy_in(
                         Mode::Manual,
                         &[(READ, "./patterns/key"), (READ, "./src/file/key")],
                         &[],
                         &[(EXEC, "grep *")],
-                        &[Shipped::Ssh, Shipped::Credentials],
                         &workspace,
                     );
 
@@ -4865,12 +4103,11 @@ mod tests {
                             "{case}"
                         );
                     }
-                    let protected = resolved_policy(
+                    let protected = policy_in(
                         Mode::Manual,
                         &[(READ, "./patterns")],
                         &[],
                         &[(EXEC, "grep *")],
-                        &[Shipped::Ssh, Shipped::Credentials],
                         &workspace,
                     );
                     assert_eq!(
@@ -4888,12 +4125,11 @@ mod tests {
                 symlink_dir(Path::new("vault"), &cwd.join("alias"));
                 temp_env::with_var(HOME_VAR, Some(cwd), || {
                     let workspace = Workspace::new(cwd);
-                    let p = resolved_policy(
+                    let p = policy_in(
                         Mode::Manual,
                         &[(READ, "./alias/nested/key")],
                         &[],
                         &[(EXEC, "grep *")],
-                        &[Shipped::Ssh, Shipped::Credentials],
                         &workspace,
                     );
 
@@ -4905,12 +4141,11 @@ mod tests {
                     ] {
                         assert_eq!(decide_command(&p, case, &workspace), expected, "{case}");
                     }
-                    let late = resolved_policy(
+                    let late = policy_in(
                         Mode::Manual,
                         &[(READ, "./late/nested/key")],
                         &[],
                         &[],
-                        &[Shipped::Ssh, Shipped::Credentials],
                         &workspace,
                     );
                     symlink_dir(Path::new("vault"), &cwd.join("late"));
@@ -4923,7 +4158,7 @@ mod tests {
             }
 
             #[test]
-            fn names_the_configured_rule_or_default_that_settles_each_call() {
+            fn names_the_configured_rule_or_mode_that_settles_each_call() {
                 let notes = abs("/notes/**");
                 let p = policy(
                     Mode::Manual,
@@ -4946,12 +4181,12 @@ mod tests {
                     (
                         READ,
                         outside(&abs("/etc/hosts")),
-                        (Decision::Allow, Basis::Read),
+                        (Decision::Ask, Basis::Mode(Mode::Manual)),
                     ),
                     (
                         EDIT,
                         workspace("/repo/a.rs", "a.rs"),
-                        (Decision::Allow, Basis::Workspace),
+                        (Decision::Ask, Basis::Mode(Mode::Manual)),
                     ),
                     (
                         EDIT,
@@ -4971,7 +4206,12 @@ mod tests {
             #[test]
             fn of_an_allowed_command_names_what_lets_each_part_through() {
                 let make = Rule::parse(EXEC, "make *").unwrap();
-                let mut p = policy(Mode::Manual, &[], &[], &[(EXEC, "cargo test *")]);
+                let mut p = policy(
+                    Mode::Manual,
+                    &[],
+                    &[],
+                    &[(EXEC, "cargo test *"), (EXEC, "wc *"), (EDIT, "out.txt")],
+                );
                 p.allow_for_session(make.clone());
 
                 let settled = verdict(
@@ -4987,112 +4227,25 @@ mod tests {
                         Basis::Command(vec![
                             rule_basis(Tier::Allow, EXEC, "cargo test *"),
                             Basis::Session(make),
-                            Basis::SafeRead,
-                            Basis::Workspace,
+                            rule_basis(Tier::Allow, EXEC, "wc *"),
+                            rule_basis(Tier::Allow, EDIT, "out.txt"),
                         ]),
                     ),
                 );
             }
 
             #[test]
-            fn of_a_held_command_names_the_read_rule_or_built_in_group_that_holds_it() {
-                let p = policy(
-                    Mode::Manual,
-                    &[],
-                    &[(READ, "*.pem")],
-                    &[(EXEC, "cat *"), (EXEC, "rm *")],
-                );
+            fn of_a_held_command_names_the_configured_read_rule() {
+                let p = policy(Mode::Manual, &[], &[(READ, "*.pem")], &[(EXEC, "cat *")]);
                 let pem = rule_basis(Tier::Ask, READ, "*.pem");
 
-                for (case, expected) in [
-                    ("cat key.pem", pem.clone()),
-                    ("cat $F", pem),
-                    ("rm -rf build", Basis::Builtin(Shipped::Rm)),
-                ] {
+                for (case, expected) in [("cat key.pem", pem.clone()), ("cat $F", pem)] {
                     assert_eq!(
                         verdict(&p, EXEC, &command(case)),
                         (Decision::Ask, expected),
                         "{case}"
                     );
                 }
-                assert_eq!(
-                    verdict(
-                        &p,
-                        EDIT,
-                        &path("/repo/.git/config", Some(".git/config"), Zone::Workspace),
-                    ),
-                    (Decision::Ask, Basis::Builtin(Shipped::Git)),
-                );
-            }
-
-            #[test]
-            fn names_a_configured_ask_then_unrecognized_syntax_before_a_shipped_ask() {
-                let paths = [(".git/config", Shipped::Git)]
-                    .into_iter()
-                    .chain(cfg!(unix).then_some(("/dev/example", Shipped::Devices)));
-                let construct = "BASH_CMDS[echo]=/bin/printf";
-                let workspace = Workspace::new(Path::new("/repo"));
-                let plain =
-                    resolved_policy(Mode::Manual, &[], &[], &[(EXEC, "*")], &[], &workspace);
-                let configured = resolved_policy(
-                    Mode::Manual,
-                    &[],
-                    &[(EXEC, "echo *")],
-                    &[(EXEC, "*")],
-                    &[],
-                    &workspace,
-                );
-
-                for (path, group) in paths {
-                    let recognized = command(&format!("echo x > {path}"));
-                    let target = command(&format!("{construct}; echo x > {path}"));
-
-                    assert_eq!(
-                        verdict(&plain, EXEC, &recognized),
-                        (Decision::Ask, Basis::Builtin(group)),
-                        "{path}"
-                    );
-                    assert_eq!(
-                        verdict(&plain, EXEC, &target),
-                        (
-                            Decision::Ask,
-                            Basis::Unrecognized {
-                                construct: construct.to_owned()
-                            }
-                        ),
-                        "{path}"
-                    );
-                    assert_eq!(plain.config_fix(EXEC, &target), None, "{path}");
-                    assert_eq!(
-                        verdict(&configured, EXEC, &target),
-                        (Decision::Ask, rule_basis(Tier::Ask, EXEC, "echo *")),
-                        "{path}"
-                    );
-                    assert_eq!(configured.config_fix(EXEC, &target), None, "{path}");
-                }
-            }
-
-            #[test]
-            fn credits_a_shipped_pattern_to_its_built_in_group() {
-                let base_dir = canonical_tempdir();
-                let base = base_dir.path();
-                let home = base.join("home");
-                let key = slash_separated(&home.join(".ssh/id_ed25519"));
-                temp_env::with_var(HOME_VAR, Some(&home), || {
-                    let workspace = Workspace::new(base);
-                    let p = resolved_policy(Mode::Yolo, &[], &[], &[], &[], &workspace);
-                    let settle =
-                        |case: &str| verdict(&p, EXEC, &Access::for_command(case, &workspace));
-
-                    assert_eq!(
-                        settle(&format!("cat < {key}")),
-                        (Decision::Deny, Basis::Builtin(Shipped::Ssh)),
-                    );
-                    assert_eq!(
-                        settle(&format!("cat {key}")),
-                        (Decision::Deny, Basis::Builtin(Shipped::Ssh)),
-                    );
-                });
             }
 
             #[test]
@@ -5111,7 +4264,7 @@ mod tests {
                 assert_eq!(
                     verdict(&yolo, EDIT, &Access::None),
                     (Decision::Allow, Basis::Mode(Mode::Yolo)),
-                    "an edit that names no path has no protected group",
+                    "an unmatched edit follows the selected mode",
                 );
             }
 
@@ -5142,7 +4295,7 @@ mod tests {
                         &manual,
                         READ,
                         outside(&abs("/etc/hosts")),
-                        (Decision::Allow, Basis::Read),
+                        (Decision::Unapproved, Basis::Mode(Mode::Manual)),
                     ),
                     (
                         &manual,
@@ -5229,10 +4382,9 @@ mod tests {
                 std::fs::create_dir(&cwd).unwrap();
                 std::fs::create_dir(&outside).unwrap();
                 symlink_dir(&outside, &cwd.join("config"));
-                let p = resolved_policy(
+                let p = policy_in(
                     Mode::Manual,
                     &[(READ, ".env")],
-                    &[],
                     &[],
                     &[],
                     &Workspace::new(&cwd),
@@ -5257,11 +4409,10 @@ mod tests {
                 std::fs::create_dir(&cwd).unwrap();
                 std::fs::create_dir(&outside).unwrap();
                 symlink_dir(&outside, &cwd.join("link"));
-                let p = resolved_policy(
+                let p = policy_in(
                     Mode::Manual,
                     &[],
                     &[(READ, "link/**")],
-                    &[],
                     &[],
                     &Workspace::new(&cwd),
                 );
