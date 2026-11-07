@@ -43,6 +43,7 @@ pub(crate) struct QuestionRequest {
     pub(crate) reply: oneshot::Sender<QuestionReply>,
 }
 
+#[derive(Debug)]
 pub(crate) struct QuestionReply {
     pub(crate) answer: QuestionAnswer,
     pub(crate) source: ReplySource,
@@ -201,7 +202,13 @@ mod tests {
                         request.question,
                         serde_json::from_value::<Question>(input).unwrap()
                     );
-                    request.reply.send(answer).unwrap();
+                    request
+                        .reply
+                        .send(QuestionReply {
+                            answer,
+                            source: ReplySource::User,
+                        })
+                        .unwrap();
                 });
 
                 assert!(!output.is_error, "{}", output.content);
