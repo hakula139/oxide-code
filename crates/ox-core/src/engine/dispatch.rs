@@ -1274,10 +1274,8 @@ mod tests {
                         deny,
                         ask,
                         Vec::new(),
-                        &[],
                         &dispatch_ctx.workspace,
-                    )
-                    .unwrap();
+                    );
                     policy.set_unattended();
                     dispatch_ctx.policy = Box::leak(Box::new(policy));
 
