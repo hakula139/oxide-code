@@ -1025,7 +1025,7 @@ impl Policy {
         {
             return Some(basis);
         }
-        if command.unrecognized().is_some() || command.segments().is_empty() {
+        if !command.is_complete() || command.segments().is_empty() {
             return None;
         }
         let segments = command

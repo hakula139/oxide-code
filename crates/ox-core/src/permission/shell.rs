@@ -11,7 +11,7 @@ use self::walk::{Walk, basename};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommandTarget {
     segments: Vec<Segment>,
-    unrecognized: Option<String>,
+    complete: bool,
 }
 
 impl CommandTarget {
@@ -20,7 +20,7 @@ impl CommandTarget {
         walk.script(command);
         Self {
             segments: walk.segments,
-            unrecognized: walk.unrecognized,
+            complete: !walk.incomplete,
         }
     }
 
@@ -28,8 +28,8 @@ impl CommandTarget {
         &self.segments
     }
 
-    pub(super) fn unrecognized(&self) -> Option<&str> {
-        self.unrecognized.as_deref()
+    pub(super) const fn is_complete(&self) -> bool {
+        self.complete
     }
 }
 
