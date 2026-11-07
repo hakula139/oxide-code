@@ -249,7 +249,6 @@ impl Rule {
     }
 }
 
-/// Rules compare by their class and pattern, which parse to the same matcher every time.
 impl PartialEq for Rule {
     fn eq(&self, other: &Self) -> bool {
         self.class == other.class && self.source == other.source
