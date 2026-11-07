@@ -2356,7 +2356,7 @@ mod tests {
                 for (raw, decision) in [
                     ("../vault/key", Decision::Deny),
                     ("../real/x", Decision::Ask),
-                    ("../other/x", Decision::Allow),
+                    ("../other/x", Decision::Ask),
                 ] {
                     let target = Access::for_path(raw, &Workspace::new(&cwd));
                     assert_eq!(p.decide(READ, &target), decision, "{raw}");
@@ -2701,7 +2701,7 @@ mod tests {
             }
 
             #[test]
-            fn withholds_exactly_the_files_the_gate_holds_back() {
+            fn withholds_exactly_the_files_matched_by_explicit_read_rules() {
                 let cwd_dir = canonical_tempdir();
                 let cwd = cwd_dir.path();
                 let secrets = slash_separated(&cwd.join("secrets"));
@@ -3188,7 +3188,13 @@ mod tests {
                 let decide =
                     |p: &Policy, case: &str| p.decide(EXEC, &Access::for_command(case, &workspace));
                 let yolo = policy_in(Mode::Yolo, &[(EXEC, "git push *")], &[], &[], &workspace);
-                let manual = policy_in(Mode::Manual, &[(READ, ".env")], &[], &[], &workspace);
+                let manual = policy_in(
+                    Mode::Manual,
+                    &[(READ, ".env")],
+                    &[],
+                    &[(EXEC, "cat *")],
+                    &workspace,
+                );
 
                 for case in [
                     "git <<EOF push --force origin main\nx\nEOF",
@@ -3408,7 +3414,7 @@ mod tests {
             }
 
             #[test]
-            fn yolo_holds_a_reader_only_for_the_files_it_reads_for_certain() {
+            fn yolo_denies_certain_reads_and_asks_for_possible_reads_of_explicitly_held_files() {
                 let root_dir = canonical_tempdir();
                 let root = root_dir.path();
                 let (cwd, home) = (root.join("repo"), root.join("home"));
@@ -3433,7 +3439,7 @@ mod tests {
                         ("cat \"${HOME}/.ssh/id_rsa\"", Decision::Deny),
                         ("cat secrets/key", Decision::Ask),
                         ("grep -r key ~/.ssh", Decision::Deny),
-                        ("grep -r key ~", Decision::Allow),
+                        ("grep -r key ~", Decision::Ask),
                         ("grep -r key secrets", Decision::Ask),
                         ("cat ~/.ssh/id_rsa *", Decision::Deny),
                         ("cat * ~/.ssh/id_rsa", Decision::Deny),
@@ -3441,12 +3447,12 @@ mod tests {
                         ("grep key * ~/.ssh/id_rsa", Decision::Deny),
                         ("grep * ~/.ssh/id_rsa", Decision::Deny),
                         ("grep -e key * ~/.ssh/id_rsa", Decision::Deny),
-                        ("find ~ -path ~/.ssh/id_rsa", Decision::Allow),
+                        ("find ~ -path ~/.ssh/id_rsa", Decision::Ask),
                         ("wc --files0-from ~/.ssh/id_rsa", Decision::Deny),
                         ("wc --files0-from=secrets/list", Decision::Ask),
-                        ("test -f ~/.ssh/id_rsa", Decision::Allow),
-                        ("cat $F", Decision::Allow),
-                        ("echo x | xargs cat", Decision::Allow),
+                        ("test -f ~/.ssh/id_rsa", Decision::Ask),
+                        ("cat $F", Decision::Ask),
+                        ("echo x | xargs cat", Decision::Ask),
                     ] {
                         assert_eq!(decide_command(&yolo, case, &workspace), expected, "{case}");
                     }
@@ -3524,12 +3530,12 @@ mod tests {
                             ("pushd -n ~/.ssh; cat ~+1/id_rsa", Decision::Deny),
                             ("cd ~/.ssh; cd ..; head ~-/id_rsa", Decision::Deny),
                             ("cd src && cat main.rs", moved),
-                            ("cd $DIR && cat key", moved),
-                            ("pushd -n $DIR; cat ~1/key", moved),
-                            ("cd ~1 && cat key", moved),
+                            ("cd $DIR && cat key", Decision::Ask),
+                            ("pushd -n $DIR; cat ~1/key", Decision::Ask),
+                            ("cd ~1 && cat key", Decision::Ask),
                             ("echo x > $PWD.log", moved),
                             ("echo x > ${PWD}x", moved),
-                            ("cd ${PWD}x && cat key", moved),
+                            ("cd ${PWD}x && cat key", Decision::Ask),
                         ] {
                             assert_eq!(
                                 decide_command(&p, case, &workspace),
@@ -3601,11 +3607,11 @@ mod tests {
                                 Decision::Deny,
                             ),
                             (format!("sed -i'{elsewhere}/*' s/a/b/ README.md"), held),
-                            ("sed -i $X s/a/b/ README.md".to_owned(), held),
+                            ("sed -i $X s/a/b/ README.md".to_owned(), Decision::Ask),
                             ("sed -i s/a/b/ .git/config".to_owned(), Decision::Ask),
-                            ("sed '1e date' README.md".to_owned(), held),
-                            ("sed -f script.sed README.md".to_owned(), held),
-                            ("sed -f script.sed --x README.md".to_owned(), held),
+                            ("sed '1e date' README.md".to_owned(), Decision::Ask),
+                            ("sed -f script.sed README.md".to_owned(), Decision::Ask),
+                            ("sed -f script.sed --x README.md".to_owned(), Decision::Ask),
                             ("sed 's/a/b/' README.md".to_owned(), Decision::Allow),
                             ("sed -n 1,5p README.md".to_owned(), Decision::Allow),
                             ("sed -i s/a/b/ README.md".to_owned(), Decision::Allow),
@@ -3644,18 +3650,18 @@ mod tests {
                             &[(EXEC, "*")],
                             &workspace,
                         );
-                        let held = if mode == Mode::Yolo {
+                        let fallback = if mode == Mode::Yolo {
                             Decision::Allow
                         } else {
                             Decision::Ask
                         };
-                        for (case, expected) in cases(held) {
-                            assert_eq!(
-                                decide_command(&p, case, &workspace),
-                                expected,
-                                "{mode} {case}"
-                            );
-                        }
+                        let expected = cases(fallback);
+                        let actual: Vec<_> = expected
+                            .iter()
+                            .map(|(case, _)| (*case, decide_command(&p, case, &workspace)))
+                            .collect();
+
+                        assert_eq!(actual, expected, "{mode}");
                     }
                 });
             }
@@ -3694,12 +3700,12 @@ mod tests {
                         ("fish -n secrets/key", held),
                         ("dash -O extglob secrets/key", held),
                         ("zsh -ovi secrets/key", held),
-                        ("echo secrets/key | xargs bash", held),
+                        ("echo secrets/key | xargs bash", Decision::Ask),
                         ("echo secrets/key | xargs -I % bash -c 'cat %'", held),
-                        ("echo secrets/key | xargs su root", held),
-                        ("su root secrets/key", held),
-                        ("su -s/bin/sh root secrets/key", held),
-                        ("su -- -x secrets/key", held),
+                        ("echo secrets/key | xargs su root", Decision::Ask),
+                        ("su root secrets/key", Decision::Ask),
+                        ("su -s/bin/sh root secrets/key", Decision::Ask),
+                        ("su -- -x secrets/key", Decision::Ask),
                         ("source env.sh", Decision::Allow),
                         ("bash -s secrets/key < env.sh", Decision::Allow),
                         ("bash -s -- \"$V\" < env.sh", Decision::Allow),
@@ -3740,32 +3746,38 @@ mod tests {
                         ("env X.Y=1 cat secrets/key", Decision::Deny),
                         ("env A=1 -x=y cat secrets/key", Decision::Deny),
                         ("env -- -x=y cat secrets/key", Decision::Deny),
-                        ("BASH_ENV='$(cat secrets/key)' bash -c true", held),
+                        ("BASH_ENV='$(cat secrets/key)' bash -c true", Decision::Ask),
                         ("env -S 'cat secrets/key'", held),
-                        ("HOME=./secrets cat ~/.ssh/id_rsa", held),
-                        ("env HOME=./secrets cat ~/.ssh/id_rsa", held),
+                        ("HOME=./secrets cat ~/.ssh/id_rsa", Decision::Ask),
+                        ("env HOME=./secrets cat ~/.ssh/id_rsa", Decision::Ask),
                         ("HOME=./secrets eval 'cat ${HOME}/.ssh/id_rsa'", held),
                         ("PWD=./secrets eval 'cat ${PWD}/key'", held),
-                        ("HOME=. bash -c true", held),
-                        ("ZDOTDIR=. zsh -c true", held),
+                        ("HOME=. bash -c true", Decision::Ask),
+                        ("ZDOTDIR=. zsh -c true", Decision::Ask),
                         (
                             "BASH_ENV='~+/key' sh -c 'true; PWD=./secrets bash -c true'",
-                            held,
+                            Decision::Ask,
                         ),
                         ("HOME=./secrets eval 'cat ~/.ssh/id_rsa'", held),
                         ("PWD=./secrets eval 'cat $PWD/key'", held),
                         ("PWD=./secrets eval 'cat ~+/key'", held),
                         ("OLDPWD=./secrets eval 'cat ~-/key'", held),
-                        ("PWD=./secrets BASH_ENV=~+/key bash -c true", held),
-                        ("OLDPWD=./secrets BASH_ENV='~-/key' bash -c true", held),
+                        ("PWD=./secrets BASH_ENV=~+/key bash -c true", Decision::Ask),
+                        (
+                            "OLDPWD=./secrets BASH_ENV='~-/key' bash -c true",
+                            Decision::Ask,
+                        ),
                         ("PWD=./secrets sh -c 'BASH_ENV=~+/key bash -c true'", held),
-                        ("HOME=./secrets X=\"$(cat $HOME/.ssh/id_rsa)\" env", held),
-                        ("HOME=./secrets cd && cat key", held),
+                        (
+                            "HOME=./secrets X=\"$(cat $HOME/.ssh/id_rsa)\" env",
+                            Decision::Ask,
+                        ),
+                        ("HOME=./secrets cd && cat key", Decision::Ask),
                         (
                             "echo BASH_ENV | xargs -I % env %=secrets/key bash -c true",
                             held,
                         ),
-                        ("env A=1 -x=y rm -rf y", held),
+                        ("env A=1 -x=y rm -rf y", Decision::Allow),
                         ("ENV=secrets/key zsh -c true", Decision::Allow),
                         ("HOME=secrets/sub su root -c true", Decision::Allow),
                     ]
@@ -4059,7 +4071,7 @@ mod tests {
                             ("grep -- -* aux/protected", true),
                             ("grep -f aux/protected PRIVATE *r src", true),
                         ] {
-                            let expected = if unknown && mode == Mode::Manual {
+                            let expected = if unknown {
                                 Decision::Ask
                             } else {
                                 Decision::Allow
