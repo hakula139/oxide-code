@@ -11,7 +11,7 @@ use super::handle::SessionHandle;
 use super::store::UsageRecord;
 use crate::auth::Auth;
 use crate::client::anthropic::Client;
-use crate::client::anthropic::completion::SideQuery;
+use crate::client::anthropic::completion::{Completion, SideQuery};
 use crate::client::anthropic::wire::OutputFormat;
 use crate::model::{Effort, ModelSpec, PromptCacheTtl};
 use crate::protocol::{Event, EventSink};
@@ -121,7 +121,9 @@ async fn generate_and_record(
         effort: Some(Effort::Low),
         output_format: Some(&output_format),
     };
-    let (raw, usage) = client
+    let Completion {
+        text: raw, usage, ..
+    } = client
         .complete(query)
         .await
         .context("Haiku completion failed")?;

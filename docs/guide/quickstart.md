@@ -46,12 +46,7 @@ In the chat:
 
 ## Approve Tool Calls
 
-In the default `manual` permission mode, tool calls fall into these groups:
-
-- **Runs without asking**: reads, searches, read-only commands such as `ls`, `cat`, and `grep`, and edits within the working directory.
-- **Asks unless a rule decides**: other `bash` commands and edits outside the working directory.
-- **Asks even when an allow pattern matches**: edits to protected config such as `.git`, `.vscode`, or `.envrc`, and forced recursive deletes such as `rm -rf`.
-- **Denied**: reads of SSH keys and credential files.
+The default `auto` permission mode uses a separate model to approve tool calls or ask for your confirmation. Your configured deny and ask rules take precedence, while allow rules and session grants approve matching calls. If the classifier cannot decide or its request fails, the call asks. Internal operations confined to session state run without asking.
 
 The approval prompt takes these keys:
 

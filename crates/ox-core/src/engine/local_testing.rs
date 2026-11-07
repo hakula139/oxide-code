@@ -10,8 +10,10 @@ use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::abort::{Mailbox, TurnAbort};
+use super::classifier::ClassifierContext;
 use super::dispatch::DispatchContext;
 use super::testing::MODEL;
+use super::usage::UsageLedger;
 use super::{Engine, EngineHandle};
 use crate::client::anthropic::local_testing::completion_body;
 use crate::file_tracker::testing::tracker;
@@ -200,31 +202,56 @@ pub(super) fn inert_mailbox() -> Mailbox<'static> {
     Mailbox::new(Box::leak(Box::new(rx)))
 }
 
-/// Dispatch context in `cwd` over `exec` deny / allow patterns and the shipped defaults, leaking
-/// the policy so the context can borrow it for `'static`. `echo` is an `exec`-class tool that
-/// accesses nothing, so only `*` matches it.
+/// Dispatch context with explicit read and workspace-edit allowances. Leaks its borrowed state
+/// for standalone turn tests.
 pub(super) fn dispatch_with(
     mode: Mode,
     deny: &[&str],
     allow: &[&str],
     cwd: &Path,
 ) -> DispatchContext<'static> {
-    let rules = |patterns: &[&str]| {
+    let rules = |patterns: &[&str]| -> Vec<Rule> {
         patterns
             .iter()
             .map(|pattern| Rule::parse(PermissionClass::Exec, pattern).expect("pattern parses"))
             .collect()
     };
     let workspace = Arc::new(Workspace::new(cwd));
-    let policy = Box::leak(Box::new(
-        Policy::resolve(mode, rules(deny), Vec::new(), rules(allow), &[], &workspace)
-            .expect("shipped defaults parse"),
+    let mut allow = rules(allow);
+    allow.extend([
+        Rule::parse(PermissionClass::Read, "*").unwrap(),
+        Rule::parse(PermissionClass::Edit, "./**").unwrap(),
+    ]);
+    let policy = Box::leak(Box::new(Policy::resolve(
+        mode,
+        rules(deny),
+        Vec::new(),
+        allow,
+        &workspace,
+    )));
+    let auth = Box::leak(Box::new(crate::client::anthropic::testing::api_key()));
+    let config = Box::leak(Box::new(crate::config::testing::test_config(
+        "http://127.0.0.1:9",
+        auth.clone(),
+        MODEL,
+    )));
+    let client = Box::leak(Box::new(
+        crate::client::anthropic::local_testing::client_for(config),
     ));
     DispatchContext {
         policy,
         workspace,
         session: handle::testing::unsaved(),
         tracker: tracker(),
+        classifier: ClassifierContext {
+            client,
+            auth,
+            config: &config.permission_auto,
+            cache_ttl: config.prompt_cache_ttl,
+            context_window: config.model.context_window(),
+            user_prompts: Vec::new(),
+        },
+        usage: Box::leak(Box::new(UsageLedger::for_session(&[], 0))),
     }
 }
 

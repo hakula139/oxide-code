@@ -354,7 +354,10 @@ mod tests {
                     "effort",
                     "Missing level. Usage: `/effort <low|medium|high|xhigh|max>`.",
                 ),
-                ("mode", "Missing mode. Usage: `/mode <manual|plan|yolo>`."),
+                (
+                    "mode",
+                    "Missing mode. Usage: `/mode <auto|manual|plan|yolo>`.",
+                ),
                 ("model", "Missing model ID. Usage: `/model <id>`."),
                 ("rename", "Missing title. Usage: `/rename <title>`."),
                 (
@@ -461,7 +464,7 @@ mod tests {
         fn unknown_mode_lists_the_valid_ones() {
             assert_eq!(
                 mode("Turbo"),
-                Err("Unknown mode: `Turbo`. Valid: manual, plan, yolo.".to_owned()),
+                Err("Unknown mode: `Turbo`. Valid: auto, manual, plan, yolo.".to_owned()),
             );
         }
     }

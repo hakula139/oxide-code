@@ -509,14 +509,12 @@ pub(crate) mod local_testing {
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 
-    use strum::VariantArray as _;
     use tokio_util::sync::CancellationToken;
 
     use super::search::{SearchRoot, search_arg};
     use super::spill::run_capped;
     use super::{Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec};
     use crate::file_tracker::FileTracker;
-    use crate::permission::defaults::Shipped;
     use crate::permission::rule::Rule;
     use crate::permission::{Mode, PermissionClass, Policy, ReadFilter, Workspace};
 
@@ -570,16 +568,7 @@ pub(crate) mod local_testing {
             .map(|pattern| Rule::parse(PermissionClass::Read, pattern).unwrap())
             .collect();
         let workspace = Workspace::new(cwd);
-        Policy::resolve(
-            Mode::Manual,
-            deny,
-            Vec::new(),
-            Vec::new(),
-            Shipped::VARIANTS,
-            &workspace,
-        )
-        .unwrap()
-        .read_filter()
+        Policy::resolve(Mode::Manual, deny, Vec::new(), Vec::new(), &workspace).read_filter()
     }
 
     /// The root a search call in `cwd` that names `path` walks, resolved the way the search tools'
@@ -667,13 +656,11 @@ mod tests {
     use std::fs;
 
     use serde_json::Value;
-    use strum::VariantArray as _;
 
     use super::local_testing::{ctx, deny_reads, temp_ctx};
     use super::testing::bash_registry;
     use super::view::NumberedLine;
     use super::*;
-    use crate::permission::defaults::Shipped;
     use crate::permission::rule::Rule;
     use crate::permission::{Decision, Mode, PathTarget, PermissionClass, Policy, Zone};
     use crate::util::fs::testing::{symlink_dir, symlink_file};
@@ -764,10 +751,8 @@ mod tests {
                 deny.to_vec(),
                 Vec::new(),
                 Vec::new(),
-                Shipped::VARIANTS,
                 &Workspace::new(dir.path()),
-            )
-            .unwrap();
+            );
             let cases = [
                 ("read", serde_json::json!({"file_path": ".env"})),
                 ("grep", serde_json::json!({"pattern": ".", "path": ".env"})),
@@ -895,17 +880,12 @@ mod tests {
             let tools = built_in();
 
             temp_env::with_var(HOME_VAR, Some(&home), || {
-                let deny = vec![Rule::parse(PermissionClass::Read, "~/.aws/**").unwrap()];
+                let deny = ["~/.aws/**", "~/.ssh/**"]
+                    .map(|pattern| Rule::parse(PermissionClass::Read, pattern).unwrap())
+                    .to_vec();
                 let ctx = ctx(&cwd);
-                let policy = Policy::resolve(
-                    Mode::Manual,
-                    deny,
-                    Vec::new(),
-                    Vec::new(),
-                    &[],
-                    &ctx.workspace,
-                )
-                .unwrap();
+                let policy =
+                    Policy::resolve(Mode::Manual, deny, Vec::new(), Vec::new(), &ctx.workspace);
                 let (spec, read) = tools.get("read").unwrap();
                 let prepare = |path: &str| {
                     read.prepare(serde_json::json!({"file_path": path}), &ctx)

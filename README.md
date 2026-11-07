@@ -22,7 +22,7 @@ Early development. What works today:
 - **[Models](docs/guide/configuration.md#model-supported-models)**: Claude Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5, each with a 1M-token context window, adjustable effort, and adaptive thinking
 - **Tools**: `read`, `write`, `edit`, `glob`, `grep`, and `bash`, plus `bash_output` and `bash_stop` to read and stop background shells
 - **Task list**: the model tracks multi-step work in a list shown live and carried through resume and compaction
-- **[Tool permissions](docs/guide/permissions.md)**: `manual` (default), read-only `plan`, and `yolo` modes, switchable mid-session, with deny / ask / allow patterns and an approval prompt
+- **[Tool permissions](docs/guide/permissions.md)**: default `auto` classification, `manual` approval, read-only `plan`, and `yolo` modes, with explicit deny / ask / allow patterns
 - **Turn control**: interrupt with **Esc** or **Ctrl+C**, queue follow-up prompts that join the running turn between tool calls, and exit with **Ctrl+C** twice, or **Ctrl+D** twice with an empty input
 - **[Slash commands](docs/guide/slash-commands.md)**: commands for sessions, models and effort, permission modes, compaction, sign-in, themes, `/init`, and status and config views, with autocomplete
 - **Context compaction**: manual `/compact` and default-on auto-compaction

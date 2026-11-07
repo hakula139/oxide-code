@@ -325,7 +325,7 @@ fn segment_utility(segment: StatusLineSegment, mode: Mode) -> u8 {
         StatusLineSegment::WeeklyLimit => 12,
         StatusLineSegment::FiveHourLimit => 13,
         StatusLineSegment::ContextUsed => 14,
-        StatusLineSegment::PermissionMode if mode == Mode::Manual => 15,
+        StatusLineSegment::PermissionMode if matches!(mode, Mode::Auto | Mode::Manual) => 15,
         StatusLineSegment::Model => 16,
         StatusLineSegment::ModelWithEffort => 17,
         StatusLineSegment::PermissionMode => 18,
@@ -390,7 +390,7 @@ fn usage_style(percent: f64) -> SegmentStyle {
 
 fn permission_mode_label(mode: Mode) -> (&'static str, SegmentStyle) {
     let style = match mode {
-        Mode::Manual => SegmentStyle::Muted,
+        Mode::Auto | Mode::Manual => SegmentStyle::Muted,
         Mode::Plan => SegmentStyle::Accent,
         Mode::Yolo => SegmentStyle::Error,
     };

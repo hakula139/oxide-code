@@ -576,7 +576,6 @@ mod tests {
     use ox_core::config::ThemeConfig;
     use ox_core::config::provenance::Source;
     use ox_core::model::Effort;
-    use ox_core::permission::defaults::Shipped;
     use ox_core::permission::{Basis, Mode};
     use ox_core::protocol::testing::{OpReceiver, model_pick, text_result};
     use ox_core::protocol::{
@@ -1368,7 +1367,7 @@ mod tests {
                     title: "Bash(rm -rf /)".to_owned(),
                     body: ApprovalBody::Command("rm -rf /".to_owned()),
                 },
-                basis: Basis::Builtin(Shipped::Rm),
+                basis: Basis::Mode(Mode::Manual),
                 grant: None,
             });
 
@@ -2608,6 +2607,9 @@ mod tests {
 
             app.handle_crossterm_event(&key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
             assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Manual)));
+
+            app.handle_crossterm_event(&key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
+            assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Auto)));
 
             app.handle_crossterm_event(&key_event(KeyCode::BackTab, KeyModifiers::SHIFT));
             assert_eq!(rx.try_recv(), Ok(Op::SetMode(Mode::Yolo)));

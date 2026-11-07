@@ -280,7 +280,7 @@ fn mode_rules(mode: Mode, plan_tools: &[&str]) -> String {
              user to review.",
             plan_runs(plan_tools),
         ),
-        Mode::Manual | Mode::Yolo => format!("The permission mode is `{mode}`."),
+        Mode::Auto | Mode::Manual | Mode::Yolo => format!("The permission mode is `{mode}`."),
     }
 }
 

@@ -2,6 +2,7 @@
 //! [`EngineHandle`], sending ops on a bounded channel and reading events from an unbounded one.
 
 mod abort;
+mod classifier;
 mod compaction;
 mod dispatch;
 mod estimate;
@@ -131,6 +132,7 @@ pub struct Engine {
     shells: Arc<BackgroundShells>,
     /// The configured policy plus the session allow rules granted since the live session began.
     policy: Policy,
+    permission_auto: crate::config::permission_auto::AutoPermissionConfig,
     /// `None` means the agent loop runs without a per-turn round cap.
     max_tool_rounds: Option<u32>,
     /// Compaction settings resolved for the active model.
@@ -189,6 +191,7 @@ impl Engine {
             instruction_warnings,
             shells,
             policy: config.permission.clone(),
+            permission_auto: config.permission_auto.clone(),
             max_tool_rounds: config.max_tool_rounds,
             compaction: config.compaction,
             workspace,
@@ -347,6 +350,7 @@ impl Engine {
             Ok(auth) => auth,
             Err(abort) => return report_unsent(sink, abort),
         };
+        let mut user_prompts = classifier::user_prompts(self.transcript.messages());
         if let Err(abort) = self.auto_compact(&auth, sink, mailbox).await {
             return report_unsent(sink, abort);
         }
@@ -354,7 +358,14 @@ impl Engine {
         let fresh = self.load_user_context(sink, mailbox).await;
         let outcome = self.transcript.begin_turn(text, fresh, title).await;
         sink.session_write(&outcome.report);
-        turn::record_drained_prompts(mailbox.drain_prompts(), &mut self.transcript, sink).await;
+        user_prompts.push(text.to_owned());
+        turn::record_drained_prompts(
+            mailbox.drain_prompts(),
+            &mut self.transcript,
+            &mut user_prompts,
+            sink,
+        )
+        .await;
 
         if self.generates_titles
             && let Some(seed) = outcome.ai_title_seed
@@ -371,8 +382,9 @@ impl Engine {
 
         let mut rounds_run = 0;
         let result = loop {
-            let TurnOutcome { mut report, result } =
-                self.run_turn(&auth, sink, mailbox, rounds_run).await;
+            let TurnOutcome { mut report, result } = self
+                .run_turn(&auth, sink, mailbox, rounds_run, &mut user_prompts)
+                .await;
             if let Err(TurnAbort::Refused(notice)) = result {
                 self.roll_back(sink, &report).await;
                 break Err(TurnAbort::Refused(notice));
@@ -389,7 +401,13 @@ impl Engine {
                 break Err(abort);
             }
             rounds_run = run;
-            turn::record_drained_prompts(mailbox.drain_prompts(), &mut self.transcript, sink).await;
+            turn::record_drained_prompts(
+                mailbox.drain_prompts(),
+                &mut self.transcript,
+                &mut user_prompts,
+                sink,
+            )
+            .await;
         };
         self.transcript.end_turn();
         match result {
@@ -405,6 +423,7 @@ impl Engine {
         sink: &dyn EventSink,
         mailbox: &mut Mailbox<'_>,
         rounds_run: u32,
+        user_prompts: &mut Vec<String>,
     ) -> TurnOutcome {
         let auto_compaction = self.auto_compaction();
         let mut dispatch_ctx = dispatch::DispatchContext {
@@ -412,8 +431,17 @@ impl Engine {
             workspace: Arc::clone(&self.workspace),
             session: self.transcript.session().clone(),
             tracker: Arc::clone(&self.transcript.file_tracker),
+            classifier: classifier::ClassifierContext {
+                client: &self.client,
+                auth,
+                config: &self.permission_auto,
+                cache_ttl: self.settings.prompt_cache_ttl(),
+                context_window: self.settings.model().context_window(),
+                user_prompts: std::mem::take(user_prompts),
+            },
+            usage: &mut self.usage,
         };
-        turn::agent_turn(
+        let outcome = turn::agent_turn(
             TurnContext {
                 client: &self.client,
                 auth,
@@ -428,7 +456,9 @@ impl Engine {
             mailbox,
             &mut dispatch_ctx,
         )
-        .await
+        .await;
+        *user_prompts = dispatch_ctx.classifier.user_prompts;
+        outcome
     }
 
     /// Returns the transcript and the session to the turn's rollback point after the model refused
@@ -580,7 +610,6 @@ mod tests {
 
     use anyhow::anyhow;
     use indoc::indoc;
-    use strum::VariantArray as _;
     use tokio::sync::Notify;
     use tokio::sync::oneshot;
     use tokio_util::sync::CancellationToken;
@@ -618,7 +647,6 @@ mod tests {
     use crate::model;
     use crate::model::{Effort, ModelSpec, PromptCacheTtl, TokenUsage};
     use crate::permission::PermissionClass;
-    use crate::permission::defaults::Shipped;
     use crate::permission::rule::Rule;
     use crate::protocol::local_testing::CapturingSink;
     use crate::protocol::testing::{model_pick, op_id};
@@ -854,10 +882,8 @@ mod tests {
                     deny,
                     Vec::new(),
                     Vec::new(),
-                    Shipped::VARIANTS,
                     &config.workspace,
-                )
-                .unwrap();
+                );
                 let ctx = ctx(dir.path());
 
                 let engine = Engine::new(

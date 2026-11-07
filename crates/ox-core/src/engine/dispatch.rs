@@ -11,10 +11,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::abort::{AbortResult, Mailbox, TurnAbort};
+use super::classifier::{Action, Assessment, AssessmentDecision, ClassifierContext};
+use super::usage::UsageLedger;
 use crate::file_tracker::FileTracker;
 use crate::message::ContentBlock;
 use crate::permission::rule::Rule;
-use crate::permission::{Basis, ConfigFix, Decision, Mode, Policy, SessionGrant, Workspace};
+use crate::permission::{Basis, Decision, Mode, Policy, SessionGrant, Workspace};
 use crate::prompt::plan_runs;
 use crate::protocol::{ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult};
 use crate::session::handle::SessionHandle;
@@ -28,6 +30,8 @@ pub(super) struct DispatchContext<'a> {
     pub(super) workspace: Arc<Workspace>,
     pub(super) session: SessionHandle,
     pub(super) tracker: Arc<FileTracker>,
+    pub(super) classifier: ClassifierContext<'a>,
+    pub(super) usage: &'a mut UsageLedger,
 }
 
 impl DispatchContext<'_> {
@@ -337,7 +341,33 @@ impl<'r> Dispatcher<'r, '_, '_> {
         let name = spec.definition.name.as_str();
         let class = spec.class;
         self.mailbox.apply_mode(self.dispatch_ctx.policy);
-        let verdict = self.dispatch_ctx.policy.verdict(class, &prepared.access);
+        let mut verdict = self.dispatch_ctx.policy.verdict(class, &prepared.access);
+        if verdict.decision == Decision::Classify {
+            let assessment = self.classify(name, prepared).await?;
+            self.mailbox.apply_mode(self.dispatch_ctx.policy);
+            verdict = self.dispatch_ctx.policy.verdict(class, &prepared.access);
+            if verdict.decision == Decision::Classify {
+                match assessment.decision {
+                    AssessmentDecision::Allow => {
+                        self.sink.emit(Event::Notice(format!(
+                            "Auto approved {name}: {}",
+                            assessment.reason
+                        )));
+                        return Ok(None);
+                    }
+                    AssessmentDecision::Ask => {
+                        verdict.decision = if self.dispatch_ctx.policy.attended() {
+                            Decision::Ask
+                        } else {
+                            Decision::Unapproved
+                        };
+                        verdict.basis = Basis::Classifier {
+                            reason: assessment.reason,
+                        };
+                    }
+                }
+            }
+        }
         debug!(
             tool = name,
             id,
@@ -347,6 +377,7 @@ impl<'r> Dispatcher<'r, '_, '_> {
         );
         match verdict.decision {
             Decision::Allow => Ok(None),
+            Decision::Classify => unreachable!("the automatic decision was settled above"),
             Decision::Deny => Ok(Some(match verdict.basis {
                 Basis::Mode(Mode::Plan) => plan_denied_output(name, self.tools),
                 basis => denied_output(name, format_args!("by {basis}")),
@@ -392,6 +423,31 @@ impl<'r> Dispatcher<'r, '_, '_> {
                 }
             }
         }
+    }
+
+    async fn classify(&mut self, name: &str, prepared: &Prepared) -> AbortResult<Assessment> {
+        let ctx = &mut *self.dispatch_ctx;
+        let result = self
+            .mailbox
+            .race(
+                Box::pin(ctx.classifier.classify(
+                    Action {
+                        name,
+                        input: &prepared.input,
+                        access: &prepared.access,
+                    },
+                    &ctx.workspace,
+                    &ctx.session,
+                    ctx.usage,
+                    self.sink,
+                )),
+                self.sink,
+            )
+            .await?;
+        Ok(result.unwrap_or_else(|error| Assessment {
+            decision: AssessmentDecision::Ask,
+            reason: format!("Automatic approval could not decide: {error:#}"),
+        }))
     }
 
     /// Adds the frontend's `rule` to the session allow rules once the call's own `grant` admits it,
@@ -450,26 +506,16 @@ fn plan_denied_output(name: &str, tools: &ToolRegistry) -> ToolOutput {
 
 /// The synthetic error result for a call that would ask in a run nobody attends. It names what made
 /// the call ask, then the config `fix` that lets it through, or what else the model can do.
-fn unapproved_output(name: &str, basis: &Basis, fix: Option<&ConfigFix>) -> ToolOutput {
+fn unapproved_output(name: &str, basis: &Basis, fix: Option<&Rule>) -> ToolOutput {
     let why = match basis {
         Basis::Mode(_) => "No allow pattern matches it.".to_owned(),
         basis => format!("It needs approval because of {basis}."),
     };
     let next = match (fix, basis) {
-        (Some(ConfigFix::Allow(rule)), _) => format!(
+        (Some(rule), _) => format!(
             "To allow it, ask the user to add {} in the user config.",
             allow_entry(rule)
         ),
-        (Some(ConfigFix::Disable { group, allow }), _) => {
-            let allow = allow
-                .as_ref()
-                .map(|rule| format!(" and add {}", allow_entry(rule)))
-                .unwrap_or_default();
-            format!(
-                "To allow it, ask the user to set `permission.defaults.{group} = false`{allow} \
-                 in the user config."
-            )
-        }
         (None, Basis::Mode(_)) => "To allow it, ask the user to add a pattern \
                                    for each of its commands under `permission.allow` \
                                    in the user config, \
@@ -535,7 +581,6 @@ mod tests {
 
     use super::*;
     use crate::engine::local_testing::{EchoTool, dispatch_with, inert_mailbox};
-    use crate::permission::defaults::Shipped;
     use crate::permission::testing::exec_grant;
     use crate::permission::{PermissionClass, Tier};
     use crate::protocol::OpSender;
@@ -1248,59 +1293,36 @@ mod tests {
             }
 
             #[tokio::test]
-            async fn a_run_that_cannot_ask_denies_without_asking_and_names_every_config_change() {
+            async fn a_run_that_cannot_ask_denies_without_asking_and_names_an_allow_rule() {
                 let tools = bash_registry(Vec::new());
-                let cases = [
-                    (
-                        "make > .git/log",
-                        &["make *"][..],
-                        "It needs approval because of the built-in `git` rule. \
-                         Do not retry it as written. \
-                         To allow it, ask the user to set `permission.defaults.git = false` \
-                         in the user config.",
-                    ),
-                    (
-                        "rm -rf build",
-                        &[],
-                        "It needs approval because of the built-in `rm` rule. \
-                         Do not retry it as written. \
-                         To allow it, ask the user to set `permission.defaults.rm = false` \
-                         and add `\"rm -rf build\"` to `permission.allow.exec` \
-                         in the user config.",
-                    ),
-                ];
+                let sink = CapturingSink::default();
+                let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+                dispatch_ctx.policy.set_unattended();
+                // A closed op channel aborts on a stray approval request.
+                let (_, mut ops) = OpSender::channel(1);
 
-                for (command, allow, expected) in cases {
-                    let sink = CapturingSink::default();
-                    let mut dispatch_ctx =
-                        dispatch_with(Mode::Manual, &[], allow, Path::new("/repo"));
-                    dispatch_ctx.policy.set_unattended();
-                    // A closed op channel aborts on a stray approval request instead of waiting.
-                    let (_, mut ops) = OpSender::channel(1);
+                let denial = gate_call(
+                    &tools,
+                    "tool_1",
+                    "bash",
+                    json!({ "command": "make release" }),
+                    &sink,
+                    &mut Mailbox::new(&mut ops),
+                    &mut dispatch_ctx,
+                )
+                .await
+                .expect("a denial resolves without abort");
+                let denial = expect_settled(denial);
 
-                    let denial = gate_call(
-                        &tools,
-                        "tool_1",
-                        "bash",
-                        json!({ "command": command }),
-                        &sink,
-                        &mut Mailbox::new(&mut ops),
-                        &mut dispatch_ctx,
-                    )
-                    .await
-                    .expect("a denial resolves without abort");
-                    let denial = expect_settled(denial);
-
-                    assert_eq!(
-                        denial.content,
-                        format!(
-                            "The bash call was denied because it needs approval \
-                             and this run cannot ask for it. {expected}"
-                        ),
-                        "{command}"
-                    );
-                    assert_eq!(approval_ids(&sink), [] as [&str; 0], "{command}");
-                }
+                assert_eq!(
+                    denial.content,
+                    "The bash call was denied because it needs approval \
+                     and this run cannot ask for it. No allow pattern matches it. \
+                     Do not retry it as written. \
+                     To allow it, ask the user to add `\"make release\"` to `permission.allow.exec` \
+                     in the user config."
+                );
+                assert_eq!(approval_ids(&sink), [] as [&str; 0]);
             }
 
             #[tokio::test]
@@ -1429,7 +1451,7 @@ mod tests {
             let unrecognized = Basis::Unrecognized {
                 construct: "$((1 + 2))".to_owned(),
             };
-            let allow = ConfigFix::Allow(exec_grant(r#"echo "a\b""#).suggested().clone());
+            let allow = exec_grant(r#"echo "a\b""#).suggested().clone();
             let ask = Basis::Rule {
                 tier: Tier::Ask,
                 rule: Rule::parse(PermissionClass::Exec, "git push *").unwrap(),
@@ -1462,9 +1484,11 @@ mod tests {
                      and set a variable for one command in the prefix form `NAME=value cmd`.",
                 ),
                 (
-                    &Basis::Builtin(Shipped::Ssh),
+                    &Basis::Classifier {
+                        reason: "Authorization is unclear".to_owned(),
+                    },
                     None,
-                    "It needs approval because of the built-in `ssh` rule. \
+                    "It needs approval because of the automatic approval check: Authorization is unclear. \
                      Do not retry it as written. \
                      Choose a different approach or ask the user to adjust permissions.",
                 ),

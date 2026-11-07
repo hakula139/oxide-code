@@ -1,6 +1,5 @@
 //! The TOML schema every config file shares: the `[client]`, `[permission]`, and `[tui]` tables.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
@@ -14,7 +13,6 @@ use toml::Table;
 use super::StatusLineSegment;
 use super::compaction::ThresholdPercent;
 use crate::model::{Effort, PromptCacheTtl};
-use crate::permission::defaults::Shipped;
 use crate::permission::{Mode, PermissionClass};
 use crate::util::env::whole_number_in;
 use crate::util::path::expand_absolute;
@@ -145,7 +143,6 @@ pub(super) struct CompactionTable {
 }
 
 /// Raw patterns and roots compile after layering, retaining each entry's file for errors.
-/// `defaults` turns shipped rule groups off by name.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct PermissionTable {
@@ -154,7 +151,14 @@ pub(super) struct PermissionTable {
     pub(super) deny: Option<TierTable>,
     pub(super) ask: Option<TierTable>,
     pub(super) allow: Option<TierTable>,
-    pub(super) defaults: Option<BTreeMap<Shipped, bool>>,
+    pub(super) auto: AutoPermissionTable,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct AutoPermissionTable {
+    pub(super) model: Option<String>,
+    pub(super) instructions: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
