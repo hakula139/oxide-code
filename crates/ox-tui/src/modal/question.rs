@@ -288,6 +288,53 @@ mod tests {
         answer
     }
 
+    mod render {
+        use super::*;
+
+        #[test]
+        fn a_short_narrow_view_keeps_wrapped_controls_visible_while_the_question_scrolls() {
+            let mut modal = modal();
+            modal.question.question = "Review the output before choosing a color. ".repeat(8);
+            modal.question.options = (0..12)
+                .map(|index| QuestionOption {
+                    label: format!("Choice {index}"),
+                    description: Some("Consider the generated output carefully. ".repeat(4)),
+                })
+                .collect();
+            modal.selected = 0;
+            let before = render_rows(&mut modal, 30, 12);
+            modal.acceptance.expire();
+
+            assert!(matches!(
+                modal.handle_key(&KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
+                ModalKey::Consumed
+            ));
+            let after = render_rows(&mut modal, 30, 12);
+
+            for rows in [&before, &after] {
+                for hint in [
+                    "↑/↓ choose",
+                    "Tab type",
+                    "Enter answer",
+                    "Ctrl+S skip",
+                    "Esc abort",
+                    "PgUp/PgDn scroll",
+                ] {
+                    assert!(
+                        rows.iter().any(|row| row.contains(hint)),
+                        "missing {hint}: {rows:?}"
+                    );
+                }
+            }
+            let footer = before
+                .iter()
+                .position(|row| row.contains("↑/↓ choose"))
+                .unwrap();
+            assert_eq!(&before[footer..], &after[footer..]);
+            assert_ne!(&before[..footer], &after[..footer]);
+        }
+    }
+
     mod handle_key {
         use super::*;
 
