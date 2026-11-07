@@ -53,7 +53,7 @@ jobs:
       actions: read
     steps:
       - name: Wait for CI on the tagged commit
-        uses: hakula139/devkit/actions/tagged-ci@61682dd34d15732234bac835f3603de8de5b86f1
+        uses: hakula139/devkit/actions/tagged-ci@e0d835ba91cf38c7f6d950c8a56c0d68e74366bd
 
   build:
     name: Build (${{ matrix.target }})
@@ -215,7 +215,7 @@ jobs:
             release-assets/*.zip
 
       - name: Publish release
-        uses: hakula139/devkit/actions/publish-release@61682dd34d15732234bac835f3603de8de5b86f1
+        uses: hakula139/devkit/actions/publish-release@e0d835ba91cf38c7f6d950c8a56c0d68e74366bd
         with:
           assets: |
             release-assets/oxide-code-x86_64-unknown-linux-gnu.tar.gz
