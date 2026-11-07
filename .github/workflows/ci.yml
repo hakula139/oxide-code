@@ -27,20 +27,9 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Nix
-        uses: ./.github/actions/setup-nix
+        uses: hakula139/devkit/actions/setup-nix@e0d835ba91cf38c7f6d950c8a56c0d68e74366bd
         with:
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
-      - name: Format
-        run: nix develop .#lint -c pnpm format
-
-      - name: Lint Markdown
-        if: ${{ !cancelled() }}
-        run: nix develop .#lint -c pnpm lint
-
-      - name: Spell check
-        if: ${{ !cancelled() }}
-        run: nix develop .#lint -c pnpm spellcheck
 
       - name: Check dependencies
         if: ${{ !cancelled() }}
@@ -173,7 +162,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Nix
-        uses: ./.github/actions/setup-nix
+        uses: hakula139/devkit/actions/setup-nix@e0d835ba91cf38c7f6d950c8a56c0d68e74366bd
         with:
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
@@ -195,33 +184,4 @@ jobs:
       actions: read
     steps:
       - name: Check results
-        # Unlike the default shell, `bash` sets pipefail, so a failed API call fails the gate.
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GATE_ID: ${{ job.check_run_id }}
-        run: |
-          # `needs` misses a matrix leg cancelled before it starts, so read each job from the API.
-          failed=$(
-            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=all&per_page=100" \
-              --paginate \
-              --slurp |
-              jq -r --argjson gate "$GATE_ID" '
-                [.[].jobs[]]
-                | group_by(.name)
-                | map(max_by(.run_attempt)) as $jobs
-                | first($jobs[] | select(.id == $gate))
-                  // error("job \($gate) is missing from this workflow run")
-                # Jobs of a calling workflow share this run, so check only names with this prefix.
-                | (.name | sub("[^/]*$"; "")) as $prefix
-                | $jobs[]
-                | select(.id != $gate and (.name | startswith($prefix)))
-                | select(.conclusion != "success" and .conclusion != "skipped")
-                | "::error::\(.name): \(.conclusion // .status)"
-              '
-          )
-
-          if [[ -n "$failed" ]]; then
-            echo "$failed"
-            exit 1
-          fi
+        uses: hakula139/devkit/actions/ci-result@e0d835ba91cf38c7f6d950c8a56c0d68e74366bd

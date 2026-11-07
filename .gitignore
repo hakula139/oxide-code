@@ -4,8 +4,6 @@
 /target/
 
 # Dependencies
-.pnpm-store/
-node_modules/
 
 # Local environment
 .env.local

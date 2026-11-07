@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>hakula139/nixos-config//.github/renovate-preset"],
+  "extends": ["github>hakula139/devkit#e0d835ba91cf38c7f6d950c8a56c0d68e74366bd"],
   "packageRules": [
     {
       "matchManagers": ["rust-toolchain"],

@@ -23,8 +23,8 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    git-hooks-nix = {
-      url = "github:cachix/git-hooks.nix";
+    devkit = {
+      url = "github:hakula139/devkit/e0d835ba91cf38c7f6d950c8a56c0d68e74366bd";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
@@ -42,13 +42,11 @@
       self,
       nixpkgs,
       rust-overlay,
-      git-hooks-nix,
+      devkit,
       home-manager,
       ...
     }:
     let
-      inherit (nixpkgs) lib;
-
       # git-hooks.nix has dropped x86_64-darwin, which Nixpkgs supports only through 26.05.
       systems = [
         "aarch64-darwin"
@@ -56,13 +54,7 @@
         "x86_64-linux"
       ];
 
-      eachSystem =
-        f:
-        let
-          bySystem = lib.genAttrs systems f;
-          outputs = builtins.attrNames bySystem.${builtins.head systems};
-        in
-        lib.genAttrs outputs (output: builtins.mapAttrs (_: attrs: attrs.${output}) bySystem);
+      eachSystem = devkit.lib.eachSystem systems;
 
       packageFor =
         pkgs:
@@ -89,7 +81,7 @@
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        nodejs = pkgs.nodejs_26;
+        dk = devkit.lib.mkLib pkgs;
 
         rustBin = rust-overlay.lib.mkRustBin { } pkgs;
         rustToolchain = rustBin.fromRustupToolchainFile ./rust-toolchain.toml;
@@ -105,21 +97,12 @@
         # ------------------------------------------------------------------------------------------
         # Pre-commit Hooks
         # ------------------------------------------------------------------------------------------
-        hooks = {
-          end-of-file-fixer.enable = true;
-          trim-trailing-whitespace.enable = true;
-          check-added-large-files.enable = true;
-          check-shebang-scripts-are-executable.enable = true;
-          check-yaml.enable = true;
-          taplo.enable = true;
+        preCommit = dk.preCommit {
+          src = ./.;
+          hooks.check-shebang-scripts-are-executable.enable = true;
 
-          nixfmt.enable = true;
-          deadnix.enable = true;
-          statix.enable = true;
-
-          shellcheck.enable = true;
-
-          rustfmt = {
+          # CI checks formatting without fetching the pinned toolchain in the Nix sandbox.
+          devHooks.rustfmt = {
             enable = true;
             packageOverrides = {
               cargo = rustToolchain;
@@ -128,64 +111,6 @@
           };
         };
 
-        # These hooks run tools pinned in node_modules, which the Nix sandbox lacks. The flake check
-        # leaves them to CI's Lint job.
-        nodeHook =
-          name: cmd:
-          pkgs.lib.getExe (
-            pkgs.writeShellApplication {
-              inherit name;
-              runtimeInputs = with pkgs; [
-                nodejs
-                pnpm
-              ];
-
-              text = ''
-                pnpm exec ${cmd} "$@"
-              '';
-            }
-          );
-
-        nodeHooks = {
-          prettier-write = {
-            enable = true;
-            name = "prettier";
-            entry = nodeHook "prettier-write" "prettier --write --ignore-unknown";
-            require_serial = true;
-            types = [ "text" ];
-          };
-
-          cspell = {
-            enable = true;
-            package = null;
-            entry = nodeHook "cspell" "cspell --no-must-find-files --no-progress";
-            require_serial = true;
-            types = [ "text" ];
-          };
-
-          markdownlint = {
-            enable = true;
-            name = "markdownlint-cli2";
-            package = null;
-            entry = nodeHook "markdownlint" "markdownlint-cli2 --fix";
-            require_serial = true;
-            files = "\\.md$";
-          };
-        };
-
-        preCommit = git-hooks-nix.lib.${system}.run {
-          hooks = hooks // nodeHooks;
-          src = ./.;
-        };
-
-        # The flake check leaves rustfmt to CI's Rust job, so it never fetches the pinned toolchain.
-        preCommitCheck = git-hooks-nix.lib.${system}.run {
-          hooks = removeAttrs hooks [ "rustfmt" ];
-          src = ./.;
-        };
-
-        flock = pkgs.lib.getExe pkgs.flock;
-        git = pkgs.lib.getExe pkgs.git;
       in
       {
         # ------------------------------------------------------------------------------------------
@@ -198,32 +123,16 @@
           packages = [
             rustDevToolchain
           ]
-          ++ preCommit.enabledPackages
-          ++ [ preCommit.config.package ]
           ++ (with pkgs; [
             cargo-deny
             cargo-insta
             cargo-llvm-cov
             cargo-mutants
             git-cliff
-            nodejs
-            pnpm
             sqlite
           ]);
 
-          # Use shared hooks to avoid the relative path bug in linked worktrees (git-hooks.nix#688).
-          # Serialize installation, and leave sibling repositories that borrow this shell untouched.
-          shellHook = ''
-            if common=$(${git} rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
-              top=$(${git} rev-parse --show-toplevel 2>/dev/null) &&
-              [ -f "$top/crates/ox/Cargo.toml" ]; then
-              (
-                ${flock} 9
-                ${preCommit.config.installationScript}
-                ${git} config --local --unset-all core.hooksPath || true
-              ) 9>"$common/git-hooks.lock"
-            fi
-          '';
+          inputsFrom = [ preCommit.shell ];
         };
 
         # CI's Lint job runs in this shell, which leaves out the pinned toolchain so that every tool
@@ -235,9 +144,7 @@
           packages = with pkgs; [
             cargo
             cargo-deny
-            nodejs
             nushell
-            pnpm
           ];
         };
 
@@ -253,7 +160,7 @@
         # Checks
         # ------------------------------------------------------------------------------------------
         checks = {
-          pre-commit = preCommitCheck;
+          pre-commit = preCommit.check;
 
           home-manager = import ./nix/home-manager-tests.nix {
             inherit home-manager oxide-code pkgs;

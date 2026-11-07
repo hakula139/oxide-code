@@ -10,8 +10,6 @@ The tree lists only the top-level entries whose names leave their purpose unclea
 
 ```text
 .
-├── .agents/                                # Agent skills for the release procedure
-├── .claude/                                # Link to the agent skills for Claude Code
 ├── about.toml                              # Release dependency license selection
 ├── crates/ox/                              # The `ox` binary crate with the CLI and the stdio frontends, mapped in docs/design/architecture.md
 ├── crates/ox-core/                         # The `ox-core` library crate with the agent core, mapped in docs/design/architecture.md
@@ -57,9 +55,7 @@ cargo clippy                                          # Lint without test target
 cargo doc --no-deps                                   # Check rustdoc lints
 cargo llvm-cov                                        # Run tests and check coverage
 cargo deny check                                      # Check dependencies when they change
-pnpm format                                           # Check JSON, Markdown, and YAML formatting
-pnpm lint                                             # Lint Markdown
-pnpm spellcheck                                       # Spell check
+prek run --all-files                                  # Run the shared formatting and lint hooks
 ```
 
 [Development](docs/conventions/development.md#ci) lists which CI job runs each check.
