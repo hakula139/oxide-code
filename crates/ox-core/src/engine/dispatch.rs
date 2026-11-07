@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use futures::StreamExt as _;
@@ -15,14 +17,20 @@ use tracing::{debug, warn};
 use super::abort::{AbortResult, Mailbox, TurnAbort};
 use super::classifier::{Action, Assessment, AssessmentDecision, ClassifierContext};
 use super::usage::UsageLedger;
+use crate::config::interaction::{
+    ApprovalConfig, ApprovalTimeoutAction, InteractionConfig, QuestionTimeoutAction,
+};
 use crate::file_tracker::FileTracker;
 use crate::message::ContentBlock;
 use crate::permission::rule::Rule;
 use crate::permission::{Basis, Decision, Mode, Policy, SessionGrant, Workspace};
 use crate::prompt::plan_runs;
-use crate::protocol::{ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult};
+use crate::protocol::{
+    ApprovalDecision, Event, EventSink, Op, PromptDeadline, PromptTimeoutAction, ReplySource,
+    ToolCall, ToolResult,
+};
 use crate::session::handle::SessionHandle;
-use crate::tool::ask::{QuestionAnswer, QuestionRequest};
+use crate::tool::ask::{QuestionAnswer, QuestionReply, QuestionRequest};
 use crate::tool::spill::run_capped;
 use crate::tool::tasks::Task;
 use crate::tool::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry, ToolSpec};
@@ -30,6 +38,7 @@ use crate::tool::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistr
 /// Session-wide tool context and policy, including rules granted during approvals.
 pub(super) struct DispatchContext<'a> {
     pub(super) policy: &'a mut Policy,
+    pub(super) interaction: InteractionConfig,
     pub(super) workspace: Arc<Workspace>,
     pub(super) session: SessionHandle,
     pub(super) tracker: Arc<FileTracker>,
@@ -329,7 +338,10 @@ impl<'r> Dispatcher<'r, '_, '_> {
 
     async fn answer_question(&mut self, request: QuestionRequest) -> AbortResult<()> {
         if !self.dispatch_ctx.policy.attended() {
-            _ = request.reply.send(QuestionAnswer::Aborted);
+            _ = request.reply.send(QuestionReply {
+                answer: QuestionAnswer::Aborted,
+                source: ReplySource::User,
+            });
             return Ok(());
         }
         let QuestionRequest {
@@ -338,28 +350,70 @@ impl<'r> Dispatcher<'r, '_, '_> {
             reply,
         } = request;
         let prompt = question.question.clone();
+        let settings = self.dispatch_ctx.interaction.questions;
+        let timeout_seconds = settings.timeout_seconds;
+        let timeout_answer = match settings.on_timeout {
+            QuestionTimeoutAction::Recommended => question
+                .recommended
+                .and_then(|index| question.options.get(index))
+                .map_or(QuestionAnswer::Skipped, |option| {
+                    QuestionAnswer::Answered(option.label.clone())
+                }),
+            QuestionTimeoutAction::Skip => QuestionAnswer::Skipped,
+        };
+        let deadline = timeout_seconds.map(|timeout_seconds| PromptDeadline {
+            timeout_seconds,
+            action: match settings.on_timeout {
+                QuestionTimeoutAction::Recommended => PromptTimeoutAction::Recommended,
+                QuestionTimeoutAction::Skip => PromptTimeoutAction::Skip,
+            },
+        });
         if self
             .sink
             .send(Event::QuestionAsked {
                 id: id.clone(),
                 question,
+                deadline,
             })
             .is_err()
         {
-            _ = reply.send(QuestionAnswer::Aborted);
+            _ = reply.send(QuestionReply {
+                answer: QuestionAnswer::Aborted,
+                source: ReplySource::User,
+            });
             return Ok(());
         }
+        let expired = timeout_after(timeout_seconds);
         let answer = self
             .mailbox
-            .race_or(std::future::pending(), self.sink, |op| match op {
-                Op::AnswerQuestion { id: target, answer } if target == id => Some(answer),
-                other => {
-                    warn!(id, op = ?other, "ignored op while awaiting question");
-                    None
-                }
-            })
-            .await?;
-        if let QuestionAnswer::Answered(text) = &answer {
+            .race_or(
+                async {
+                    expired.await;
+                    QuestionReply {
+                        answer: timeout_answer,
+                        source: ReplySource::Timeout,
+                    }
+                },
+                self.sink,
+                |op| match op {
+                    Op::AnswerQuestion { id: target, answer } if target == id => {
+                        Some(QuestionReply {
+                            answer,
+                            source: ReplySource::User,
+                        })
+                    }
+                    other => {
+                        warn!(id, op = ?other, "ignored op while awaiting question");
+                        None
+                    }
+                },
+            )
+            .await;
+        self.sink.emit(Event::InteractionClosed { id });
+        let answer = answer?;
+        if answer.source == ReplySource::User
+            && let QuestionAnswer::Answered(text) = &answer.answer
+        {
             let intent = formatdoc! {"
                 For the question:
                 {prompt}
@@ -481,6 +535,16 @@ impl<'r> Dispatcher<'r, '_, '_> {
                 let preview = tool
                     .approval_preview(name, prepared, self.dispatch_ctx.workspace.cwd())
                     .await;
+                let settings = self.dispatch_ctx.interaction.approvals;
+                let deadline = settings
+                    .timeout_seconds
+                    .map(|timeout_seconds| PromptDeadline {
+                        timeout_seconds,
+                        action: match settings.on_timeout {
+                            ApprovalTimeoutAction::Deny => PromptTimeoutAction::Deny,
+                            ApprovalTimeoutAction::Allow => PromptTimeoutAction::Allow,
+                        },
+                    });
                 if self
                     .sink
                     .send(Event::ApprovalRequested {
@@ -488,6 +552,7 @@ impl<'r> Dispatcher<'r, '_, '_> {
                         preview,
                         basis: verdict.basis.clone(),
                         grant: grant.clone().map(Box::new),
+                        deadline,
                     })
                     .is_err()
                 {
@@ -496,12 +561,26 @@ impl<'r> Dispatcher<'r, '_, '_> {
                         "because its approval request could not reach the user",
                     )));
                 }
-                match await_approval(id, self.mailbox, self.sink).await? {
+                let reply = await_approval(id, self.mailbox, self.sink, settings).await?;
+                if reply.source == ReplySource::Timeout {
+                    self.sink.emit(Event::Notice(format!(
+                        "Permission prompt timed out: {}.",
+                        settings.on_timeout
+                    )));
+                }
+                match reply.decision {
                     ApprovalDecision::Approve => Ok(None),
                     ApprovalDecision::AllowForSession { rule } => {
                         Ok(self.allow_for_session(grant.as_ref(), *rule, name))
                     }
-                    ApprovalDecision::Deny => Ok(Some(denied_output(name, "by the user"))),
+                    ApprovalDecision::Deny => Ok(Some(denied_output(
+                        name,
+                        if reply.source == ReplySource::Timeout {
+                            "because its approval deadline expired"
+                        } else {
+                            "by the user"
+                        },
+                    ))),
                     ApprovalDecision::DenyWithFeedback { feedback } => {
                         let text = format!("The user denied the {name} call and wrote: {feedback}");
                         self.record_user_text(text.clone());
@@ -631,19 +710,56 @@ async fn await_approval(
     id: &str,
     mailbox: &mut Mailbox<'_>,
     sink: &dyn EventSink,
-) -> AbortResult<ApprovalDecision> {
-    mailbox
-        .race_or(std::future::pending(), sink, |op| match op {
-            Op::Resolve {
-                id: target,
-                decision,
-            } if target == id => Some(decision),
-            other => {
-                warn!(id, op = ?other, "ignored op while awaiting approval");
-                None
-            }
-        })
-        .await
+    settings: ApprovalConfig,
+) -> AbortResult<ApprovalReply> {
+    let expired = timeout_after(settings.timeout_seconds);
+    let result = mailbox
+        .race_or(
+            async {
+                expired.await;
+                ApprovalReply {
+                    decision: match settings.on_timeout {
+                        ApprovalTimeoutAction::Deny => ApprovalDecision::Deny,
+                        ApprovalTimeoutAction::Allow => ApprovalDecision::Approve,
+                    },
+                    source: ReplySource::Timeout,
+                }
+            },
+            sink,
+            |op| match op {
+                Op::Resolve {
+                    id: target,
+                    decision,
+                } if target == id => Some(ApprovalReply {
+                    decision,
+                    source: ReplySource::User,
+                }),
+                other => {
+                    warn!(id, op = ?other, "ignored op while awaiting approval");
+                    None
+                }
+            },
+        )
+        .await;
+    sink.emit(Event::InteractionClosed { id: id.to_owned() });
+    result
+}
+
+struct ApprovalReply {
+    decision: ApprovalDecision,
+    source: ReplySource,
+}
+
+fn timeout_after(seconds: Option<NonZeroU32>) -> impl Future<Output = ()> {
+    let deadline = seconds
+        .map(|seconds| tokio::time::Instant::now() + Duration::from_secs(u64::from(seconds.get())));
+    async move {
+        if let Some(deadline) = deadline {
+            tokio::time::sleep_until(deadline).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1856,10 +1972,11 @@ mod tests {
                 "tool_1",
                 &mut Mailbox::new(&mut rx),
                 &CapturingSink::default(),
+                ApprovalConfig::default(),
             )
             .await
             .expect("matching decision resolves");
-            assert_eq!(decision, ApprovalDecision::Deny);
+            assert_eq!(decision.decision, ApprovalDecision::Deny);
         }
     }
 }

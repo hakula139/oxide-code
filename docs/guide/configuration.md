@@ -141,6 +141,26 @@ For other model IDs, the default and percent-based automatic triggers stay off. 
 
 [Compaction](slash-commands.md#compaction) covers when automatic compaction runs and what happens when it fails.
 
+### `[interaction]`: Question and Approval Deadlines
+
+Questions and permission approvals wait without a time limit by default. Set a positive whole number of seconds in user config or a user drop-in to limit their total wait:
+
+```toml
+[interaction.questions]
+timeout_seconds = 120
+on_timeout = "recommended"
+
+[interaction.approvals]
+timeout_seconds = 60
+on_timeout = "deny"
+```
+
+Question deadlines choose the recommended option by default, or skip when there is no recommendation. Set `on_timeout = "skip"` to always skip. A timeout answer is identified as automatic in the tool result and does not count as a user instruction.
+
+Approval deadlines deny by default. Set `on_timeout = "allow"` to approve only that call when time runs out. This never grants permission for later calls or overrides a configured deny rule. Headless runs retain their unavailable-question and unapproved-permission behavior. The timer starts when the engine publishes the request and does not reset while you type. TUI prompts show the configured duration and action.
+
+Project config cannot set these tables. Remove `timeout_seconds` to disable a deadline.
+
 ### `[tui]`: Terminal UI
 
 `show_thinking = true` opts the request into `thinking.display = "summarized"`, so the API streams reasoning text. The chat shows it as it arrives, then collapses it to a `Thought` header that **Ctrl+O** or a click expands.
@@ -211,34 +231,38 @@ See [Theming](theming.md) for the full slot reference, color value formats (hex,
 
 Each key goes in the table its prefix names, so `client.compaction.auto_enabled` is `auto_enabled` under `[client.compaction]`. A project file sets only the keys [Project Config](#project-config) lists.
 
-| Key                                        | Type    | Default                         | Description                                                                                                     |
-| ------------------------------------------ | ------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `client.attribution`                       | boolean | `true`                          | Send the [attribution block](authentication.md#llm-gateways), user config only                                  |
-| `client.auth`                              | table   | -                               | [Typed credential](authentication.md), user config only                                                         |
-| `client.base_url`                          | string  | `"https://api.anthropic.com"`   | [API base URL](#base_url-endpoint), user config only                                                            |
-| `client.compaction.auto_enabled`           | boolean | `true`                          | Enable [automatic context compaction](#clientcompaction-context-compression)                                    |
-| `client.compaction.auto_threshold_percent` | integer | model-derived                   | Share of the context window that [triggers compaction](#clientcompaction-context-compression), `1` to `100`     |
-| `client.compaction.auto_threshold_tokens`  | integer | model-derived                   | Token count that [triggers compaction](#clientcompaction-context-compression)                                   |
-| `client.effort`                            | string  | per-model                       | [Effort level](#effort-reasoning-effort), `"low"` to `"max"`                                                    |
-| `client.extra_ca_certs`                    | string  | -                               | [PEM bundle](#extra_ca_certs-corporate-trust-anchors) appended to the trust store, user config only             |
-| `client.headers`                           | table   | empty                           | [Extra request headers](authentication.md#llm-gateways), user config only                                       |
-| `client.max_tokens`                        | integer | per-model                       | [Max tokens per response](#max_tokens-response-ceiling)                                                         |
-| `client.max_tool_rounds`                   | integer | unset (unbounded)               | [Per-turn safety cap](#max_tool_rounds-agent-loop-safety-cap) on tool rounds                                    |
-| `client.model`                             | string  | `"claude-opus-5-5"`             | [Model](#model-supported-models) to use                                                                         |
-| `client.prompt_cache_ttl`                  | string  | `"1h"`                          | [Prompt-cache TTL](#prompt_cache_ttl-cache-duration), `"5m"` or `"1h"`                                          |
-| `client.structured_outputs`                | boolean | `true`                          | Allow [JSON schemas](authentication.md#llm-gateways) for titles and permission classification, user config only |
-| `permission.allow`                         | table   | empty                           | [Calls that run without asking](permissions.md#rule-tables), user config only                                   |
-| `permission.ask`                           | table   | empty                           | [Calls that ask first](permissions.md#rule-tables), even when an allow pattern matches                          |
-| `permission.auto.instructions`             | array   | `[]`                            | Natural-language approval instructions, user config only                                                        |
-| `permission.auto.model`                    | string  | `"claude-haiku-5-5"`            | Approval classifier model, user config only                                                                     |
-| `permission.deny`                          | table   | empty                           | [Calls that never run](permissions.md#rule-tables), in every mode                                               |
-| `permission.extra_roots`                   | array   | `[]`                            | [Additional rule anchors and classifier context](permissions.md#workspace-roots), user config only              |
-| `permission.mode`                          | string  | `"auto"`                        | [Permission mode](permissions.md#modes), `"auto"`, `"manual"`, `"plan"`, or `"yolo"`, user config only          |
-| `tui.show_thinking`                        | boolean | `false`                         | [Show extended thinking](#tui-terminal-ui)                                                                      |
-| `tui.show_welcome`                         | boolean | `true`                          | [Paint the welcome splash](#tui-terminal-ui) on an empty chat                                                   |
-| `tui.status_line`                          | array   | see [`[tui]`](#tui-terminal-ui) | Ordered status-line segments                                                                                    |
-| `tui.theme.base`                           | string  | `"mocha"`                       | [Built-in theme](theming.md#built-in-themes) name, or a TOML theme file path in user config                     |
-| `tui.theme.overrides`                      | table   | empty                           | [Per-slot patches](theming.md#overrides) applied on top of the base                                             |
+| Key                                        | Type    | Default                         | Description                                                                                                             |
+| ------------------------------------------ | ------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `client.attribution`                       | boolean | `true`                          | Send the [attribution block](authentication.md#llm-gateways), user config only                                          |
+| `client.auth`                              | table   | -                               | [Typed credential](authentication.md), user config only                                                                 |
+| `client.base_url`                          | string  | `"https://api.anthropic.com"`   | [API base URL](#base_url-endpoint), user config only                                                                    |
+| `client.compaction.auto_enabled`           | boolean | `true`                          | Enable [automatic context compaction](#clientcompaction-context-compression)                                            |
+| `client.compaction.auto_threshold_percent` | integer | model-derived                   | Share of the context window that [triggers compaction](#clientcompaction-context-compression), `1` to `100`             |
+| `client.compaction.auto_threshold_tokens`  | integer | model-derived                   | Token count that [triggers compaction](#clientcompaction-context-compression)                                           |
+| `client.effort`                            | string  | per-model                       | [Effort level](#effort-reasoning-effort), `"low"` to `"max"`                                                            |
+| `client.extra_ca_certs`                    | string  | -                               | [PEM bundle](#extra_ca_certs-corporate-trust-anchors) appended to the trust store, user config only                     |
+| `client.headers`                           | table   | empty                           | [Extra request headers](authentication.md#llm-gateways), user config only                                               |
+| `client.max_tokens`                        | integer | per-model                       | [Max tokens per response](#max_tokens-response-ceiling)                                                                 |
+| `client.max_tool_rounds`                   | integer | unset (unbounded)               | [Per-turn safety cap](#max_tool_rounds-agent-loop-safety-cap) on tool rounds                                            |
+| `client.model`                             | string  | `"claude-opus-5-5"`             | [Model](#model-supported-models) to use                                                                                 |
+| `client.prompt_cache_ttl`                  | string  | `"1h"`                          | [Prompt-cache TTL](#prompt_cache_ttl-cache-duration), `"5m"` or `"1h"`                                                  |
+| `client.structured_outputs`                | boolean | `true`                          | Allow [JSON schemas](authentication.md#llm-gateways) for titles and permission classification, user config only         |
+| `interaction.approvals.on_timeout`         | string  | `"deny"`                        | [Approval deadline action](#interaction-question-and-approval-deadlines), `"deny"` or `"allow"`, user config only       |
+| `interaction.approvals.timeout_seconds`    | integer | unset (unbounded)               | Total approval wait in positive seconds, user config only                                                               |
+| `interaction.questions.on_timeout`         | string  | `"recommended"`                 | [Question deadline action](#interaction-question-and-approval-deadlines), `"recommended"` or `"skip"`, user config only |
+| `interaction.questions.timeout_seconds`    | integer | unset (unbounded)               | Total question wait in positive seconds, user config only                                                               |
+| `permission.allow`                         | table   | empty                           | [Calls that run without asking](permissions.md#rule-tables), user config only                                           |
+| `permission.ask`                           | table   | empty                           | [Calls that ask first](permissions.md#rule-tables), even when an allow pattern matches                                  |
+| `permission.auto.instructions`             | array   | `[]`                            | Natural-language approval instructions, user config only                                                                |
+| `permission.auto.model`                    | string  | `"claude-haiku-5-5"`            | Approval classifier model, user config only                                                                             |
+| `permission.deny`                          | table   | empty                           | [Calls that never run](permissions.md#rule-tables), in every mode                                                       |
+| `permission.extra_roots`                   | array   | `[]`                            | [Additional rule anchors and classifier context](permissions.md#workspace-roots), user config only                      |
+| `permission.mode`                          | string  | `"auto"`                        | [Permission mode](permissions.md#modes), `"auto"`, `"manual"`, `"plan"`, or `"yolo"`, user config only                  |
+| `tui.show_thinking`                        | boolean | `false`                         | [Show extended thinking](#tui-terminal-ui)                                                                              |
+| `tui.show_welcome`                         | boolean | `true`                          | [Paint the welcome splash](#tui-terminal-ui) on an empty chat                                                           |
+| `tui.status_line`                          | array   | see [`[tui]`](#tui-terminal-ui) | Ordered status-line segments                                                                                            |
+| `tui.theme.base`                           | string  | `"mocha"`                       | [Built-in theme](theming.md#built-in-themes) name, or a TOML theme file path in user config                             |
+| `tui.theme.overrides`                      | table   | empty                           | [Per-slot patches](theming.md#overrides) applied on top of the base                                                     |
 
 ### Environment Variables
 

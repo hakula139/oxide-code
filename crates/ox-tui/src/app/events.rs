@@ -9,10 +9,13 @@ use ox_core::auth::AuthSource;
 use ox_core::config::compaction::AutoCompactionConfig;
 use ox_core::model::{Effort, ModelSpec};
 use ox_core::permission::{Basis, Mode, SessionGrant};
-use ox_core::protocol::{CompactTrigger, Event, Interaction, OpEnd, SessionRef, notice};
+use ox_core::protocol::{
+    CompactTrigger, Event, Interaction, OpEnd, PromptDeadline, SessionRef, notice,
+};
 use ox_core::session::display::{archive_notice, id_prefix};
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
 use ox_core::session::store::listing::{ArchiveState, SessionInfo};
+use ox_core::tool::ask::Question;
 use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::text::plural;
 
@@ -71,7 +74,7 @@ impl App {
             Event::ToolCallEnd(result) => self.chat.push_tool_result(result),
             Event::PromptDrained(text) => self.apply_prompt_drained(text),
             // `end_operation` settles the in-flight op, and the TUI tracks no other.
-            Event::OpEnded { .. } => {}
+            Event::OpEnded { .. } | Event::InteractionClosed { .. } => {}
             Event::TurnRolledBack => self.queue.mark_rolled_back(),
             Event::PromptUnsent => self.queue.mark_unsent(),
             Event::UsageUpdated(usage) => self.session_info.usage = Some(usage),
@@ -141,10 +144,13 @@ impl App {
                 preview,
                 basis,
                 grant,
-            } => self.push_approval_modal(id, preview, &basis, grant),
-            Event::QuestionAsked { id, question } => {
-                self.modals.push(Box::new(QuestionModal::new(id, question)));
-            }
+                deadline,
+            } => self.push_approval_modal(id, preview, &basis, grant, deadline),
+            Event::QuestionAsked {
+                id,
+                question,
+                deadline,
+            } => self.push_question_modal(id, question, deadline),
             Event::SessionRulesUpdated(rules) => self.session_info.session_allow = rules,
             Event::TasksUpdated(tasks) => self.tasks.set(tasks),
             Event::BackgroundShellsUpdated(shells) => self.session_info.background_shells = shells,
@@ -217,13 +223,22 @@ impl App {
         preview: ApprovalPreview,
         basis: &Basis,
         grant: Option<Box<SessionGrant>>,
+        deadline: Option<PromptDeadline>,
     ) {
-        self.modals.push(Box::new(ApprovalModal::new(
-            id,
-            preview,
-            basis.reason(),
-            grant,
-        )));
+        self.modals.push(Box::new(
+            ApprovalModal::new(id, preview, basis.reason(), grant).with_deadline(deadline),
+        ));
+    }
+
+    fn push_question_modal(
+        &mut self,
+        id: String,
+        question: Question,
+        deadline: Option<PromptDeadline>,
+    ) {
+        self.modals.push(Box::new(
+            QuestionModal::new(id, question).with_deadline(deadline),
+        ));
     }
 
     /// Shows `title` when it names the current session.
@@ -2344,6 +2359,7 @@ mod tests {
                 },
                 basis: Basis::Mode(Mode::Manual),
                 grant: Some(Box::new(exec_grant("cargo test"))),
+                deadline: None,
             });
 
             let text = rendered_text(&mut app, 100, 24);

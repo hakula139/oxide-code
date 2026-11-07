@@ -7,14 +7,14 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use ox_core::protocol::Op;
+use ox_core::protocol::{Event, Op, PromptDeadline};
 use ox_core::tool::ask::{Question, QuestionAnswer};
 use ox_core::util::text::escape_hidden;
 
 use super::acceptance::Acceptance;
 use super::chrome::{above, wrap_hints};
 use super::line_editor::LineEditor;
-use super::{Modal, ModalAction, ModalKey};
+use super::{EngineUpdate, Modal, ModalAction, ModalKey, UpdateReply};
 use crate::action::Action;
 use crate::saturating_u16;
 use crate::theme::Theme;
@@ -30,6 +30,7 @@ pub(crate) struct QuestionModal {
     rows: usize,
     max_scroll: usize,
     focus_changed: bool,
+    deadline: Option<PromptDeadline>,
 }
 
 impl QuestionModal {
@@ -44,7 +45,13 @@ impl QuestionModal {
             rows: 0,
             max_scroll: 0,
             focus_changed: true,
+            deadline: None,
         }
+    }
+
+    pub(crate) fn with_deadline(mut self, deadline: Option<PromptDeadline>) -> Self {
+        self.deadline = deadline;
+        self
     }
 
     fn answer(&self, answer: QuestionAnswer) -> ModalAction {
@@ -66,6 +73,17 @@ impl QuestionModal {
             None,
         );
         lines.push(Line::default());
+        if let Some(deadline) = self.deadline {
+            lines.extend(wrap_line(
+                Line::from(Span::styled(
+                    format!("After {}s: {}.", deadline.timeout_seconds, deadline.action),
+                    dim,
+                )),
+                width,
+                0,
+                None,
+            ));
+        }
         let mut selected_row = lines.len();
         for (index, option) in self.question.options.iter().enumerate() {
             if index == self.selected {
@@ -116,6 +134,15 @@ impl QuestionModal {
 }
 
 impl Modal for QuestionModal {
+    fn on_engine(&mut self, update: EngineUpdate<'_>) -> UpdateReply {
+        match update {
+            EngineUpdate::Event(Event::InteractionClosed { id }) if *id == self.id => {
+                UpdateReply::Closed(None)
+            }
+            _ => UpdateReply::Unclaimed,
+        }
+    }
+
     fn height(&mut self, width: u16, max_height: u16) -> u16 {
         let rows = self.body(width, None).0.len() + 2 + Self::footer_rows(width, false).len();
         saturating_u16(rows).min(max_height)

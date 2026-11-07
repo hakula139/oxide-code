@@ -131,6 +131,7 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
         ),
     ];
     let mut sections = vec![KvSection::annotated(resolved).with_heading("Resolved")];
+    sections.push(KvSection::annotated(interaction_rows(info)).with_heading("Interactions"));
     let rules = permission_rows(sources);
     if !rules.is_empty() {
         sections.push(KvSection::annotated(rules).with_heading("Permissions"));
@@ -140,6 +141,39 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
     KvOverview::new("Configuration", sections)
 }
 
+fn interaction_rows(info: &LiveSessionInfo) -> Vec<(String, String, String)> {
+    let cfg = &info.config.interaction;
+    let sources = &info.config.provenance;
+    [
+        (
+            "Question Timeout",
+            cfg.questions
+                .timeout_seconds
+                .map_or_else(|| "disabled".to_owned(), |seconds| format!("{seconds}s")),
+            &sources.question_timeout,
+        ),
+        (
+            "Question Timeout Action",
+            cfg.questions.on_timeout.to_string(),
+            &sources.question_timeout_action,
+        ),
+        (
+            "Approval Timeout",
+            cfg.approvals
+                .timeout_seconds
+                .map_or_else(|| "disabled".to_owned(), |seconds| format!("{seconds}s")),
+            &sources.approval_timeout,
+        ),
+        (
+            "Approval Timeout Action",
+            cfg.approvals.on_timeout.to_string(),
+            &sources.approval_timeout_action,
+        ),
+    ]
+    .into_iter()
+    .map(|(label, value, source)| (label.to_owned(), value, source.to_string()))
+    .collect()
+}
 fn permission_rows(sources: &Provenance) -> Vec<(String, String, String)> {
     let roots = sources.extra_roots.iter().map(|root| {
         (
