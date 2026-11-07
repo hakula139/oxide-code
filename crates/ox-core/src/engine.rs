@@ -313,9 +313,11 @@ impl Engine {
             // A `Queue` here arrived after its turn ended, and the frontend still submits it. An
             // interrupt, approval, or sign-in code only matters mid-operation, where the
             // operation's `Mailbox` consumes it.
-            Op::Queue(_) | Op::Interrupt | Op::Resolve { .. } | Op::LoginCode(_) => {
-                OpEnd::Completed
-            }
+            Op::Queue(_)
+            | Op::Interrupt
+            | Op::Resolve { .. }
+            | Op::AnswerQuestion { .. }
+            | Op::LoginCode(_) => OpEnd::Completed,
             Op::Shutdown => OpEnd::Shutdown,
         };
         mailbox.apply_mode(&mut self.policy);
@@ -2836,6 +2838,7 @@ mod tests {
                 Event::Notice(_) => "notice",
                 Event::Error(_) => "error",
                 Event::ApprovalRequested { .. } => "approval_requested",
+                Event::QuestionAsked { .. } => "question_asked",
                 Event::SessionRulesUpdated(_) => "session_rules_updated",
                 Event::TasksUpdated(_) => "tasks_updated",
                 Event::BackgroundShellsUpdated(_) => "background_shells_updated",

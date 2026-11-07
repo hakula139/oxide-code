@@ -7,6 +7,8 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
+use indoc::formatdoc;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -20,6 +22,7 @@ use crate::permission::{Basis, Decision, Mode, Policy, SessionGrant, Workspace};
 use crate::prompt::plan_runs;
 use crate::protocol::{ApprovalDecision, Event, EventSink, Op, ToolCall, ToolResult};
 use crate::session::handle::SessionHandle;
+use crate::tool::ask::{QuestionAnswer, QuestionRequest};
 use crate::tool::spill::run_capped;
 use crate::tool::tasks::Task;
 use crate::tool::{Prepared, Tool, ToolCtx, ToolMetadata, ToolOutput, ToolRegistry, ToolSpec};
@@ -36,7 +39,7 @@ pub(super) struct DispatchContext<'a> {
 
 impl DispatchContext<'_> {
     /// The context the call `tool_use_id` prepares and runs in.
-    fn tool_ctx(&self, tool_use_id: &str) -> ToolCtx {
+    fn tool_ctx(&self, tool_use_id: &str, questions: mpsc::Sender<QuestionRequest>) -> ToolCtx {
         ToolCtx {
             workspace: Arc::clone(&self.workspace),
             session_id: self.session.session_id(),
@@ -44,6 +47,7 @@ impl DispatchContext<'_> {
             tracker: Arc::clone(&self.tracker),
             tool_use_id: tool_use_id.to_owned(),
             cancel: CancellationToken::new(),
+            questions,
         }
     }
 }
@@ -108,12 +112,16 @@ pub(super) async fn run_tool_round(
         tasks: None,
         abort: None,
     };
+    let (questions, pending_questions) = mpsc::channel(1);
     let mut dispatcher = Dispatcher {
         tools,
         parse_errors,
         sink,
         mailbox,
         dispatch_ctx,
+        questions,
+        pending_questions,
+        user_answers: Vec::new(),
     };
     let parallel_safe = |name: &str| tools.get(name).is_some_and(|(spec, _)| spec.parallel_safe);
     let mut calls = tool_uses.into_iter().peekable();
@@ -133,6 +141,9 @@ pub(super) async fn run_tool_round(
         round.push(call.id, ToolOutput::error(NOT_RUN));
     }
     round
+        .results
+        .extend(dispatcher.user_answers.into_iter().map(ContentBlock::text));
+    round
 }
 
 /// Result of a call the user interrupted before its tool started.
@@ -149,6 +160,9 @@ struct Dispatcher<'r, 'm, 'd> {
     sink: &'r dyn EventSink,
     mailbox: &'r mut Mailbox<'m>,
     dispatch_ctx: &'r mut DispatchContext<'d>,
+    questions: mpsc::Sender<QuestionRequest>,
+    pending_questions: mpsc::Receiver<QuestionRequest>,
+    user_answers: Vec<String>,
 }
 
 /// A call that passed the gate, ready to run.
@@ -177,6 +191,11 @@ struct Started {
     name: String,
     input: serde_json::Value,
     output: Option<ToolOutput>,
+}
+
+enum RunEvent {
+    Finished((usize, ToolOutput)),
+    Question(QuestionRequest),
 }
 
 impl<'r> Dispatcher<'r, '_, '_> {
@@ -274,8 +293,24 @@ impl<'r> Dispatcher<'r, '_, '_> {
             .map(|ready| async move { (ready.slot, ready.call.run().await) })
             .collect();
         while !runs.is_empty() {
-            match self.mailbox.race(runs.select_next_some(), self.sink).await {
-                Ok((slot, output)) => started[slot].output = Some(output),
+            let next = async {
+                tokio::select! {
+                    output = runs.select_next_some() => RunEvent::Finished(output),
+                    question = self.pending_questions.recv() => {
+                        RunEvent::Question(question.expect("dispatcher retains its question sender"))
+                    }
+                }
+            };
+            let result = match self.mailbox.race(next, self.sink).await {
+                Ok(RunEvent::Finished((slot, output))) => {
+                    started[slot].output = Some(output);
+                    continue;
+                }
+                Ok(RunEvent::Question(question)) => self.answer_question(question).await,
+                Err(abort) => Err(abort),
+            };
+            match result {
+                Ok(()) => {}
                 Err(abort) => {
                     drop(runs);
                     for cancel in &cancels {
@@ -290,6 +325,47 @@ impl<'r> Dispatcher<'r, '_, '_> {
             }
         }
         None
+    }
+
+    async fn answer_question(&mut self, request: QuestionRequest) -> AbortResult<()> {
+        let QuestionRequest {
+            id,
+            question,
+            reply,
+        } = request;
+        let prompt = question.question.clone();
+        if self
+            .sink
+            .send(Event::QuestionAsked {
+                id: id.clone(),
+                question,
+            })
+            .is_err()
+        {
+            _ = reply.send(QuestionAnswer::Aborted);
+            return Ok(());
+        }
+        let answer = self
+            .mailbox
+            .race_or(std::future::pending(), self.sink, |op| match op {
+                Op::AnswerQuestion { id: target, answer } if target == id => Some(answer),
+                other => {
+                    warn!(id, op = ?other, "ignored op while awaiting question");
+                    None
+                }
+            })
+            .await?;
+        if let QuestionAnswer::Answered(text) = &answer {
+            self.user_answers.push(formatdoc! {"
+                For the question:
+                {prompt}
+
+                The user answered:
+                {text}"
+            });
+        }
+        _ = reply.send(answer);
+        Ok(())
     }
 
     /// Prepares one call and runs it through the permission gate. Returns the call ready to run, a
@@ -310,7 +386,7 @@ impl<'r> Dispatcher<'r, '_, '_> {
             return Ok(Err(ToolOutput::error(format!("Unknown tool: {name}"))));
         };
 
-        let ctx = self.dispatch_ctx.tool_ctx(id);
+        let ctx = self.dispatch_ctx.tool_ctx(id, self.questions.clone());
         let prepared = match tool.prepare(input, &ctx) {
             Ok(prepared) => prepared,
             Err(message) => return Ok(Err(ToolOutput::error(message))),
@@ -936,12 +1012,16 @@ mod tests {
                 dispatch_ctx: &mut DispatchContext<'_>,
             ) -> AbortResult<Result<Prepared, ToolOutput>> {
                 let parse_errors = HashMap::new();
+                let (questions, pending_questions) = mpsc::channel(1);
                 let mut dispatcher = Dispatcher {
                     tools,
                     parse_errors: &parse_errors,
                     sink,
                     mailbox,
                     dispatch_ctx,
+                    questions,
+                    pending_questions,
+                    user_answers: Vec::new(),
                 };
                 Ok(dispatcher
                     .gate(id, name, input)

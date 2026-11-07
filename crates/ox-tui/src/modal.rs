@@ -7,6 +7,7 @@ pub(crate) mod kv_overview;
 pub(crate) mod line_editor;
 pub(crate) mod list_picker;
 pub(crate) mod pages;
+pub(crate) mod question;
 pub(crate) mod searchable_list;
 
 use std::fmt;

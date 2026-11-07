@@ -38,6 +38,7 @@ impl InFlight {
             Op::Queue(_)
             | Op::Interrupt
             | Op::Resolve { .. }
+            | Op::AnswerQuestion { .. }
             | Op::LoginCode(_)
             | Op::SetMode(_)
             | Op::Shutdown => return None,

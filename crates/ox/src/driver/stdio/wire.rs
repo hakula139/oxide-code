@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use ox_core::client::RateLimits;
 use ox_core::protocol::{CompactTrigger, Event, OpEnd, ToolCall, ToolResult, UsageSnapshot};
+use ox_core::tool::ask::Question;
 use ox_core::tool::bash::background::BackgroundShell;
 use ox_core::tool::tasks::Task;
 
@@ -26,6 +27,10 @@ pub(super) enum HeadlessEvent<'a> {
     RateLimitsUpdated(&'a RateLimits),
     TasksUpdated(&'a [Task]),
     BackgroundShellsUpdated(&'a [BackgroundShell]),
+    QuestionAsked {
+        id: &'a str,
+        question: &'a Question,
+    },
     AutoCompactionStarted,
     SummaryToken(&'a str),
     SummaryDiscarded,
@@ -74,6 +79,7 @@ pub(super) fn wire(event: &Event) -> Option<HeadlessEvent<'_>> {
         Event::RateLimitsUpdated(limits) => HeadlessEvent::RateLimitsUpdated(limits),
         Event::TasksUpdated(tasks) => HeadlessEvent::TasksUpdated(tasks),
         Event::BackgroundShellsUpdated(shells) => HeadlessEvent::BackgroundShellsUpdated(shells),
+        Event::QuestionAsked { id, question } => HeadlessEvent::QuestionAsked { id, question },
         Event::AutoCompactionStarted => HeadlessEvent::AutoCompactionStarted,
         Event::SummaryToken(text) => HeadlessEvent::SummaryToken(text),
         Event::SummaryDiscarded => HeadlessEvent::SummaryDiscarded,

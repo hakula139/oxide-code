@@ -294,6 +294,7 @@ impl App {
             Op::Prompt { .. }
             | Op::Queue(_)
             | Op::Resolve { .. }
+            | Op::AnswerQuestion { .. }
             | Op::FindSaved { .. }
             | Op::SetArchive { .. }
             | Op::DeleteSaved { .. }
@@ -342,7 +343,7 @@ impl App {
             }
             // An approval decision is a control-plane reply the engine is waiting for, so a dropped
             // one leaves the turn blocked until the user cancels it.
-            TrySendError::Full(Op::Resolve { .. }) => {
+            TrySendError::Full(Op::Resolve { .. } | Op::AnswerQuestion { .. }) => {
                 self.chat.push_error(
                     "Approval could not be delivered. Press Esc to cancel the blocked turn.",
                 );

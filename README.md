@@ -20,7 +20,7 @@ Early development. What works today:
 - **[Terminal UI](docs/guide/terminal-ui.md)**: streaming Markdown, syntax-highlighted code blocks, mouse-wheel scrolling and drag-to-copy selection, a [configurable status line](docs/guide/configuration.md#tui-terminal-ui), and 5 built-in [themes](docs/guide/theming.md) with custom TOML overrides
 - **[Headless mode](docs/guide/headless.md)**: one-shot `-p` runs for scripts and pipelines, with output as text, a JSON result, or a JSON event stream
 - **[Models](docs/guide/configuration.md#model-supported-models)**: Claude Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5, each with a 1M-token context window, adjustable effort, and adaptive thinking
-- **Tools**: `read`, `write`, `edit`, `glob`, `grep`, and `bash`, plus `bash_output` and `bash_stop` to read and stop background shells
+- **Tools**: `read`, `write`, `edit`, `glob`, `grep`, and `bash`, plus `bash_output` and `bash_stop` to read and stop background shells, and `ask` for questions during a turn
 - **Task list**: the model tracks multi-step work in a list shown live and carried through resume and compaction
 - **[Tool permissions](docs/guide/permissions.md)**: default `auto` classification, `manual` approval, read-only `plan`, and `yolo` modes, with explicit deny / ask / allow patterns
 - **Turn control**: interrupt with **Esc** or **Ctrl+C**, queue follow-up prompts that join the running turn between tool calls, and exit with **Ctrl+C** twice, or **Ctrl+D** twice with an empty input
