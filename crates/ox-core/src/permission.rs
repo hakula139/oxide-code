@@ -23,7 +23,7 @@ use strum::{Display, EnumString, IntoStaticStr, VariantArray};
 use unicode_normalization::UnicodeNormalization as _;
 
 use self::rule::{MatchDiscipline, Prefixes, Rule};
-use self::shell::{CommandTarget, Segment};
+use self::shell::CommandTarget;
 use crate::util::path::{expand_absolute, lexical_normalize, requires_directory, slash_separated};
 use crate::util::variant;
 
@@ -253,9 +253,9 @@ pub(crate) enum Access {
 }
 
 impl Access {
-    /// Parses a `bash` command, resolving the files it reads and writes in `workspace`.
-    pub(crate) fn for_command(command: &str, workspace: &Workspace) -> Self {
-        Self::Command(CommandTarget::parse(command, workspace))
+    /// Parses a `bash` command for explicit exec rules.
+    pub(crate) fn for_command(command: &str) -> Self {
+        Self::Command(CommandTarget::parse(command))
     }
 
     /// Builds a path target for the location the tool will touch, resolving `path` against the
@@ -747,12 +747,8 @@ pub enum Basis {
     Internal,
     /// The mode: `plan` denying an edit, exec, or net call, or settling a call no rule does.
     Mode(Mode),
-    /// An allowed command, by what let each of its simple commands and its writes through.
+    /// The rules allowing each simple command.
     Command(Vec<Basis>),
-    /// A command holding `construct`, which the analysis does not recognize, so no allow rule
-    /// covers it. `manual` asks, and `yolo` runs it unless a deny or configured ask rule holds what
-    /// ox sees.
-    Unrecognized { construct: String },
 }
 
 impl Basis {
@@ -762,9 +758,6 @@ impl Basis {
         match self {
             Self::Mode(_) => None,
             Self::Classifier { reason } => Some(reason.clone()),
-            Self::Unrecognized { .. } => Some(format!(
-                "Asks because of {self}, so no permission rule can allow this command"
-            )),
             basis => Some(format!("Asks because of {basis}")),
         }
     }
@@ -799,21 +792,7 @@ impl fmt::Display for Basis {
                 }
                 Ok(())
             }
-            Self::Unrecognized { construct } => {
-                write!(f, "{}, which ox cannot analyze", code_span(construct))
-            }
         }
-    }
-}
-
-/// `text` as a Markdown code span, fenced past its longest backtick run and padded if it has one.
-fn code_span(text: &str) -> String {
-    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-    let fence = "`".repeat(longest + 1);
-    if longest > 0 {
-        format!("{fence} {text} {fence}")
-    } else {
-        format!("{fence}{text}{fence}")
     }
 }
 
@@ -845,17 +824,6 @@ impl TierRule {
     /// Returns whether this rule holds back a call in `class` with `target`.
     fn matches(&self, class: PermissionClass, target: &Access) -> bool {
         self.rule.matches(class, target, self.discipline())
-    }
-
-    /// Returns whether this rule holds back an access of `path` in `class`.
-    fn matches_path(&self, class: PermissionClass, path: &PathTarget) -> bool {
-        self.rule.matches_path(class, path, self.discipline())
-    }
-
-    /// Returns whether this `read` rule may hold a read of `path`, or of a file below it when
-    /// `recursive`.
-    fn holds_read(&self, path: &PathTarget, recursive: bool) -> bool {
-        self.rule.holds_read(path, recursive, &self.bases)
     }
 
     fn discipline(&self) -> MatchDiscipline<'_> {
@@ -994,14 +962,9 @@ impl Policy {
     /// Order, stopping at the first match:
     /// 1. A deny rule denies, in every mode.
     /// 2. `plan` denies an edit, exec, or net call.
-    /// 3. A configured ask rule or possible-read hold asks.
-    /// 4. An allow rule or a session allow rule allows.
+    /// 3. A configured ask rule asks.
+    /// 4. An internal read operation, allow rule, or session allow rule allows.
     /// 5. `auto` classifies, `manual` asks, and `yolo` or a read-only `plan` call allows.
-    ///
-    /// A `bash` command is denied when a deny rule matches one of its simple commands, an edit of a
-    /// file it writes, or a read of a file it reads for certain, such as an input redirection or a
-    /// reader's literal file argument. It asks at step 3 in each case [`Self::asks`] lists, and
-    /// step 4 allows it only when the analysis recognizes it and [`Self::allows_command`] holds.
     ///
     /// A call that would ask is [unapproved](Decision::Unapproved) in a run nobody attends.
     pub(crate) fn verdict(&self, class: PermissionClass, target: &Access) -> Verdict {
@@ -1029,9 +992,6 @@ impl Policy {
         if let Some(rule) = held_by(&self.ask.iter(), class, target) {
             return verdict(Decision::Ask, rule.basis(Tier::Ask));
         }
-        if let Some(basis) = self.asks(target) {
-            return verdict(Decision::Ask, basis);
-        }
 
         if class == PermissionClass::Read && matches!(target, Access::None) {
             return verdict(Decision::Allow, Basis::Internal);
@@ -1049,43 +1009,6 @@ impl Policy {
         verdict(fallback, Basis::Mode(self.mode))
     }
 
-    /// The configured read rule that may match a file a command reads.
-    fn asks(&self, target: &Access) -> Option<Basis> {
-        let Access::Command(command) = target else {
-            return None;
-        };
-        command
-            .segments()
-            .iter()
-            .find_map(|segment| self.possible_read_holder(segment))
-    }
-
-    /// The first deny or ask `read` rule that may match a file `segment` may read beyond those the
-    /// command reads for certain, or the first such rule when the segment may read any file.
-    fn possible_read_holder(&self, segment: &Segment) -> Option<Basis> {
-        let rules = self
-            .deny
-            .iter()
-            .map(|rule| (rule, Tier::Deny))
-            .chain(self.ask.iter().map(|rule| (rule, Tier::Ask)))
-            .filter(|(rule, _)| rule.rule.class() == PermissionClass::Read);
-        segment
-            .reads()
-            .iter()
-            .find_map(|read| {
-                rules
-                    .clone()
-                    .find(|(entry, _)| entry.holds_read(&read.path, read.recursive))
-            })
-            .or_else(|| {
-                segment
-                    .reads_anything()
-                    .then(|| rules.clone().next())
-                    .flatten()
-            })
-            .map(|(rule, tier)| rule.basis(tier))
-    }
-
     /// The allow rule or session allow rule that matches the call, or for a command what lets each
     /// of its parts through.
     fn allows(&self, class: PermissionClass, target: &Access) -> Option<Basis> {
@@ -1095,8 +1018,13 @@ impl Policy {
         }
     }
 
-    /// The allow rules covering every simple command and file write in a recognized command.
+    /// The allow rules covering every simple command in a recognized command.
     fn allows_command(&self, command: &CommandTarget) -> Option<Basis> {
+        if let Some(basis) =
+            self.allow_rule(|rule| rule.class() == PermissionClass::Exec && rule.pattern() == "*")
+        {
+            return Some(basis);
+        }
         if command.unrecognized().is_some() || command.segments().is_empty() {
             return None;
         }
@@ -1104,15 +1032,7 @@ impl Policy {
             .segments()
             .iter()
             .map(|segment| self.allow_rule(|rule| rule.allows(segment)));
-        let writes = command.writes().iter().map(|write| {
-            self.allow_rule(|rule| {
-                rule.matches_path(PermissionClass::Edit, write, MatchDiscipline::Allow)
-            })
-        });
-        segments
-            .chain(writes)
-            .collect::<Option<Vec<_>>>()
-            .map(Basis::Command)
+        segments.collect::<Option<Vec<_>>>().map(Basis::Command)
     }
 
     /// The first allow rule, then the first session allow rule, that `accepts`.
@@ -1133,33 +1053,13 @@ impl Policy {
     }
 }
 
-/// The first of the deny or ask `rules` that matches the call, or, for a command, an edit of a file
-/// it writes or a read of a file it reads for certain.
+/// The first deny or ask rule that matches the call.
 fn held_by<'a>(
     rules: &(impl Iterator<Item = &'a TierRule> + Clone),
     class: PermissionClass,
     target: &Access,
 ) -> Option<&'a TierRule> {
-    rules
-        .clone()
-        .find(|entry| entry.matches(class, target))
-        .or_else(|| {
-            let Access::Command(command) = target else {
-                return None;
-            };
-            let path_held_by =
-                |class, path| rules.clone().find(|entry| entry.matches_path(class, path));
-            command
-                .writes()
-                .iter()
-                .find_map(|write| path_held_by(PermissionClass::Edit, write))
-                .or_else(|| {
-                    command
-                        .reads()
-                        .iter()
-                        .find_map(|read| path_held_by(PermissionClass::Read, read))
-                })
-        })
+    rules.clone().find(|entry| entry.matches(class, target))
 }
 
 /// An approval's "allow for this session" offer: the suggested rule, plus the call that any edit of

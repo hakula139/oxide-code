@@ -59,7 +59,7 @@ instructions = ["Ask before publishing or deploying changes."]
 exec = ["cargo test *"]
 ```
 
-The trailing `*` covers bare `cargo test` and any arguments after it, while a [chained command](#chained-commands-and-redirections) needs a pattern for each part.
+The trailing `*` covers bare `cargo test` and any arguments after it, while a [chained command](#chained-commands-and-unsupported-syntax) needs a pattern for each part.
 
 ### Deny a Secret File
 
@@ -97,25 +97,29 @@ An `exec` pattern is one command, matched word by word after quotes are removed 
 
 In an allow pattern, a `*` standing alone as a word matches exactly one word before the end of the pattern, or any number of words at the end, so `git * --force` covers `git push --force` but misses `git push origin --force`. Quote a word to match it as written, as in `'*'`.
 
-#### Wrappers and Assignments
+#### Programs and Assignments
 
-A pattern matches one simple command after wrappers such as `env`, `nice`, and `timeout` and redirections are set aside, so `cargo test *` covers `nice cargo test 2>&1`. A wrapper that changes who runs the command or which arguments it gets, which `sudo`, `doas`, `pkexec`, `busybox`, and `xargs` do, stays part of the command for allow patterns, so `rm *` does not allow `sudo rm x`. A wrapper spelled with a directory, such as `./nice`, may be any program, so it stays part of the command as well. A leading `VAR=value` assignment is set aside too when it only changes output, as `RUST_LOG`, `LANG`, and `NO_COLOR` do. Any other assignment stays part of the command, so `CARGO_TARGET_DIR=/tmp cargo test` needs a pattern that names it.
+Patterns match the actual program and its arguments. `env`, `sudo`, `bash -c`, `eval`, and `xargs` stay in the words being matched. For example, `cargo *` covers `cargo test`, while `env cargo test` needs `env cargo *`. A literal script passed to `bash -c` is one argument, so `bash *` permits it without inspecting the script.
 
-#### Chained Commands and Redirections
+Leading assignments stay in the match. `A=1 cargo test` needs a pattern such as `A=1 cargo *`. An unquoted variable or tilde expansion is dynamic and cannot appear in a pattern. Quote it to match the characters literally.
 
-A command chained with `;`, `&&`, `||`, or `|` is allowed only when every part is. Writing a file with `>` also needs that file to be allowed by an `edit` pattern, so `allow.exec = ["cargo test *", "git status"]` runs `cargo test --all && git status` but still asks about `cargo test --all > /tmp/out.log`. Patterns also see the commands inside a `$(...)` substitution and a literal `sh -c` or `eval` script, so `sh -c 'npm test'` needs patterns for both `npm test` and `sh -c *`.
+#### Chained Commands and Unsupported Syntax
+
+A command chained with `;`, `&&`, `||`, or `|` is allowed by patterns only when every simple command is covered. Different rules can cover different parts, so `allow.exec = ["cargo test *", "git status"]` permits `cargo test --all && git status`.
+
+Dynamic words, redirections, and unsupported compound syntax leave the call unmatched by command-specific allow patterns, so it reaches the mode fallback. The whole-class rule `allow.exec = ["*"]` permits any Bash call after deny and ask checks, including calls with unsupported syntax.
 
 #### What Deny and Ask Patterns Catch
 
-A deny or ask pattern matches when any part of a chained command matches, including a quoted, full-path, or differently cased command name such as `/bin/rm` or `RM`, and the command a wrapper runs, so `deny.exec = ["rm *"]` denies `sudo rm x`, `xargs rm`, and `find . -exec rm {} +` in every mode. Its words after the first need only appear in order, with any words between them, so `ask.exec = ["git push *"]` also asks for `git -c a=b push` and for `git stash push`, and as a deny pattern it would block every `git stash push` too. A word that expands or globs, such as `$X`, `${X:-push}`, or `pu*`, matches any word of a deny or ask pattern, since it may become that word when the command runs.
+A deny or ask pattern matches any extracted simple command, including a quoted, full-path, or differently cased program name. For example, `deny.exec = ["git push *"]` matches `/bin/git push`. Words after the first need only appear in order, with intervening arguments, so it also matches `git -c a=b push` and `git stash push`. A dynamic word can match any pattern word. Leading assignments are retained, and deny and ask rules also check the actual program after them.
 
-A `bash` command that reads a file for certain, through `<` or `<>`, a wrapper option such as `xargs -a list`, the script that `source`, `.`, or `bash script.sh` runs, a startup file that `bash --rcfile` or `BASH_ENV=` names, or a literal file argument of a reader such as `cat` or `grep`, faces the `read` deny and ask patterns as a read tool does, so `deny.read = [".env"]` denies `cat .env` in every mode. A word that the GNU or BSD build of a reader opens as a file in any argument order counts as such a file, even where another build or order reads it as a pattern or an option, so `grep x README.md -e .env` is denied too. The root of a tree that `grep -r`, `find`, or `ls -R` searches counts as such a file, since a pattern that matches a directory covers everything below it, so a configured `deny.read = ["~/.ssh"]` rule denies `grep -r key ~/.ssh` in every mode. So does the directory that a `HOME=` or `ZDOTDIR=` names for a shell, which may run any startup file below it. A `sed` script's `r` and `R` files count the same way, and its `w` and `W` files, each file `sed -i` rewrites, and each backup it keeps, such as `notes.bak` for `sed -i.bak`, face the `edit` patterns as a redirection does, wherever any build or argument order takes the word as the script. A `sed` script that expands, can run a command, such as `1e date`, comes from `-f`, or does not parse in GNU `sed` is never allowed by a pattern. A reader that may read a file without naming it, such as a file below the tree `grep -r` searches, `cat $F`, or `xargs cat`, asks when a configured `read` deny or ask pattern may match that file, so `grep -r TODO src` asks under `deny.read = ["/**/.env"]`. A recursive reader compares its search roots with each rule's leading path. Any other program can open whatever files it likes once it runs, so an `exec` allow pattern such as `python3 *` can run its command on files the `read` patterns hold. Keep such programs out of your allow patterns where `read` patterns guard files. [SECURITY.md](../../SECURITY.md#trust-model) covers which files those checks see and where they stop.
+Rules examine the literal program and arguments. A pattern for `rm` does not inspect a string passed to `bash -c`, a command run by `sudo`, or a child program launched by a script.
 
-#### Commands Without an Allow Match
+#### Native Paths and Bash
 
-A command that uses shell syntax `ox` cannot analyze, such as arithmetic, a function definition, or a statement that sets `PATH` or another uppercase variable, is never allowed by a pattern, so it reaches the mode fallback unless a deny or ask pattern matches. So is a shell or `eval` whose script expands, such as `bash -c "$CMD"` or `bash $F`, and a shell given an option `ox` does not know, even under `allow.exec = ["bash *"]`. Rewriting it as plain commands avoids the prompt. A command that changes directory and then names a relative path as a program, a file to read, or a redirection target, such as `cd sub && ./run.sh`, also asks, since the path may name a different file from the one the check resolved. The `read` and `edit` patterns still weigh such a path under each literal directory a `cd` or `pushd` may have entered, so `cd ~/.ssh && cat id_rsa` is denied in every mode, as `cat ~/.ssh/id_rsa` is. So does one that runs anything after a `cd` that may leave the working directory and extra roots, such as `cd /tmp/x && make` or `cd $DIR && make`, since the program may then read another directory's files.
+`read` and `edit` path rules apply to native file tools and search walks. Bash uses `exec` rules and the selected mode. The gate does not infer which files a shell command, redirection, interpreter, wrapper, or child process reads or writes. For example, `deny.read = [".env"]` blocks the native read tool but does not itself block `cat .env`. Configure an exec rule or classifier instructions for shell actions, and use an external sandbox to enforce filesystem isolation.
 
-Deny and ask patterns see inside the wrappers above, `find -exec` and its variants, and a literal `sh -c` or `eval` script, but not inside other programs that run a command, such as `watch`, `fd -x`, `make`, or `python3 -c`. In `yolo`, such a command runs unless a pattern names the runner itself.
+When upgrading, replace exec allow patterns that relied on transparent wrappers or omitted leading assignments with patterns naming the full command. Unquoted `~/`, `$HOME`, and `$PWD` in exec patterns no longer resolve to filesystem locations. Native path patterns retain their existing syntax.
 
 ### Path Patterns
 
@@ -133,4 +137,4 @@ Each `extra_roots` entry is an absolute or `~/` path, such as `"~/src/shared-lib
 
 ## Commands the Assistant Runs
 
-A `bash` call runs in a shell with no controlling terminal, so a command that prompts on `/dev/tty` fails at once. That covers `sudo`, `ssh` with password authentication, and `git push` over HTTPS without a credential helper. `ox` sets `EDITOR`, `VISUAL`, and `GIT_EDITOR` to `true`, so an editor step keeps its default text: `git rebase --continue` keeps the prepared message, while `git commit` without `-m` stops with `Aborting commit due to empty commit message`. It drops `CDPATH`, so a `cd` lands where the permission check resolved it, and each command sees the session's ID in `OX_SESSION_ID`, so a script can tell which session started it. [Authentication](authentication.md#commands-and-credentials) covers the credentials a command cannot see.
+A `bash` call runs in a shell with no controlling terminal, so a command that prompts on `/dev/tty` fails at once. That covers `sudo`, `ssh` with password authentication, and `git push` over HTTPS without a credential helper. `ox` sets `EDITOR`, `VISUAL`, and `GIT_EDITOR` to `true`, so an editor step keeps its default text: `git rebase --continue` keeps the prepared message, while `git commit` without `-m` stops with `Aborting commit due to empty commit message`. It drops `CDPATH` to keep directory changes independent of the caller's search path, and each command sees the session's ID in `OX_SESSION_ID`, so a script can tell which session started it. [Authentication](authentication.md#commands-and-credentials) covers the credentials a command cannot see.

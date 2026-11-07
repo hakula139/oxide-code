@@ -98,9 +98,9 @@ impl Tool for BashTool {
         }
     }
 
-    fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<Prepared, String> {
+    fn prepare(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<Prepared, String> {
         Prepared::parse(input, |input: &Input| {
-            Ok(Access::for_command(&input.command, &ctx.workspace))
+            Ok(Access::for_command(&input.command))
         })
     }
 
