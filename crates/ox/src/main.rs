@@ -106,10 +106,6 @@ struct Cli {
     )]
     output: OutputFormat,
 
-    /// Use a bare REPL that reads one prompt per line in place of the TUI.
-    #[arg(long)]
-    no_tui: bool,
-
     /// Start in this permission mode, overriding `permission.mode` and `OX_PERMISSION_MODE`.
     #[arg(long, value_name = "MODE", value_parser = ModeParser::new())]
     mode: Option<Mode>,
@@ -190,8 +186,6 @@ impl Cli {
         }
         let other = if self.print {
             "--print"
-        } else if self.no_tui {
-            "--no-tui"
         } else if self.prompt.is_some() {
             "[PROMPT]"
         } else {
@@ -229,9 +223,7 @@ impl Cli {
         matches!(self.resume, Some(None))
     }
 
-    /// What the run does. A session opens the TUI only with a terminal on stdout, and fails when
-    /// the TUI would open with stdin piped, since it reads keys from stdin, or when the session
-    /// picker needs the TUI but cannot have it.
+    /// Selects a command or frontend before config, credentials, or session storage are loaded.
     fn run(&self, stdin_is_terminal: bool, stdout_is_terminal: bool) -> Result<Run> {
         match &self.command {
             Some(Command::Config {
@@ -246,21 +238,10 @@ impl Cli {
         if self.print {
             return Ok(Run::Session(Frontend::Print));
         }
-        if self.no_tui || !stdout_is_terminal {
-            if self.opens_picker() {
-                bail!(
-                    "`--resume` without a session opens the picker in the TUI, which needs a \
-                     terminal on stdout. Pass the session's ID prefix to resume it directly."
-                );
-            }
-            return Ok(Run::Session(Frontend::Repl {
-                unattended: !stdin_is_terminal,
-            }));
-        }
-        if !stdin_is_terminal {
+        if !stdin_is_terminal || !stdout_is_terminal {
             bail!(
-                "stdin is not a terminal, so the TUI cannot read keys. Pass `-p` to answer the \
-                 piped input, or `--no-tui` to read prompts from it."
+                "the TUI needs a terminal on stdin and stdout. Pass `-p` to answer one prompt \
+                 and any piped input."
             );
         }
         Ok(Run::Session(Frontend::Tui {
@@ -425,17 +406,8 @@ enum Run {
 enum Frontend {
     /// `--print`, which answers one prompt and never waits for approval.
     Print,
-    /// The bare REPL, which nobody attends when its prompts come from piped stdin.
-    Repl { unattended: bool },
     /// The TUI, with the projects the session picker searches when bare `--resume` opens it.
     Tui { picker: Option<ProjectScope> },
-}
-
-impl Frontend {
-    /// Returns whether nobody can answer an approval request during the session.
-    fn unattended(&self) -> bool {
-        matches!(self, Self::Print | Self::Repl { unattended: true })
-    }
 }
 
 /// A frontend with what it reads before the engine starts.
@@ -443,7 +415,6 @@ enum Launch {
     Print {
         prompt: String,
     },
-    Repl,
     Tui {
         theme: Box<ResolvedTheme>,
         picker: Option<ProjectScope>,
@@ -503,7 +474,7 @@ async fn run_session(
     if let Some(mode) = cli.mode {
         config.apply_mode_flag(mode);
     }
-    if frontend.unattended() {
+    if !tui {
         config.set_unattended();
     }
     let show_thinking = config.show_thinking;
@@ -511,7 +482,6 @@ async fn run_session(
         Frontend::Print => Launch::Print {
             prompt: cli.print_prompt().await?,
         },
-        Frontend::Repl { .. } => Launch::Repl,
         Frontend::Tui { picker } => Launch::Tui {
             theme: Box::new(resolve_theme(&config.theme)?),
             picker,
@@ -561,7 +531,6 @@ async fn run_session(
         Launch::Print { prompt } => {
             return Ok(driver::headless::run(engine, show_thinking, &prompt, cli.output).await?);
         }
-        Launch::Repl => return driver::repl::run(engine, show_thinking, cli.prompt).await,
         Launch::Tui { theme, picker } => (theme, picker),
     };
 

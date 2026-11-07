@@ -13,15 +13,6 @@ impl Parsed {
     pub fn named_error(&self, msg: &str) -> String {
         format!("/{}: {msg}", self.name)
     }
-
-    /// Reconstructs the command line with one space between the name and any trimmed arguments.
-    pub(super) fn line(&self) -> String {
-        if self.args.is_empty() {
-            format!("/{}", self.name)
-        } else {
-            format!("/{} {}", self.name, self.args)
-        }
-    }
 }
 
 /// `None` for plain prompts, `//` escape, bare `/`, or names with disallowed chars.

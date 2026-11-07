@@ -7,7 +7,6 @@ mod env;
 mod config_check;
 mod headless;
 mod native_auth;
-mod repl;
 mod sessions;
 #[cfg(unix)]
 mod signals;

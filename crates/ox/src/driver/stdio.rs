@@ -1,11 +1,10 @@
-//! Stdio output and the op loop shared by the `--no-tui` REPL and `--print` headless modes.
+//! Headless output and the loop that drives one engine operation.
 
 mod wire;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::{self, Write};
-use std::pin::pin;
 
 use anyhow::Result;
 use clap::ValueEnum;
@@ -13,14 +12,10 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use ox_core::permission::{Basis, SessionGrant};
-use ox_core::protocol::{
-    ApprovalDecision, Event, Op, OpEnd, OpSender, ToolCall, ToolResult, UsageSnapshot, notice,
-};
+use ox_core::protocol::{Event, Op, OpEnd, OpSender, ToolCall, ToolResult, UsageSnapshot, notice};
 use ox_core::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
 use ox_core::session::store::listing::ArchiveState;
 use ox_core::tool::tasks::{Progress, Task};
-use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::text::{escape_controls, escape_line};
 use ox_tui::glyphs::{INTERRUPTED_MARKER, task_marker};
 
@@ -40,153 +35,50 @@ pub(super) enum RunEnd {
 }
 
 /// Sends `op`, then renders `events` to `output` until `op` ends, the engine stops, or a `signal`
-/// stops the run. Approval requests go to `approver`, and its answer goes back on `ops`. Events
-/// that arrive while `approver` decides wait until it answers, unless one ends `op`, such as the
-/// cancellation an interrupt causes, which drops the question. An engine for a run nobody attends
-/// requests no approval, so such a run passes no `approver`.
+/// stops the run. The unattended permission policy settles calls that require approval.
 ///
-/// SIGINT in a run with an `approver` interrupts `op`, as it does in a shell, while any other
-/// signal stops the run. Once stdout's reader goes away, `op` is interrupted, since nothing reads
+/// Signals stop the run. Once stdout's reader goes away, `op` is interrupted, since nothing reads
 /// the rest. Each `signal` call must be cancel safe, as [`Signals::recv`](super::Signals::recv) is,
 /// since the loop starts a new one for every event.
-pub(super) async fn run_op<O: Write, E: Write, A: Approver>(
+pub(super) async fn run_op<O: Write, E: Write>(
     events: &mut mpsc::UnboundedReceiver<Event>,
     ops: &OpSender,
     output: &mut Output<O, E>,
     signal: &mut impl AsyncFnMut() -> Shutdown,
     op: Op,
-    mut approver: Option<&mut A>,
 ) -> RunEnd {
-    let attended = approver.is_some();
     let Ok(op_id) = ops.submit(op).await else {
         return RunEnd::EngineStopped;
     };
-    let mut held = VecDeque::new();
     let mut interrupted = false;
     loop {
-        let event = if let Some(event) = held.pop_front() {
-            event
-        } else {
-            tokio::select! {
-                biased;
+        let event = tokio::select! {
+            biased;
 
-                shutdown = signal() => {
-                    if let Some(end) = on_signal(output, ops, attended, shutdown).await {
-                        return end;
-                    }
-                    continue;
-                }
-                event = events.recv() => match event {
-                    Some(event) => event,
-                    None => return RunEnd::EngineStopped,
-                },
+            shutdown = signal() => {
+                output.break_line();
+                return RunEnd::Signal(shutdown);
             }
+            event = events.recv() => match event {
+                Some(event) => event,
+                None => return RunEnd::EngineStopped,
+            },
         };
-        let Event::ApprovalRequested {
-            id,
-            preview,
-            basis,
-            grant,
-        } = event
-        else {
-            let end = event.end_of(op_id);
-            output.render(event);
-            if let Some(end) = end {
-                return RunEnd::Ended(end);
-            }
-            if output.stdout_lost() && !interrupted {
-                interrupted = true;
-                _ = ops.submit(Op::Interrupt).await;
-            }
-            continue;
-        };
-
-        let approver = approver
-            .as_deref_mut()
-            .expect("an engine requests approval only in an attended run");
-        let mut decision = pin!(approver.decide(&preview, &basis, grant.as_deref()));
-        let decision = loop {
-            tokio::select! {
-                biased;
-
-                decision = &mut decision => break Some(decision),
-                event = events.recv() => {
-                    let Some(event) = event else {
-                        return RunEnd::EngineStopped;
-                    };
-                    let ends = event.end_of(op_id).is_some();
-                    held.push_back(event);
-                    if ends {
-                        break None;
-                    }
-                }
-                shutdown = signal() => {
-                    if let Some(end) = on_signal(output, ops, attended, shutdown).await {
-                        return end;
-                    }
-                    break None;
-                }
-            }
-        };
-        if let Some(decision) = decision {
-            let decision = decision.unwrap_or_else(|error| {
-                output.record(Err(error));
-                ApprovalDecision::Abort
-            });
-            _ = ops.submit(Op::Resolve { id, decision }).await;
+        let end = event.end_of(op_id);
+        output.render(event);
+        if let Some(end) = end {
+            return RunEnd::Ended(end);
         }
-    }
-}
-
-/// Moves past the `^C` that `shutdown` echoed, then returns how the run ends, or `None` once SIGINT
-/// in an attended run has interrupted the op, which keeps rendering until the op ends.
-async fn on_signal<O: Write, E: Write>(
-    output: &mut Output<O, E>,
-    ops: &OpSender,
-    attended: bool,
-    shutdown: Shutdown,
-) -> Option<RunEnd> {
-    output.break_line();
-    if attended && shutdown == Shutdown::Interrupt {
-        _ = ops.submit(Op::Interrupt).await;
-        return None;
-    }
-    Some(RunEnd::Signal(shutdown))
-}
-
-/// How a stdio frontend answers an approval request.
-pub(super) trait Approver {
-    /// Decides the call `preview` shows, which `basis` made ask and `grant` may allow for the rest
-    /// of the session. An error aborts the call and is retained until the run ends.
-    fn decide(
-        &mut self,
-        preview: &ApprovalPreview,
-        basis: &Basis,
-        grant: Option<&SessionGrant>,
-    ) -> impl Future<Output = Result<ApprovalDecision>>;
-}
-
-/// Uninhabited approval type for unattended runs, which pass no approver.
-pub(super) enum Unattended {}
-
-impl Approver for Unattended {
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "an uninhabited type has no value to await on"
-    )]
-    async fn decide(
-        &mut self,
-        _: &ApprovalPreview,
-        _: &Basis,
-        _: Option<&SessionGrant>,
-    ) -> Result<ApprovalDecision> {
-        match *self {}
+        if output.stdout_lost() && !interrupted {
+            interrupted = true;
+            _ = ops.submit(Op::Interrupt).await;
+        }
     }
 }
 
 // ── Output ──
 
-/// What a stdio run prints on stdout. The REPL always prints text.
+/// What a headless run prints on stdout.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub(crate) enum OutputFormat {
     /// The reply as plain text.
@@ -263,13 +155,6 @@ impl<O: Write, E: Write> Output<O, E> {
         self.record(result);
     }
 
-    /// Prints the events already queued, such as the engine's startup warnings.
-    pub(super) fn render_queued(&mut self, events: &mut mpsc::UnboundedReceiver<Event>) {
-        while let Ok(event) = events.try_recv() {
-            self.render(event);
-        }
-    }
-
     /// Prints that the session could not be saved, which the result of a JSON run also reports.
     pub(super) fn session_write_error(&mut self, failure: &str) {
         self.summary.session_write_error = Some(failure.to_owned());
@@ -277,7 +162,7 @@ impl<O: Write, E: Write> Output<O, E> {
     }
 
     /// Moves to a new line after a signal, past the `^C` a terminal echoes.
-    pub(super) fn break_line(&mut self) {
+    fn break_line(&mut self) {
         if self.format != OutputFormat::Text {
             // The JSON formats render replies into a sink, so their open line is not on stdout.
             self.text.line_open = false;
@@ -313,12 +198,12 @@ impl<O: Write, E: Write> Output<O, E> {
     }
 
     /// Whether stdout's reader went away, so nothing reads the rest of the run.
-    pub(super) fn stdout_lost(&self) -> bool {
+    fn stdout_lost(&self) -> bool {
         self.stdout.lost
     }
 
     /// Retains the error of `result` unless an earlier one is retained.
-    pub(super) fn record(&mut self, result: Result<()>) {
+    fn record(&mut self, result: Result<()>) {
         if let Err(error) = result {
             debug!(error = %format_args!("{error:#}"), "stdio output failed");
             self.failure.get_or_insert(error);
@@ -394,8 +279,8 @@ const NORMAL_INTENSITY: &str = "\x1b[22m";
 
 /// Renders events as text: assistant tokens stream to stdout and everything else to stderr, so
 /// piped output stays clean. Model and tool text passes through [`escape_controls`], so it cannot
-/// redraw the terminal around a REPL approval prompt. An open reply line on stdout ends before a
-/// tool call starts, before the reply that follows shown thinking, and when the operation ends.
+/// redraw the terminal. An open reply line on stdout ends before a tool call starts, before the
+/// reply that follows shown thinking, and when the operation ends.
 struct TextState {
     show_thinking: bool,
     /// Whether the last text written to stdout left the current line open.

@@ -65,7 +65,6 @@ body:
       label: Frontend
       options:
         - TUI
-        - Bare REPL (`--no-tui`)
         - Headless (`-p`)
     validations:
       required: true

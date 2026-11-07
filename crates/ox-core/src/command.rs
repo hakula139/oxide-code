@@ -1,5 +1,4 @@
-//! Slash-command parsing, aliases, and typed [`Op`] forms shared by the TUI and bare REPL. The TUI
-//! adds pickers and modals.
+//! Slash-command parsing, aliases, and typed [`Op`] forms used by the TUI.
 
 pub mod init;
 mod parser;
@@ -16,7 +15,7 @@ use crate::protocol::{ConfigPick, Op, SessionRef};
 use crate::session::display::fit_title;
 use crate::util::variant;
 
-/// One slash command [`typed_op`] parses: its canonical name, aliases, and parser.
+/// One slash command [`typed_form`] parses: its canonical name, aliases, and parser.
 struct Command {
     name: &'static str,
     aliases: &'static [&'static str],
@@ -24,7 +23,7 @@ struct Command {
     parse: fn(&str, &Path) -> Result<Op, String>,
 }
 
-/// The slash commands [`typed_op`] parses, in the order completion offers them.
+/// The slash commands [`typed_form`] parses, in the order completion offers them.
 const COMMANDS: [Command; 9] = [
     Command {
         name: "clear",
@@ -73,19 +72,9 @@ const COMMANDS: [Command; 9] = [
     },
 ];
 
-/// The canonical names of the commands [`typed_op`] parses, without their leading `/`.
+/// The canonical names of the commands [`typed_form`] parses, without their leading `/`.
 pub fn names() -> impl Iterator<Item = &'static str> {
     COMMANDS.iter().map(|command| command.name)
-}
-
-/// Resolves aliases and parses `parsed` into an op at `project_root`. Errors use the typed command
-/// name, and prompts use the command line as their title. `None` without a typed form.
-pub fn typed_op(parsed: &Parsed, project_root: &Path) -> Option<Result<Op, String>> {
-    let mut op = typed_form(&parsed.name, &parsed.args, project_root)?;
-    if let Ok(Op::Prompt { title, .. }) = &mut op {
-        *title = Some(parsed.line());
-    }
-    Some(op.map_err(|msg| parsed.named_error(&msg)))
 }
 
 /// Parses `args` for the command `name` runs at `project_root`, leaving prompts untitled and errors

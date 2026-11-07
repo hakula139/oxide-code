@@ -13,7 +13,7 @@ The tree lists only the top-level entries whose names leave their purpose unclea
 ├── .agents/                                # Agent skills for the release procedure
 ├── .claude/                                # Link to the agent skills for Claude Code
 ├── about.toml                              # Release dependency license selection
-├── crates/ox/                              # The `ox` binary crate with the CLI and the stdio frontends, mapped in docs/design/architecture.md
+├── crates/ox/                              # The `ox` binary crate with the CLI and headless frontend, mapped in docs/design/architecture.md
 ├── crates/ox-core/                         # The `ox-core` library crate with the agent core, mapped in docs/design/architecture.md
 ├── crates/ox-tui/                          # The `ox-tui` library crate with the terminal UI, mapped in docs/design/architecture.md
 ├── docs/                                   # User guides, conventions, design specs, and research notes

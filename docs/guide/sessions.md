@@ -91,7 +91,7 @@ ox -r              # Sessions in the current project
 ox -r --all        # Sessions in every project
 ```
 
-This opens the TUI to the same picker as [`/resume`](#mid-session-resume). Press **Enter** to resume the highlighted session or **Esc** to quit `ox` without saving a session. The picker cannot be combined with a prompt, `--continue`, `--list`, `--no-tui`, or `-p`. It requires the TUI and fails when stdout is not a terminal.
+This opens the TUI to the same picker as [`/resume`](#mid-session-resume). Press **Enter** to resume the highlighted session or **Esc** to quit `ox` without saving a session. The picker cannot be combined with a prompt, `--continue`, `--list`, or `-p`. It requires the TUI and fails when stdout is not a terminal.
 
 On resume, oxide-code loads the saved history and adds new messages to the same session, so it keeps its original ID unless another `ox` process also writes to it, as [Several Processes on One Session](#several-processes-on-one-session) describes. The model's [task list](quickstart.md#tasks-and-background-commands) returns as it was, while background shells do not, since they end with the run that started them. The status line's session cost continues from the requests the session recorded.
 
@@ -100,7 +100,7 @@ On resume, oxide-code loads the saved history and adds new messages to the same 
 Inside the TUI, `/resume` (alias `/continue`) opens a session picker without restarting the process.
 
 - Type to filter by ID, title, or project. Press **Tab** to toggle current-project / all-projects scope and **Ctrl+A** to toggle active / archived sessions. Press **Enter** to resume the highlighted session in place.
-- To skip the picker, pass `/resume <id-prefix>` to jump directly, which also works in the `--no-tui` REPL. An ambiguous prefix lists the candidates. This form matches active and archived sessions, excluding the live session. It checks the current project first and searches all projects only when there is no match in the current project.
+- To skip the picker, pass `/resume <id-prefix>` to jump directly. An ambiguous prefix lists the candidates. This form matches active and archived sessions, excluding the live session. It checks the current project first and searches all projects only when there is no match in the current project.
 - The picker lists every session in the selected scope and archive view, most recent first, and loads older ones as you scroll. Typing a query searches all of them.
 - Chat repopulates from the resumed transcript. Prompts queued before the resume are discarded because they were typed for the previous session, and a prompt sent while it loads runs in the resumed session. If a resume fails, a prompt sent while it ran waits, and runs once a retried `/resume` lands. The next prompt continues the resumed thread just as it would after `ox -c`.
 
@@ -140,9 +140,9 @@ Importing a session the store already holds keeps whichever copy is further alon
 
 ## Titles
 
-When the TUI is running, oxide-code generates a concise AI title (3-7 words) shortly after your first prompt. Outside the TUI (bare REPL, headless mode), sessions keep the first prompt as the title, or the command line when the session starts with `/init`, such as `/init AGENTS.md`.
+When the TUI is running, oxide-code generates a concise AI title (3-7 words) shortly after your first prompt. Headless sessions keep the first prompt as the title.
 
-In the TUI, `/rename` opens a title editor pre-filled with the current title, and `/rename <title>` sets it directly, as it does in the `--no-tui` REPL. Your title replaces the AI title, and AI title generation stops for that session.
+In the TUI, `/rename` opens a title editor pre-filled with the current title, and `/rename <title>` sets it directly. Your title replaces the AI title, and AI title generation stops for that session.
 
 Every title, whether it comes from the first prompt, the AI, or a typed `/rename <title>`, keeps only its first non-blank line and is cut short with `...` past 80 columns. The `/rename` editor stops taking input at 80 columns.
 
@@ -150,6 +150,6 @@ Every title, whether it comes from the first prompt, the AI, or a typed `/rename
 
 On Unix, the session database and its saved tool output are created with user-only permissions (`0600`) because they contain verbatim tool output, which may include secrets from bash commands. An export holds the same content, so keep it as private as the database.
 
-## Headless and REPL Modes
+## Headless Mode
 
-Both the bare REPL (`ox --no-tui`) and headless runs (`ox -p`) save sessions. [Headless Mode](headless.md) describes how a headless run starts or continues one.
+Headless runs (`ox -p`) save sessions. [Headless Mode](headless.md) describes how a headless run starts or continues one.

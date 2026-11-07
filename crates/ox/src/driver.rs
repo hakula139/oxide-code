@@ -1,8 +1,6 @@
-//! The bare REPL and headless drivers, which run the [`Engine`](ox_core::engine::Engine) over
-//! stdio, plus the exit status and shutdown signals the TUI shares.
+//! The headless driver, plus the exit status and shutdown signals the TUI shares.
 
 pub(crate) mod headless;
-pub(crate) mod repl;
 mod stdio;
 
 pub(crate) use self::stdio::OutputFormat;

@@ -145,8 +145,7 @@ pub(super) const BUILT_INS: &[&dyn SlashCommand] = &[
     &UnarchiveCmd,
 ];
 
-/// Forwards the op [`command::typed_form`] parses for `name`, so the TUI runs each form it shares
-/// with the bare REPL as the REPL does.
+/// Forwards the op [`command::typed_form`] parses for `name`.
 ///
 /// # Panics
 ///

@@ -149,7 +149,7 @@ pub(crate) const INLINE_SEPARATOR: &str = " · ";
 /// Inline newline replacement for collapsed multi-line previews.
 pub(crate) const NEWLINE_GLYPH: &str = " ⏎ ";
 
-/// Line marking where a cancelled turn's reply stopped, in the chat and on stderr under `--no-tui`.
+/// Line marking where a cancelled turn's reply stopped in the chat and on headless stderr.
 pub const INTERRUPTED_MARKER: &str = "(interrupted)";
 
 // ── Diffs ──

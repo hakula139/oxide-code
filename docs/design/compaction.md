@@ -90,7 +90,7 @@ When the attempt ahead of a prompt fails, the prompt is not sent, and chat shows
 
 During a manual or automatic compaction, the TUI status bar shows the `Compacting` state and holds prompts submitted meanwhile, so a failed `/compact` or a failed mid-turn attempt leaves them waiting for the user. Automatic `SessionCompacted` events keep the TUI busy until the queued prompt drains or the prompt submission finishes. After a mid-turn compaction, the reply continues below the boundary block, and the summary stands in for the prompt and the prompts the turn drained before it, so a later rollback hands back only the prompts drained after it. When a manual compact's `OpEnded` arrives, the TUI returns to idle and submits the queue head, so the prompt renders below the notices the rebuilt prompt raises, or only returns to idle after a cancel that lost the race to the swap.
 
-In the bare REPL and headless runs, `driver::stdio::TextState` writes `Compacting the conversation to free up context` to stderr on `AutoCompactionStarted`, then renders `SessionCompacted` as a stderr line such as `Compacted 12 messages into a summary`, the header the TUI block shows.
+In headless runs, `driver::stdio::TextState` writes `Compacting the conversation to free up context` to stderr on `AutoCompactionStarted`, then renders `SessionCompacted` as a stderr line such as `Compacted 12 messages into a summary`, the header the TUI block shows.
 
 ## Design Decisions
 

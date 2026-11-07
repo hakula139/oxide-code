@@ -97,7 +97,7 @@ Run the suite once against the Anthropic API, where the billing header carries a
 
 ### TUI Checklist
 
-The tests drive headless and REPL runs. Check the TUI-only paths by hand in a scratch session on Haiku, switching models where a step says so:
+The tests drive headless runs. Check the TUI-only paths by hand in a scratch session on Haiku, switching models where a step says so:
 
 1. **`/compact`**: Read a few files, run `/compact`, then ask about them. The reply still knows the files, and in the session's `ox export`, the first usage record after the compaction root's `created_at` reads the earlier prefix from the cache.
 2. **`/model` swap**: Send a prompt on Opus, switch to Haiku with `/model`, and send another. Then switch back to Opus and send a third. Every reply succeeds and remembers the earlier exchanges.
