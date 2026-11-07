@@ -360,13 +360,18 @@ impl<'r> Dispatcher<'r, '_, '_> {
             })
             .await?;
         if let QuestionAnswer::Answered(text) = &answer {
-            self.user_answers.push(formatdoc! {"
+            let intent = formatdoc! {"
                 For the question:
                 {prompt}
 
                 The user answered:
                 {text}"
-            });
+            };
+            self.dispatch_ctx
+                .classifier
+                .user_prompts
+                .push(intent.clone());
+            self.user_answers.push(intent);
         }
         _ = reply.send(answer);
         Ok(())
