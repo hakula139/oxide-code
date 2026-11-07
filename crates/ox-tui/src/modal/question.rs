@@ -12,6 +12,7 @@ use ox_core::tool::ask::{Question, QuestionAnswer};
 use ox_core::util::text::escape_hidden;
 
 use super::acceptance::Acceptance;
+use super::chrome::{above, wrap_hints};
 use super::line_editor::LineEditor;
 use super::{Modal, ModalAction, ModalKey};
 use crate::action::Action;
@@ -98,11 +99,25 @@ impl QuestionModal {
         }
         (lines, selected_row)
     }
+
+    fn footer_rows(width: u16, overflow: bool) -> Vec<String> {
+        let mut hints = vec![
+            "↑/↓ choose",
+            "Tab type",
+            "Enter answer",
+            "Ctrl+S skip",
+            "Esc abort",
+        ];
+        if overflow {
+            hints.push("PgUp/PgDn scroll");
+        }
+        wrap_hints(&hints, usize::from(width).max(1))
+    }
 }
 
 impl Modal for QuestionModal {
     fn height(&mut self, width: u16, max_height: u16) -> u16 {
-        let rows = self.body(width, None).0.len() + 3;
+        let rows = self.body(width, None).0.len() + 2 + Self::footer_rows(width, false).len();
         saturating_u16(rows).min(max_height)
     }
 
@@ -112,12 +127,18 @@ impl Modal for QuestionModal {
         lines.push(Line::from(Span::styled("Your answer:", theme.text())));
         let editor_row = lines.len();
         lines.push(self.editor.line(area.width, theme));
-        lines.push(Line::from(Span::styled(
-            "↑/↓ choose · Tab type · Enter answer · Ctrl+S skip · Esc abort",
-            theme.dim(),
-        )));
+        let mut footer = Self::footer_rows(area.width, false);
+        if lines.len() + footer.len() > usize::from(area.height) {
+            footer = Self::footer_rows(area.width, true);
+        }
+        let body_area = above(area, saturating_u16(footer.len()));
+        let footer_area = Rect {
+            y: body_area.bottom(),
+            height: area.height - body_area.height,
+            ..area
+        };
         let focus = if editing { editor_row } else { selected_row };
-        self.rows = usize::from(area.height);
+        self.rows = usize::from(body_area.height);
         self.max_scroll = lines.len().saturating_sub(self.rows);
         if self.focus_changed {
             if focus < self.scroll {
@@ -129,20 +150,31 @@ impl Modal for QuestionModal {
         }
         self.scroll = self.scroll.min(self.max_scroll);
         let scroll = self.scroll;
-        self.acceptance.update(
-            !area.is_empty() && focus >= scroll && focus < scroll + usize::from(area.height),
-        );
+        self.acceptance
+            .update(!body_area.is_empty() && focus >= scroll && focus < scroll + self.rows);
         frame.render_widget(
             Paragraph::new(lines)
                 .scroll((saturating_u16(scroll), 0))
                 .style(theme.surface()),
-            area,
+            body_area,
+        );
+        frame.render_widget(
+            Paragraph::new(
+                footer
+                    .into_iter()
+                    .map(|row| Line::from(Span::styled(row, theme.dim())))
+                    .collect::<Vec<_>>(),
+            )
+            .style(theme.surface()),
+            footer_area,
         );
         if editing && editor_row >= scroll && editor_row < scroll + self.rows {
             self.editor.place_cursor(
                 frame,
-                area,
-                area.y.saturating_add(saturating_u16(editor_row - scroll)),
+                body_area,
+                body_area
+                    .y
+                    .saturating_add(saturating_u16(editor_row - scroll)),
             );
         }
     }
