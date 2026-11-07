@@ -1649,7 +1649,7 @@ mod tests {
                 ] {
                     let target = Access::for_path(path.to_str().unwrap(), &Workspace::new(cwd));
 
-                    assert_eq!(resolved(&target), (&*cwd.join(&path), None), "{path:?}",);
+                    assert_eq!(resolved(&target), (&*cwd.join(&path), None), "{path:?}");
                 }
             }
 
@@ -1688,7 +1688,7 @@ mod tests {
                 for path in ["notes/../x", "notes/sub/../../link/x"] {
                     let target = Access::for_path(path, &Workspace::new(cwd));
 
-                    assert_eq!(resolved(&target), (&*cwd.join(path), None), "{path}",);
+                    assert_eq!(resolved(&target), (&*cwd.join(path), None), "{path}");
                 }
             }
 
