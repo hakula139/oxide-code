@@ -27,7 +27,7 @@ Automatic classification uses the configured API endpoint and credentials with a
 
 Commands run by the `bash` tool, and the `git` and `gh` processes `ox` starts itself, inherit the user's environment except for the credential variables `ox` uses to authenticate, which [Authentication](docs/guide/authentication.md#commands-and-credentials) lists. Other environment secrets remain available to commands you allow. The `git` and `gh` processes used for the status line and `/diff` run outside the permission gate under git's trust model, including programs selected by repository configuration.
 
-The gate uses tree-sitter-bash to match `exec` rules against simple-command words. An explicit allow must cover every recognized component. The current analysis also applies configured `read` and `edit` rules to the file effects it can infer from shell syntax, reader arguments, scripts, wrappers, and redirections. That inference is incomplete: a program, interpreter, build script, alias, copied binary, or child symlink can reach effects the command line does not reveal. Unsupported syntax remains unmatched for allow rules and reaches the selected mode. [Permissions](docs/guide/permissions.md#rules) defines the supported matching grammar.
+The gate uses tree-sitter-bash to match `exec` rules against literal simple-command words. A command-specific allow must cover every component, while the whole-class exec rule `*` permits any Bash call after deny and ask checks. Dynamic words, redirections, and unsupported syntax remain unmatched by command-specific allow rules. Wrappers and script arguments remain ordinary words. Bash does not use native `read` and `edit` path rules, and no shell filesystem effects are inferred. A permitted command can access any resource the operating system allows. [Permissions](docs/guide/permissions.md#rules) defines the supported matching grammar.
 
 Native read, grep, glob, edit, and write tools resolve the path before the gate and use that resolved path when running. Configured path deny and ask rules match the requested and resolved spellings, equivalent directory aliases, and folded names. Search walks withhold matching files. A symlink swapped into a parent directory after the check remains a gap that `openat`-style traversal or an OS sandbox ([#133](https://github.com/hakula139/oxide-code/issues/133)) would close. Edit and Write recheck files before publication, but concurrent changes and crashes can still affect an in-place write. [File Edits](docs/design/file-edits.md) defines these integrity checks.
 
@@ -45,7 +45,7 @@ In scope:
 Out of scope:
 
 - Calls approved by the user, configured allow rules, the classifier, or `yolo` within the documented policy. Report classifier misjudgments as product bugs unless they bypass an explicit policy boundary.
-- Shell effects beyond the documented command analysis, such as behavior inside an allowed interpreter, build script, or copied program.
+- Filesystem or other effects of a Bash call permitted within the documented exec matching scope.
 - Secrets returned by an allowed file read or search and then recorded in the transcript.
 - Prompt injection whose resulting actions still pass through the configured permission gate.
 - Attacks requiring prior write access to user configuration, the environment, or shell startup files.

@@ -521,12 +521,6 @@ fn unapproved_output(name: &str, basis: &Basis, fix: Option<&Rule>) -> ToolOutpu
                                    in the user config, \
                                    ending a pattern in `*` at a word that expands."
             .to_owned(),
-        (None, Basis::Unrecognized { .. }) => "No permission rule can allow it. \
-                                               Rewrite it as plain commands joined by \
-                                               `&&`, `||`, `;`, or `|`, \
-                                               and set a variable for one command \
-                                               in the prefix form `NAME=value cmd`."
-            .to_owned(),
         (None, _) => {
             "Choose a different approach or ask the user to adjust permissions.".to_owned()
         }

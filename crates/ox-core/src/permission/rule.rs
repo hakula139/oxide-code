@@ -157,6 +157,7 @@ impl Rule {
             return false;
         }
         match (self.pattern.as_ref(), target) {
+            (Some(Pattern::Any), _) => true,
             (_, Access::Path(path)) => self.path_matches(path, discipline),
             (_, Access::Command(command)) if matches!(discipline, MatchDiscipline::Allow) => {
                 command.unrecognized().is_none()
@@ -166,7 +167,6 @@ impl Rule {
                         .iter()
                         .all(|segment| self.allows(segment))
             }
-            (Some(Pattern::Any), _) => true,
             (Some(Pattern::Exec(words)), Access::Command(command)) => command
                 .segments()
                 .iter()
@@ -201,23 +201,6 @@ impl Rule {
             Some(Pattern::Exec(words)) => words_allowed(words, segment.named()),
             Some(Pattern::Path(_)) | None => false,
         }
-    }
-
-    /// Returns whether a deny or ask `read` rule may match `path` or a recursive descendant, given
-    /// the rule's [`Self::prefix_bases`].
-    pub(super) fn holds_read(&self, path: &PathTarget, recursive: bool, bases: &[PathBuf]) -> bool {
-        let discipline = MatchDiscipline::Deny(Prefixes::Located(bases));
-        if self.matches_path(PermissionClass::Read, path, discipline) {
-            return true;
-        }
-        self.class == PermissionClass::Read
-            && recursive
-            && matches!(
-                self.pattern.as_ref(),
-                Some(Pattern::Path(glob))
-                    if (glob.absolute && glob.literal.as_os_str().is_empty())
-                        || may_match_below(bases, [&path.canonical, &path.requested])
-            )
     }
 
     /// Where this rule's literal path prefix lands, rooted at each absolute anchor unless the
@@ -493,17 +476,6 @@ impl PathGlob {
             }
         }
     }
-}
-
-/// Returns whether either of `paths` and a location of `bases` sit one within the other.
-fn may_match_below(bases: &[PathBuf], paths: [&str; 2]) -> bool {
-    let mut aliases = DirectoryAliases::default();
-    prefix_locations(bases).any(|base| {
-        paths.iter().any(|path| {
-            let path = Path::new(path);
-            aliases.relative_to(&base, path).is_some() || aliases.relative_to(path, &base).is_some()
-        })
-    })
 }
 
 /// Each of `bases`, followed by where it resolves now when that differs.

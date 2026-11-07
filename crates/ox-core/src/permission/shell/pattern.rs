@@ -13,9 +13,8 @@ const ONE_COMMAND: &str = "it must be one simple command, such as `cargo test *`
                            Write a pattern for each command of a chain or pipeline.";
 
 const HOLDS_REDIRECTION: &str = "it holds a redirection. \
-                                 Leave it out, since a pattern matches a command \
-                                 with its redirections set aside, \
-                                 and an `edit` pattern covers the file it writes.";
+                                 Write a pattern for the literal command words. \
+                                 Calls with redirections require approval or an exec-wide `*` rule.";
 
 /// Parses an `exec` pattern into its words: one simple command, optionally led by assignments,
 /// whose words are each literal or a lone unquoted `*`.

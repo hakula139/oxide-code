@@ -25,7 +25,7 @@ A `Rule` pairs a class with a pattern, and the list that holds it sets its tier.
 5. A configured allow rule or session grant allows.
 6. An unmatched call uses its mode: `auto` returns `Classify`, `manual` asks, `yolo` allows, and `plan` allows the remaining read-only call.
 
-The existing shell analysis also weighs inferred writes and certain reads against configured path rules, and holds possible reads for approval. These checks provide no OS sandbox. A command allow rule must cover every recognized simple command and each inferred file write.
+A command-specific allow rule must cover every extracted simple command. Native path rules apply to file tools and search walks. Bash uses exec rules and the selected mode without inferred filesystem effects.
 
 A `Verdict` carries its `Basis`, which identifies the matching rule, session grant, mode, session-local capability, or classifier reason. Explicit ask bypasses classification. An unattended call that requires approval becomes `Unapproved` and never emits an unanswered approval request.
 
@@ -59,15 +59,15 @@ On Windows, resolution expands existing 8.3 short names and drops NTFS stream su
 
 ## Command Targets
 
-A `bash` call is parsed with tree-sitter-bash. The current analysis extracts simple commands across supported compound syntax, strips supported wrappers and assignments, and inspects redirections, reader operands, shell startup files, and literal nested scripts. Known reader argument grammars account for GNU and BSD interpretation differences. These effects are checked against configured read and edit rules, while exec rules match command words. No shipped safe-command list grants approval.
+A `bash` call is parsed with tree-sitter-bash to extract simple commands joined by lists and pipelines. Each segment retains its words, including leading assignments, and the index where the actual program begins. Wrappers and literal script arguments remain ordinary words. The parser performs no filesystem resolution or effect inference.
 
-Quote removal and literal-value tracking keep command patterns tied to words. An unrecognized construct prevents an explicit allow match, so the call reaches the selected mode unless a deny or ask rule applies. The analysis cannot inspect arbitrary program behavior, and recursive child symlinks remain a documented limitation. [The user guide](../guide/permissions.md#rules) defines the supported syntax.
+Quote removal and literal-value tracking keep command patterns tied to words. Dynamic words, redirections, or unsupported constructs prevent command-specific allow matching. The explicit whole-class exec rule `*` can permit any call after deny and ask checks. Other unmatched calls reach the selected mode. Deny and ask still inspect extracted simple commands. [The user guide](../guide/permissions.md#rules) defines the supported syntax.
 
 ## Patterns
 
 [Rules](../guide/permissions.md#rules) gives the user-facing grammar. Allow rules widen what can run, so they match conservatively, while deny and ask rules hold calls back, so they match across every spelling a call can have. `MatchDiscipline` carries the two approaches, and the ask tier uses the deny one.
 
-An allow `exec` pattern matches a simple command's named words exactly, with a `*` before the last word matching one word that neither expands nor globs and a trailing `*` matching the rest, so `cargo test *` never covers `cargo test && rm -rf /`. A deny or ask `exec` pattern matches the named words, the program words, or the program words with the program's directory dropped, compares words folded, and needs its later words only in order, with any words between, so `rm -rf *` stops `/bin/rm -rf x`, `RM -RF x`, and `FOO=1 nice rm -rf x`.
+An allow `exec` pattern matches a simple command's named words exactly, with a `*` before the last word matching one literal word and a trailing `*` matching the rest. Every segment needs coverage, so `cargo test *` alone cannot permit `cargo test && rm x`. A deny or ask pattern matches the named words, the program words after leading assignments, or the program words with the program's directory dropped. It compares folded words and needs later words only in order, with intervening arguments, so `rm -rf *` matches `/bin/rm -rf x`, `RM -RF x`, and `FOO=1 rm -rf x`.
 
 `read` and `edit` patterns work like `.gitignore` entries, anchored at each anchor directory, the cwd and each workspace root, unless they start with `/` or `~/`. A leading `/**/` matches under any file-system root, including a drive or UNC share on Windows (**Gitignore-style paths**). An allow pattern matches the resolved path. A deny or ask pattern also matches the path as the call spells it and through directory aliases, compares names folded, and matches beneath each pattern's literal prefix as written, as it resolved when the policy loaded, and as it resolves when the call is checked, so `.env -> ../shared/.env` cannot route a read around `deny.read = [".env"]`, and `secrets -> ../vault` makes `secrets/**` cover `../vault/key` even when the link appears later (**Deny and ask rules are the enforced boundary for path tools**).
 

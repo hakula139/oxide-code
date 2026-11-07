@@ -28,13 +28,13 @@ The command inherits ox's environment minus the [credentials](#credentials) ox a
 
 With the editor set to `true`, `git rebase --continue` and `git cherry-pick --continue` keep the prepared message, while `git commit` without `-m` stops with `Aborting commit due to empty commit message`. `GIT_EDITOR` takes precedence over git's `core.editor`, which takes precedence over `VISUAL` and `EDITOR`, so all three are needed for git and for tools that fall back to the generic pair, such as `gh` and `crontab -e`.
 
-An exported `CDPATH` makes `cd sub` try each of its entries before the working directory, while the [permission gate](permissions.md#command-targets) resolves `sub` against the working directory alone. Dropping it keeps `cd` where the gate placed it, so an allowed `cd sub && make` cannot run `make` in another `sub`. An inherited `OLDPWD` names a directory the gate never sees for `~-`, so dropping it leaves `~-` as written until the command's own first `cd`, `pushd`, or `popd`.
+An exported `CDPATH` makes `cd sub` try its entries before the working directory. Dropping it keeps directory changes independent of the caller's search path. Dropping inherited `OLDPWD` leaves `~-` as written until the command's own first `cd`, `pushd`, or `popd`.
 
 ### Credentials
 
 Every command runs without `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and `ANTHROPIC_CUSTOM_HEADERS`, which carries gateway keys. `secret_env_vars` derives the list from the order in which credentials are resolved, so ox withholds each new credential variable as soon as it reads it. ox reads these variables from its own environment, which this does not change.
 
-A [known-safe command](permissions.md#command-targets) never expands a variable, but any command the user approves or an allow rule admits can, such as a build script run by an allowed `cargo test`, and its output reaches the session store and the model's context. Withholding these variables keeps ox's own credentials off every such path. A script that needs its own Anthropic key, such as a test suite that calls the API, has to read it from another variable or a file. Other secrets in ox's environment, such as cloud or GitHub tokens, still reach every command.
+A permitted command can expand environment variables and return their contents to the session store and model context. Withholding these variables keeps ox's own credential environment values off that path. A script that needs its own Anthropic key, such as a test suite that calls the API, has to read it from another variable or a file. Other secrets in ox's environment, such as cloud or GitHub tokens, still reach every command.
 
 ## Background Shells
 
