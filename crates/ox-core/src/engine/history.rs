@@ -84,6 +84,11 @@ struct TranscriptWalker<'a> {
 
 impl TranscriptWalker<'_> {
     fn push_message(&mut self, msg: &Message) {
+        let tool_reply = msg.role == Role::User
+            && msg
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. }));
         let mut text_buf = String::new();
         for (index, block) in msg.content.iter().enumerate() {
             match block {
@@ -102,6 +107,7 @@ impl TranscriptWalker<'_> {
                     origin: Some(TextOrigin::CompactionSummary),
                     ..
                 } if self.skip_compaction_summary && msg.role == Role::User => {}
+                ContentBlock::Text { origin: None, .. } if tool_reply => {}
                 ContentBlock::Text { text, .. } if !text.trim().is_empty() => {
                     if !text_buf.is_empty() {
                         text_buf.push('\n');

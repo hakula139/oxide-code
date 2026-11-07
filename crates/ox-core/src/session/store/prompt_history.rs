@@ -147,6 +147,12 @@ impl SessionStore {
 }
 
 fn ordinary_text(blocks: Vec<ContentBlock>) -> Option<String> {
+    if blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+    {
+        return None;
+    }
     let text = blocks
         .into_iter()
         .filter_map(|block| match block {
