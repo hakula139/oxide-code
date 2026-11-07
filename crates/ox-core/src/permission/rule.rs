@@ -554,7 +554,7 @@ fn validate_tool_pattern(raw: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::permission::{Access, Zone};
+    use crate::permission::Access;
     use crate::util::path::local_testing::{abs, canonical_tempdir};
     use crate::util::path::testing::HOME_VAR;
 
@@ -587,7 +587,6 @@ mod tests {
             rooted: rooted.to_vec(),
             requested: canonical.to_owned(),
             deny_rooted: Vec::new(),
-            zone: Zone::Outside,
         }
     }
 
