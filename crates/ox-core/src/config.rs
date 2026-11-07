@@ -2342,7 +2342,7 @@ mod tests {
             let config = load_with(&dir, &[]).await.unwrap();
 
             let decide = |class, target: Access| config.permission.decide(class, &target);
-            let command = |command: &str| Access::for_command(command, &config.workspace);
+            let command = |command: &str| Access::for_command(command);
             assert_eq!(
                 decide(PermissionClass::Exec, command("git push origin")),
                 Decision::Deny

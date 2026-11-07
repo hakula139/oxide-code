@@ -554,7 +554,7 @@ fn validate_tool_pattern(raw: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::permission::{Access, Workspace, Zone};
+    use crate::permission::{Access, Zone};
     use crate::util::path::local_testing::{abs, canonical_tempdir};
     use crate::util::path::testing::HOME_VAR;
 
@@ -571,7 +571,7 @@ mod tests {
     }
 
     fn cmd(s: &str) -> Access {
-        Access::for_command(s, &Workspace::new(Path::new("/repo")))
+        Access::for_command(s)
     }
 
     fn allows(rule: &Rule, command: &str) -> bool {
@@ -649,9 +649,8 @@ mod tests {
             let one_command = "it must be one simple command, such as `cargo test *`. \
                                Write a pattern for each command of a chain or pipeline.";
             let redirection = "it holds a redirection. \
-                               Leave it out, \
-                               since a pattern matches a command with its redirections set aside, \
-                               and an `edit` pattern covers the file it writes.";
+                               Write a pattern for the literal command words. \
+                               Calls with redirections require approval or an exec-wide `*` rule.";
             let expands = |word: &str| {
                 format!("the word {word:?} expands at run time. Quote it to match it as written.")
             };
@@ -673,6 +672,7 @@ mod tests {
                 ("echo > out hi", redirection.to_owned()),
                 ("cat <<< hi", redirection.to_owned()),
                 ("cat $X", expands("$X")),
+                ("ls ~/x", expands("~/x")),
                 ("echo $(date)", expands("$(date)")),
                 ("mkfs*", glob("mkfs*")),
                 ("ls *.rs", glob("*.rs")),
@@ -700,7 +700,7 @@ mod tests {
             assert_eq!(
                 format!("{err:#}"),
                 "a pattern cannot start with `!`, since patterns have no negation. \
-                 Write the paths to match instead, or turn off the built-in rule that covers them."
+                 Write the paths to match."
             );
         }
 
@@ -779,7 +779,7 @@ mod tests {
         fn names_the_one_simple_command_by_its_quoted_named_words() {
             for (command, expected) in [
                 (" cargo test ", "cargo test"),
-                ("RUST_LOG=debug cargo test 2>&1", "cargo test"),
+                ("RUST_LOG=debug cargo test", "RUST_LOG=debug cargo test"),
                 (
                     "git commit -m \"it's done\"",
                     r"git commit -m 'it'\''s done'",
@@ -893,8 +893,7 @@ mod tests {
             for command in [
                 "git commit -m 'fix the parser'",
                 "git  commit   -m \"fix the parser\"",
-                "git commit -m fix\\ the\\ parser 2>&1",
-                "nice -n 5 git commit -m 'fix the parser'",
+                "git commit -m fix\\ the\\ parser",
             ] {
                 assert!(allows(&rule, command), "{command}");
             }
@@ -904,24 +903,22 @@ mod tests {
         }
 
         #[test]
-        fn exec_allow_needs_literal_words_except_under_a_trailing_star() {
-            // A word that expands or globs can become several words, so only a trailing `*` may
-            // cover it.
+        fn exec_allow_requires_literal_words() {
             let middle = exec("git * status");
             assert!(allows(&middle, "git -C status"));
             assert!(!allows(&middle, "git $ARGS status"));
             assert!(!allows(&middle, "git *.c status"));
             assert!(!allows(&exec("cat a"), "cat $F"));
-            assert!(allows(&exec("cat *"), "cat $F *.rs"));
+            assert!(!allows(&exec("cat *"), "cat $F *.rs"));
         }
 
         #[test]
-        fn exec_allow_names_a_kept_assignment_or_pinned_wrapper() {
+        fn exec_allow_compares_literal_assignment_prefixes() {
             let plain = exec("git log *");
             let pinned = exec("GIT_PAGER=cat git log *");
             for (command, plain_allows, pinned_allows) in [
                 ("git log -1", true, false),
-                ("RUST_LOG=debug git log -1", true, false),
+                ("RUST_LOG=debug git log -1", false, false),
                 ("GIT_PAGER=cat git log -1", false, true),
                 ("GIT_PAGER=sh git log -1", false, false),
                 ("env GIT_PAGER=cat git log -1", false, false),
@@ -937,8 +934,6 @@ mod tests {
 
         #[test]
         fn exec_allow_refuses_a_command_that_runs_more() {
-            // The load-bearing safety property: `cargo test *` must not allow a chained, piped, or
-            // substituted `rm`.
             let rule = exec("cargo test *");
             for command in [
                 "cargo test && rm -rf /",
@@ -952,18 +947,18 @@ mod tests {
         }
 
         #[test]
-        fn exec_star_allows_only_a_command_the_analysis_recognizes() {
+        fn exec_star_allows_every_call_including_unsupported_syntax() {
             let rule = exec("*");
             for command in ["cargo test && rm -rf /", "sh -c ls", "eval ls"] {
                 assert!(allows(&rule, command), "{command}");
             }
             for command in [r#"eval "$CMD""#, r#"sh -c "$X""#, "$EDITOR notes", "FOO=1"] {
-                assert!(!allows(&rule, command), "{command}");
+                assert!(allows(&rule, command), "{command}");
             }
         }
 
         #[test]
-        fn exec_deny_catches_any_simple_command_however_it_is_spelled_or_wrapped() {
+        fn exec_deny_catches_each_extracted_simple_command() {
             let rule = exec("rm -rf *");
             for command in [
                 "rm -rf /",
@@ -971,10 +966,9 @@ mod tests {
                 "echo hi; rm -rf .",
                 r#""rm" '-rf' x"#,
                 "/bin/rm -rf x",
-                "FOO=1 nice -n 5 rm -rf x",
+                "FOO=1 rm -rf x",
                 "rm -rf $DIR",
                 "echo $(rm -rf /)",
-                "sh -c 'rm -rf /'",
             ] {
                 assert!(holds(&rule, command), "{command}");
             }
@@ -1173,63 +1167,6 @@ mod tests {
                 let err = format!("{:#}", Rule::parse(PermissionClass::Read, raw).unwrap_err());
                 assert!(err.contains("needs a drive"), "{raw}: {err}");
             }
-        }
-    }
-
-    mod holds_read {
-        use super::*;
-
-        #[test]
-        fn intersects_recursive_trees_with_decoded_literal_prefixes() {
-            let dir = canonical_tempdir();
-            let root = dir.path();
-            for (pattern, name, recursive, expected) in [
-                ("./vault/key", "", true, true),
-                ("./vault/key", "vault", true, true),
-                ("./vault/key", "vault", false, false),
-                ("./vault/key", "src", true, false),
-                ("./vault/key", "VAULT", true, true),
-                ("./vault/key", "vault/key", false, true),
-                ("./vault/*.key", "vault/public", true, true),
-                ("./vault/*.key", "src", true, false),
-                ("./vault[[]1[]]/key", "vault[1]", true, true),
-                ("./vault[[]1[]]/key", "vault1", true, false),
-                ("secret", "src", true, true),
-            ] {
-                let rule = rule(PermissionClass::Read, pattern);
-                let bases = rule.prefix_bases(&[root.to_path_buf()]);
-                let canonical = slash_separated(&root.join(name));
-                let rooted = [name.to_owned()];
-
-                let held = rule.holds_read(&path(&canonical, &rooted), recursive, &bases);
-
-                assert_eq!(
-                    held, expected,
-                    "{pattern}, path={name}, recursive={recursive}"
-                );
-            }
-        }
-
-        #[test]
-        fn any_root_patterns_may_read_below_every_recursive_root() {
-            let rule = rule(PermissionClass::Read, "/**/private/key");
-            let bases = rule.prefix_bases(&[PathBuf::from(abs("/repo"))]);
-            for raw in ["/repo/src", "D:/src", "//server/share/src"] {
-                let target = path(raw, &[]);
-
-                assert!(rule.holds_read(&target, true, &bases), "{raw}");
-                assert!(!rule.holds_read(&target, false, &bases), "{raw}");
-            }
-        }
-
-        #[test]
-        fn keeps_class_requirements() {
-            let vault = path(&abs("/repo/vault"), &["vault".to_owned()]);
-            let any = rule(PermissionClass::Read, "*");
-            let edit = rule(PermissionClass::Edit, "*");
-
-            assert!(any.holds_read(&vault, false, &[]));
-            assert!(!edit.holds_read(&vault, true, &[]));
         }
     }
 
