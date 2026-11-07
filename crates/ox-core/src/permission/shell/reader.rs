@@ -768,10 +768,8 @@ impl ReaderGrammar {
             }
         }
         let leading_pattern = self.pattern && !pattern_given && !unplaced;
-        let mut args =
-            self.place_operands(args, dialect, values, &operands, leading_pattern, recursive);
         args.unknown |= recursive && follows_tree_links;
-        args
+        self.place_operands(args, dialect, values, &operands, leading_pattern, recursive)
     }
 
     /// Completes `args` with the `operands` [`Self::read`] found among `values`, the first of them
