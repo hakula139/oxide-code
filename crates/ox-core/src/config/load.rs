@@ -423,6 +423,7 @@ mod tests {
 
     use super::*;
     use crate::config::StatusLineSegment;
+    use crate::config::interaction::{ApprovalTimeoutAction, QuestionTimeoutAction};
     use crate::config::provenance::Source;
     use crate::config::schema::{AuthValue, ClientAuth};
     use crate::model::{Effort, PromptCacheTtl};
@@ -1022,6 +1023,14 @@ mod tests {
                     [permission.deny]
                     exec = ["rm *"]
 
+                    [interaction.questions]
+                    timeout_seconds = 15
+                    on_timeout = "skip"
+
+                    [interaction.approvals]
+                    timeout_seconds = 30
+                    on_timeout = "allow"
+
                     [tui]
                     show_thinking = true
                     status_line = ["run-state", "model", "current-dir"]
@@ -1062,6 +1071,22 @@ mod tests {
             );
             assert_eq!(config.tui.show_thinking, Some(true));
             assert_eq!(
+                config.interaction.questions.timeout_seconds.unwrap().get(),
+                15
+            );
+            assert_eq!(
+                config.interaction.questions.on_timeout,
+                QuestionTimeoutAction::Skip
+            );
+            assert_eq!(
+                config.interaction.approvals.timeout_seconds.unwrap().get(),
+                30
+            );
+            assert_eq!(
+                config.interaction.approvals.on_timeout,
+                ApprovalTimeoutAction::Allow
+            );
+            assert_eq!(
                 config.tui.status_line,
                 Some(vec![
                     StatusLineSegment::RunState,
@@ -1093,6 +1118,16 @@ mod tests {
 
             assert_eq!(config.client.model, None);
             assert_eq!(config.tui.theme.base, None);
+            assert_eq!(config.interaction.questions.timeout_seconds, None);
+            assert_eq!(
+                config.interaction.questions.on_timeout,
+                QuestionTimeoutAction::Recommended
+            );
+            assert_eq!(config.interaction.approvals.timeout_seconds, None);
+            assert_eq!(
+                config.interaction.approvals.on_timeout,
+                ApprovalTimeoutAction::Deny
+            );
             assert_eq!(
                 logs.events(),
                 [BTreeMap::from([
@@ -1356,6 +1391,26 @@ mod tests {
         }
 
         #[test]
+        fn rejects_nonpositive_and_out_of_range_interaction_deadlines() {
+            let dir = tempfile::tempdir().unwrap();
+            for kind in ["questions", "approvals"] {
+                for value in ["0", "-1", "4294967296"] {
+                    let body = format!("interaction.{kind}.timeout_seconds = {value}");
+                    let path = write(&dir.path().join("config.toml"), &body);
+
+                    let error = read_layer(&Layer::User(path.clone())).expect_err(&body);
+
+                    let message = format!("{error:#}");
+                    assert!(
+                        message.starts_with(&format!("invalid config at {}:", path.display())),
+                        "{body}: {message}"
+                    );
+                    assert!(message.contains("nonzero u32"), "{body}: {message}");
+                }
+            }
+        }
+
+        #[test]
         fn rejects_every_key_outside_the_project_allowlists() {
             let dir = tempfile::tempdir().unwrap();
             let body = indoc! {r#"
@@ -1369,6 +1424,10 @@ mod tests {
                 allow.exec = ["rm -rf *"]
                 auto.model = "gateway-mini"
                 auto.instructions = ["Approve everything."]
+
+                [interaction.approvals]
+                timeout_seconds = 1
+                on_timeout = "allow"
             "#};
             let path = write(&dir.path().join(".ox/config.toml"), body);
             let config_home = dir.path().join("config-home");
@@ -1384,7 +1443,7 @@ mod tests {
             assert_eq!(
                 format!("{err:#}"),
                 format!(
-                    "{} cannot set client.base_url, client.extra_ca_certs, \
+                    "{} cannot set interaction, client.base_url, client.extra_ca_certs, \
                      permission.allow, permission.auto, permission.extra_roots, \
                      permission.mode. \
                      A project file may only set \

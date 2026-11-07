@@ -179,12 +179,20 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn preserves_answers_empty_answers_skips_and_aborts() {
-            for answer in [
-                QuestionAnswer::Answered("Blue".to_owned()),
-                QuestionAnswer::Answered(String::new()),
-                QuestionAnswer::Skipped,
-                QuestionAnswer::Aborted,
+        async fn preserves_answer_outcomes_and_their_source() {
+            for (answer, source) in [
+                (
+                    QuestionAnswer::Answered("Blue".to_owned()),
+                    ReplySource::User,
+                ),
+                (QuestionAnswer::Answered(String::new()), ReplySource::User),
+                (QuestionAnswer::Skipped, ReplySource::User),
+                (QuestionAnswer::Aborted, ReplySource::User),
+                (
+                    QuestionAnswer::Answered("Green".to_owned()),
+                    ReplySource::Timeout,
+                ),
+                (QuestionAnswer::Skipped, ReplySource::Timeout),
             ] {
                 let (questions, mut requests) = mpsc::channel(1);
                 let ctx = ToolCtx {
@@ -204,17 +212,18 @@ mod tests {
                     );
                     request
                         .reply
-                        .send(QuestionReply {
-                            answer,
-                            source: ReplySource::User,
-                        })
+                        .send(QuestionReply { answer, source })
                         .unwrap();
                 });
 
                 assert!(!output.is_error, "{}", output.content);
+                let expected_source = match source {
+                    ReplySource::User => "user",
+                    ReplySource::Timeout => "timeout",
+                };
                 assert_eq!(
                     serde_json::from_str::<serde_json::Value>(&output.content).unwrap(),
-                    json!({"source": "user", "result": expected}),
+                    json!({"source": expected_source, "result": expected}),
                 );
             }
         }

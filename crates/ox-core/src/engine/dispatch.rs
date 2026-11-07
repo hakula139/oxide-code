@@ -791,7 +791,7 @@ mod tests {
     use crate::protocol::OpSender;
     use crate::protocol::local_testing::{CapturingSink, FailingSink};
     use crate::tool::ToolDefinition;
-    use crate::tool::ask::AskTool;
+    use crate::tool::ask::{AskTool, Question, QuestionOption};
     use crate::tool::edit::EditTool;
     use crate::tool::read::ReadTool;
     use crate::tool::tasks::TasksTool;
@@ -807,6 +807,16 @@ mod tests {
             .into_iter()
             .filter_map(|e| match e {
                 Event::ApprovalRequested { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn closed_interaction_ids(sink: &CapturingSink) -> Vec<String> {
+        sink.events()
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::InteractionClosed { id } => Some(id),
                 _ => None,
             })
             .collect()
@@ -1013,6 +1023,7 @@ mod tests {
             let sink = CapturingSink::default();
             let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
             dispatch_ctx.policy.set_unattended();
+            dispatch_ctx.interaction.questions.timeout_seconds = NonZeroU32::new(3);
 
             let round = tokio::time::timeout(
                 Duration::from_secs(1),
@@ -1116,7 +1127,7 @@ mod tests {
             );
         }
 
-        #[tokio::test]
+        #[tokio::test(start_paused = true)]
         async fn interrupt_during_approval_reports_every_call_not_run() {
             // The first call passes the gate but never runs, since the interrupt lands while the
             // second awaits approval. The rest of the round never starts.
@@ -1127,6 +1138,10 @@ mod tests {
             ]);
             let sink = CapturingSink::default();
             let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+            dispatch_ctx.interaction.approvals = ApprovalConfig {
+                timeout_seconds: NonZeroU32::new(3),
+                on_timeout: ApprovalTimeoutAction::Allow,
+            };
             let (tx, mut rx) = OpSender::channel(1);
             tx.try_submit(Op::Interrupt).unwrap();
             let calls = vec![
@@ -1152,6 +1167,7 @@ mod tests {
                 round.abort,
             );
             assert_eq!(approval_ids(&sink), ["tool_2"]);
+            assert_eq!(closed_interaction_ids(&sink), ["tool_2"]);
             let started: Vec<String> = sink
                 .events()
                 .into_iter()
@@ -1345,6 +1361,194 @@ mod tests {
 
     mod dispatcher {
         use super::*;
+
+        mod answer_question {
+            use super::*;
+
+            async fn ask(
+                id: &str,
+                recommended: Option<usize>,
+                sink: &CapturingSink,
+                mailbox: &mut Mailbox<'_>,
+                dispatch_ctx: &mut DispatchContext<'_>,
+            ) -> AbortResult<(QuestionReply, Vec<String>)> {
+                let tools = ToolRegistry::new(Vec::new());
+                let parse_errors = HashMap::new();
+                let (questions, pending_questions) = mpsc::channel(1);
+                let mut dispatcher = Dispatcher {
+                    tools: &tools,
+                    parse_errors: &parse_errors,
+                    sink,
+                    mailbox,
+                    dispatch_ctx,
+                    questions,
+                    pending_questions,
+                    user_texts: Vec::new(),
+                };
+                let (reply, answer) = tokio::sync::oneshot::channel();
+                dispatcher
+                    .answer_question(QuestionRequest {
+                        id: id.to_owned(),
+                        question: Question {
+                            question: "Choose a color.".to_owned(),
+                            options: vec![
+                                QuestionOption {
+                                    label: "Blue".to_owned(),
+                                    description: None,
+                                },
+                                QuestionOption {
+                                    label: "Green".to_owned(),
+                                    description: None,
+                                },
+                            ],
+                            recommended,
+                        },
+                        reply,
+                    })
+                    .await?;
+                Ok((answer.await.unwrap(), dispatcher.user_texts))
+            }
+
+            #[tokio::test(start_paused = true)]
+            async fn deadlines_recommend_or_skip_without_inventing_user_intent() {
+                for (action, recommended, expected) in [
+                    (
+                        QuestionTimeoutAction::Recommended,
+                        Some(1),
+                        QuestionAnswer::Answered("Green".to_owned()),
+                    ),
+                    (
+                        QuestionTimeoutAction::Recommended,
+                        None,
+                        QuestionAnswer::Skipped,
+                    ),
+                    (
+                        QuestionTimeoutAction::Skip,
+                        Some(0),
+                        QuestionAnswer::Skipped,
+                    ),
+                ] {
+                    let sink = CapturingSink::default();
+                    let mut dispatch_ctx =
+                        dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+                    dispatch_ctx.interaction.questions.timeout_seconds = NonZeroU32::new(3);
+                    dispatch_ctx.interaction.questions.on_timeout = action;
+
+                    let (reply, text) = ask(
+                        "question-1",
+                        recommended,
+                        &sink,
+                        &mut inert_mailbox(),
+                        &mut dispatch_ctx,
+                    )
+                    .await
+                    .unwrap();
+
+                    assert_eq!(reply.answer, expected, "{action:?}, {recommended:?}");
+                    assert_eq!(reply.source, ReplySource::Timeout);
+                    assert_eq!(text, [] as [String; 0]);
+                    assert_eq!(dispatch_ctx.classifier.user_prompts, [] as [String; 0]);
+                    let events = sink.events();
+                    let [Event::QuestionAsked { id, deadline, .. }, closed] = events.as_slice()
+                    else {
+                        panic!("a question opens and closes once: {events:?}");
+                    };
+                    assert_eq!(id, "question-1");
+                    assert_eq!(
+                        *deadline,
+                        Some(PromptDeadline {
+                            timeout_seconds: NonZeroU32::new(3).unwrap(),
+                            action: match action {
+                                QuestionTimeoutAction::Recommended =>
+                                    PromptTimeoutAction::Recommended,
+                                QuestionTimeoutAction::Skip => PromptTimeoutAction::Skip,
+                            },
+                        })
+                    );
+                    assert_eq!(
+                        *closed,
+                        Event::InteractionClosed {
+                            id: "question-1".to_owned()
+                        }
+                    );
+                }
+            }
+
+            #[tokio::test(start_paused = true)]
+            async fn a_late_answer_cannot_settle_the_next_question_and_a_ready_user_reply_wins() {
+                let sink = CapturingSink::default();
+                let (ops, mut incoming) = OpSender::channel(2);
+                let mut mailbox = Mailbox::new(&mut incoming);
+                let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+                dispatch_ctx.interaction.questions.timeout_seconds = NonZeroU32::new(3);
+                let (expired, text) = ask("old", Some(0), &sink, &mut mailbox, &mut dispatch_ctx)
+                    .await
+                    .unwrap();
+                assert_eq!(expired.source, ReplySource::Timeout);
+                assert_eq!(text, [] as [String; 0]);
+
+                let pending = ask("next", Some(0), &sink, &mut mailbox, &mut dispatch_ctx);
+                tokio::pin!(pending);
+                assert!(futures::poll!(pending.as_mut()).is_pending());
+                ops.try_submit(Op::AnswerQuestion {
+                    id: "old".to_owned(),
+                    answer: QuestionAnswer::Answered("stale".to_owned()),
+                })
+                .unwrap();
+                assert!(futures::poll!(pending.as_mut()).is_pending());
+                tokio::time::advance(Duration::from_secs(3)).await;
+                ops.try_submit(Op::AnswerQuestion {
+                    id: "next".to_owned(),
+                    answer: QuestionAnswer::Answered("  Green  ".to_owned()),
+                })
+                .unwrap();
+
+                let (reply, text) = pending.await.unwrap();
+
+                assert_eq!(
+                    reply.answer,
+                    QuestionAnswer::Answered("  Green  ".to_owned())
+                );
+                assert_eq!(reply.source, ReplySource::User);
+                assert_eq!(
+                    text,
+                    [formatdoc! {"
+                        For the question:
+                        Choose a color.
+
+                        The user answered:
+                          Green  "
+                    }]
+                );
+            }
+
+            #[tokio::test(start_paused = true)]
+            async fn a_disabled_deadline_keeps_waiting_until_cancellation_closes_the_question() {
+                let sink = CapturingSink::default();
+                let (ops, mut incoming) = OpSender::channel(1);
+                let mut mailbox = Mailbox::new(&mut incoming);
+                let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+                let pending = ask(
+                    "question-1",
+                    Some(0),
+                    &sink,
+                    &mut mailbox,
+                    &mut dispatch_ctx,
+                );
+                tokio::pin!(pending);
+                assert!(futures::poll!(pending.as_mut()).is_pending());
+                tokio::time::advance(Duration::from_hours(24)).await;
+                assert!(futures::poll!(pending.as_mut()).is_pending());
+
+                ops.try_submit(Op::Interrupt).unwrap();
+                let outcome = pending.await;
+
+                assert!(matches!(outcome, Err(TurnAbort::Cancelled)), "{outcome:?}");
+                assert!(
+                    matches!(sink.events().as_slice(), [Event::QuestionAsked { deadline: None, .. }, Event::InteractionClosed { id }] if id == "question-1")
+                );
+            }
+        }
 
         mod gate {
             use super::*;
@@ -1550,12 +1754,97 @@ mod tests {
                         [Event::ApprovalRequested {
                             id,
                             basis: Basis::Mode(Mode::Manual),
+                            deadline: None,
                             ..
-                        }] if id == "tool_1",
+                        }, Event::InteractionClosed { id: closed }] if id == "tool_1" && closed == id,
                     ),
-                    "ask must surface one approval event carrying the call id and its basis: {:?}",
+                    "the approval opens and closes with the call id and its basis: {:?}",
                     sink.events(),
                 );
+            }
+
+            #[tokio::test(start_paused = true)]
+            async fn timeout_decisions_apply_per_call_and_cannot_override_explicit_denials() {
+                for (action, denied) in [
+                    (ApprovalTimeoutAction::Deny, false),
+                    (ApprovalTimeoutAction::Allow, false),
+                    (ApprovalTimeoutAction::Allow, true),
+                ] {
+                    let tools = bash_registry(Vec::new());
+                    let sink = CapturingSink::default();
+                    let deny = if denied { &["*"][..] } else { &[] };
+                    let mut dispatch_ctx =
+                        dispatch_with(Mode::Manual, deny, &[], Path::new("/repo"));
+                    dispatch_ctx.interaction.approvals = ApprovalConfig {
+                        timeout_seconds: NonZeroU32::new(3),
+                        on_timeout: action,
+                    };
+
+                    for id in ["first", "second"] {
+                        let result = tokio::time::timeout(
+                            Duration::from_secs(10),
+                            gate_call(
+                                &tools,
+                                id,
+                                "bash",
+                                json!({"command": "printf requested"}),
+                                &sink,
+                                &mut inert_mailbox(),
+                                &mut dispatch_ctx,
+                            ),
+                        )
+                        .await
+                        .expect("the configured deadline settles the call")
+                        .unwrap();
+
+                        if action == ApprovalTimeoutAction::Allow && !denied {
+                            assert_eq!(
+                                expect_ready(result).input,
+                                json!({"command": "printf requested"})
+                            );
+                        } else {
+                            let output = expect_settled(result);
+                            assert!(output.is_error);
+                            let reason = if denied {
+                                "by the `deny.exec` pattern `*`"
+                            } else {
+                                "because its approval deadline expired"
+                            };
+                            assert_eq!(
+                                output.content,
+                                format!(
+                                    "The bash call was denied {reason}. \
+                                     Do not retry it. \
+                                     Choose a different approach or ask the user to adjust permissions."
+                                )
+                            );
+                        }
+                        assert_eq!(dispatch_ctx.policy.session_allow(), []);
+                        assert_eq!(dispatch_ctx.classifier.user_prompts, [] as [String; 0]);
+                    }
+
+                    let expected = if denied {
+                        Vec::new()
+                    } else {
+                        vec!["first", "second"]
+                    };
+                    assert_eq!(approval_ids(&sink), expected);
+                    for event in sink.events() {
+                        if let Event::ApprovalRequested { deadline, .. } = event {
+                            assert_eq!(
+                                deadline,
+                                Some(PromptDeadline {
+                                    timeout_seconds: NonZeroU32::new(3).unwrap(),
+                                    action: match action {
+                                        ApprovalTimeoutAction::Deny => PromptTimeoutAction::Deny,
+                                        ApprovalTimeoutAction::Allow => PromptTimeoutAction::Allow,
+                                    },
+                                })
+                            );
+                        }
+                    }
+                    assert_eq!(closed_interaction_ids(&sink), expected);
+                }
             }
 
             #[tokio::test]
@@ -1967,29 +2256,52 @@ mod tests {
     mod await_approval {
         use super::*;
 
-        #[tokio::test]
-        async fn ignores_a_stale_decision_for_another_call() {
-            let (tx, mut rx) = OpSender::channel(2);
-            tx.try_submit(Op::Resolve {
-                id: "other".to_owned(),
+        #[tokio::test(start_paused = true)]
+        async fn a_stale_reply_cannot_approve_the_next_call_and_a_ready_user_denial_wins() {
+            let sink = CapturingSink::default();
+            let (ops, mut incoming) = OpSender::channel(2);
+            let mut mailbox = Mailbox::new(&mut incoming);
+            let settings = ApprovalConfig {
+                timeout_seconds: NonZeroU32::new(3),
+                on_timeout: ApprovalTimeoutAction::Allow,
+            };
+            let expired = await_approval("old", &mut mailbox, &sink, settings)
+                .await
+                .unwrap();
+            assert_eq!(expired.decision, ApprovalDecision::Approve);
+            assert_eq!(expired.source, ReplySource::Timeout);
+
+            let pending = await_approval("next", &mut mailbox, &sink, settings);
+            tokio::pin!(pending);
+            assert!(futures::poll!(pending.as_mut()).is_pending());
+            ops.try_submit(Op::Resolve {
+                id: "old".to_owned(),
                 decision: ApprovalDecision::Approve,
             })
             .unwrap();
-            tx.try_submit(Op::Resolve {
-                id: "tool_1".to_owned(),
+            assert!(futures::poll!(pending.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_secs(3)).await;
+            ops.try_submit(Op::Resolve {
+                id: "next".to_owned(),
                 decision: ApprovalDecision::Deny,
             })
             .unwrap();
 
-            let decision = await_approval(
-                "tool_1",
-                &mut Mailbox::new(&mut rx),
-                &CapturingSink::default(),
-                ApprovalConfig::default(),
-            )
-            .await
-            .expect("matching decision resolves");
-            assert_eq!(decision.decision, ApprovalDecision::Deny);
+            let reply = pending.await.unwrap();
+
+            assert_eq!(reply.decision, ApprovalDecision::Deny);
+            assert_eq!(reply.source, ReplySource::User);
+            assert_eq!(
+                sink.events(),
+                [
+                    Event::InteractionClosed {
+                        id: "old".to_owned()
+                    },
+                    Event::InteractionClosed {
+                        id: "next".to_owned()
+                    },
+                ]
+            );
         }
     }
 }

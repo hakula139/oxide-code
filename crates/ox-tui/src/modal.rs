@@ -497,7 +497,13 @@ mod tests {
 
     use crossterm::event::KeyModifiers;
 
-    use super::testing::{ScriptedModal, render_rows_with};
+    use ox_core::protocol::{PromptDeadline, PromptTimeoutAction};
+    use ox_core::tool::ask::Question;
+    use ox_core::tool::view::{ApprovalBody, ApprovalPreview};
+
+    use super::approval::ApprovalModal;
+    use super::question::QuestionModal;
+    use super::testing::{ScriptedModal, render_rows, render_rows_with};
     use super::*;
 
     /// Modal that keeps every default hook.
@@ -593,6 +599,63 @@ mod tests {
 
     mod notify {
         use super::*;
+
+        #[test]
+        fn interaction_deadlines_show_the_policy_and_close_only_the_matching_prompt_silently() {
+            let deadline = |action| {
+                Some(PromptDeadline {
+                    timeout_seconds: std::num::NonZeroU32::new(3).unwrap(),
+                    action,
+                })
+            };
+            let question: Box<dyn Modal> = Box::new(
+                QuestionModal::new(
+                    "call-1".to_owned(),
+                    Question {
+                        question: "Choose a color.".to_owned(),
+                        options: Vec::new(),
+                        recommended: None,
+                    },
+                )
+                .with_deadline(deadline(PromptTimeoutAction::Recommended)),
+            );
+            let approval: Box<dyn Modal> = Box::new(
+                ApprovalModal::new(
+                    "call-1".to_owned(),
+                    ApprovalPreview {
+                        title: "Bash".to_owned(),
+                        body: ApprovalBody::Command("printf requested".to_owned()),
+                    },
+                    None,
+                    None,
+                )
+                .with_deadline(deadline(PromptTimeoutAction::Deny)),
+            );
+
+            for (mut modal, hint) in [
+                (question, "After 3s: use the recommended answer, or skip."),
+                (approval, "After 3s: deny the call."),
+            ] {
+                let rows = render_rows(&mut *modal, 70, 15);
+                assert!(rows.iter().any(|row| row.contains(hint)), "{rows:?}");
+                let mut stack = ModalStack::default();
+                stack.push(modal);
+
+                let stale = stack.notify(EngineUpdate::Event(&Event::InteractionClosed {
+                    id: "old".to_owned(),
+                }));
+
+                assert!(stale.is_none(), "{stale:?}");
+                assert!(stack.is_active());
+
+                let closed = stack.notify(EngineUpdate::Event(&Event::InteractionClosed {
+                    id: "call-1".to_owned(),
+                }));
+
+                assert!(matches!(closed.as_deref(), Some([])), "{closed:?}");
+                assert!(!stack.is_active());
+            }
+        }
 
         #[test]
         fn reaches_a_modal_below_the_top_without_closing_the_overlay() {
