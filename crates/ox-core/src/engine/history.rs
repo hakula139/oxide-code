@@ -215,6 +215,7 @@ mod tests {
     use crate::session::store::CompactRecord;
     use crate::tool::DEFAULT_TOOL_ICON;
     use crate::tool::StoredView;
+    use crate::tool::ask::AskTool;
     use crate::tool::edit::EditTool;
     use crate::tool::tasks::testing::plan;
     use crate::tool::testing::{bash_registry, edit_diff};
@@ -438,16 +439,10 @@ mod tests {
 
         #[test]
         fn marks_generated_interruptions_between_prompts_and_tools() {
-            let text = |text: &str| ContentBlock::text(text);
             let messages = [
-                Message {
-                    role: Role::User,
-                    content: vec![
-                        text("write a story"),
-                        ContentBlock::generated_text(INTERRUPTION_MARKER, TextOrigin::Interruption),
-                        text("run ls"),
-                    ],
-                },
+                Message::user("write a story"),
+                Message::interruption(),
+                Message::user("run ls"),
                 Message {
                     role: Role::Assistant,
                     content: vec![ContentBlock::tool_use(
@@ -458,12 +453,10 @@ mod tests {
                 },
                 Message {
                     role: Role::User,
-                    content: vec![
-                        ContentBlock::tool_result("t1", "interrupted", true),
-                        ContentBlock::generated_text(INTERRUPTION_MARKER, TextOrigin::Interruption),
-                        text("what is 7 times 6?"),
-                    ],
+                    content: vec![ContentBlock::tool_result("t1", "interrupted", true)],
                 },
+                Message::interruption(),
+                Message::user("what is 7 times 6?"),
                 Message::assistant("42"),
             ];
 
@@ -480,6 +473,53 @@ mod tests {
                     Interaction::Interrupted,
                     Interaction::UserText("what is 7 times 6?".to_owned()),
                     Interaction::AssistantText("42".to_owned()),
+                ]
+            );
+        }
+
+        #[test]
+        fn hides_answer_context_in_results_and_keeps_a_prompt_with_the_same_text() {
+            let input = serde_json::json!({"question": "Choose a color."});
+            let result = r#"{"source":"user","result":{"status":"answered","answer":"Blue"}}"#;
+            let answer = indoc! {"
+                For the question:
+                Choose a color.
+
+                The user answered:
+                Blue"
+            };
+            let messages = [
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::tool_use("q1", "ask", input.clone())],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![
+                        ContentBlock::tool_result("q1", result, false),
+                        ContentBlock::text(answer),
+                    ],
+                },
+                Message::interruption(),
+                Message::user(answer),
+            ];
+            let tools = ToolRegistry::new(vec![Box::new(AskTool)]);
+
+            let out = walk_transcript(
+                &messages,
+                &HashMap::new(),
+                &tools,
+                Path::new("/repo"),
+                false,
+            );
+
+            assert_eq!(
+                out,
+                [
+                    call("q1", "ask", input, DEFAULT_TOOL_ICON, "Ask"),
+                    text_result("q1", result, false),
+                    Interaction::Interrupted,
+                    Interaction::UserText(answer.to_owned()),
                 ]
             );
         }

@@ -871,6 +871,48 @@ mod tests {
         }
 
         #[tokio::test(start_paused = true)]
+        async fn an_unattended_question_aborts_without_opening_a_prompt_or_recording_an_answer() {
+            let tools = ToolRegistry::new(vec![Box::new(AskTool)]);
+            let sink = CapturingSink::default();
+            let mut dispatch_ctx = dispatch_with(Mode::Manual, &[], &[], Path::new("/repo"));
+            dispatch_ctx.policy.set_unattended();
+
+            let round = tokio::time::timeout(
+                Duration::from_secs(1),
+                run_tool_round(
+                    &tools,
+                    vec![call(
+                        "question-1",
+                        "ask",
+                        json!({"question": "Choose a color.", "options": [{"label": "Blue"}], "recommended": 0}),
+                    )],
+                    &HashMap::new(),
+                    &sink,
+                    &mut inert_mailbox(),
+                    &mut dispatch_ctx,
+                ),
+            )
+            .await
+            .expect("an unattended question must not wait for an answer");
+
+            assert!(round.abort.is_none());
+            assert_eq!(
+                results(&round),
+                [(
+                    "question-1",
+                    r#"{"result":{"status":"aborted"},"source":"user"}"#,
+                    false,
+                )],
+            );
+            assert!(
+                !sink
+                    .events()
+                    .iter()
+                    .any(|event| matches!(event, Event::QuestionAsked { .. }))
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
         async fn cancelling_a_question_interrupts_the_call_without_user_context() {
             let tools = ToolRegistry::new(vec![Box::new(AskTool)]);
             let (ops, mut incoming) = OpSender::channel(1);
