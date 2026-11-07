@@ -323,8 +323,13 @@ impl Config {
         let permission = resolve_permission(permission, parsed_permission, &origins, cwd)?;
 
         let tui = resolve_tui(tui, &origins)?;
+        let question_timeout = origins.source("interaction.questions.timeout_seconds");
+        let question_timeout_action = origins.source("interaction.questions.on_timeout");
+        let approval_timeout = origins.source("interaction.approvals.timeout_seconds");
+        let approval_timeout_action = origins.source("interaction.approvals.on_timeout");
 
         let provenance = Provenance {
+            layers: origins.into_layers(),
             model: model_id.source,
             effort: effort.source,
             auth: auth.source,
@@ -340,10 +345,10 @@ impl Config {
             permission_mode: permission.mode_source,
             permission_auto_model: permission.auto_model_source,
             permission_auto_instructions: permission.auto_instructions_source,
-            question_timeout: origins.source("interaction.questions.timeout_seconds"),
-            question_timeout_action: origins.source("interaction.questions.on_timeout"),
-            approval_timeout: origins.source("interaction.approvals.timeout_seconds"),
-            approval_timeout_action: origins.source("interaction.approvals.on_timeout"),
+            question_timeout,
+            question_timeout_action,
+            approval_timeout,
+            approval_timeout_action,
             show_thinking: tui.show_thinking.source,
             show_welcome: tui.show_welcome.source,
             status_line: tui.status_line.source,
@@ -351,7 +356,6 @@ impl Config {
             theme_overrides: tui.theme_overrides,
             extra_roots: permission.extra_roots,
             rules: permission.rules,
-            layers: origins.into_layers(),
         };
 
         Ok(Self {
