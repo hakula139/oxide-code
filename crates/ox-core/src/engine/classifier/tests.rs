@@ -9,12 +9,13 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::*;
 use crate::client::anthropic::local_testing::{COMPLETION_USAGE, client_for, completion_body};
 use crate::client::anthropic::testing::{
-    api_key, sse_response, text_stream_body, tool_use_stream_body,
+    api_key, sse_body, sse_response, text_stream_body, tool_use_stream_body,
 };
+use crate::config::compaction::CompactionConfig;
 use crate::config::permission_auto::AutoPermissionConfig;
 use crate::config::testing::test_config;
 use crate::engine::EngineHandle;
-use crate::engine::local_testing::turn_events;
+use crate::engine::local_testing::{tool_heavy_transcript, turn_events};
 use crate::engine::testing::{MODEL, engine, request_bodies, until_requested, with_pinned_home};
 use crate::message::{ContentBlock, Message, Role, TextOrigin};
 use crate::model::ModelSpec;
@@ -25,6 +26,7 @@ use crate::protocol::{ApprovalDecision, Event, Op, OpEnd};
 use crate::session::handle;
 use crate::session::store::UsageRecord;
 use crate::session::store::testing::test_store;
+use crate::tool::tasks::TasksTool;
 use crate::tool::{Prepared, Tool, ToolCtx, ToolDefinition, ToolOutput, ToolRegistry, ToolSpec};
 
 const HAIKU: &str = "claude-haiku-5-5";
@@ -572,6 +574,121 @@ mod permission_gate {
             assert_eq!(handle.shutdown().await.unwrap(), None);
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn keeps_genuine_user_prompts_and_queued_input_after_mid_turn_compaction() {
+        with_pinned_home(async {
+            let server = MockServer::start().await;
+            mount_compacting_tasks_call(&server).await;
+            Mock::given(method("POST"))
+                .and(path("/v1/messages"))
+                .and(body_partial_json(json!({"model": MODEL, "stream": true})))
+                .respond_with(sse_response(text_stream_body(
+                    "",
+                    "summary-approval-marker",
+                )))
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+            mount_tool_turn(&server).await;
+            mount_classifier(
+                &server,
+                classifier_reply(r#"{"decision":"allow","reason":"Requested"}"#),
+            )
+            .await;
+            let dir = tempfile::tempdir().unwrap();
+            let store = test_store(dir.path());
+            let runs = Arc::new(AtomicUsize::new(0));
+            let mut engine =
+                engine(server.uri(), &store, dir.path())
+                    .await
+                    .with_tools(ToolRegistry::new(vec![
+                        Box::new(TasksTool),
+                        Box::new(ProbeTool(Arc::clone(&runs))),
+                    ]));
+            engine.policy.set_mode(Mode::Auto);
+            engine.compaction = CompactionConfig::with_threshold(50_000);
+            let mut messages = tool_heavy_transcript();
+            messages[0] = Message::user("Inspect the requested project.");
+            messages[2].content.push(ContentBlock::generated_text(
+                "generated-approval-marker",
+                TextOrigin::SystemReminder,
+            ));
+            engine.transcript.set_messages(messages);
+            let mut handle = engine.spawn();
+            handle
+                .ops
+                .submit(Op::prompt("Run the requested probe."))
+                .await
+                .unwrap();
+            until_requested(&server, 1).await;
+
+            handle
+                .ops
+                .submit(Op::Queue("Also inspect the requested docs.".to_owned()))
+                .await
+                .unwrap();
+            let events = resolve_turn(&mut handle, ApprovalDecision::Deny).await;
+
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(Event::OpEnded {
+                        end: OpEnd::Completed,
+                        ..
+                    })
+                ),
+                "{events:?}"
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, Event::SessionCompacted { .. }))
+            );
+            assert_eq!(runs.load(Ordering::SeqCst), 1);
+            let requests = request_bodies(&server).await;
+            let classifier = requests
+                .iter()
+                .find(|request| request["model"] == HAIKU)
+                .unwrap();
+            let action: serde_json::Value = serde_json::from_str(
+                classifier["messages"][0]["content"][0]["text"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                action["user_prompts"],
+                json!([
+                    "Inspect the requested project.",
+                    "Run the requested probe.",
+                    "Also inspect the requested docs.",
+                ])
+            );
+            assert_eq!(handle.shutdown().await.unwrap(), None);
+        })
+        .await;
+    }
+
+    async fn mount_compacting_tasks_call(server: &MockServer) {
+        let frames = [
+            json!({"type": "message_start", "message": {"id": "msg_1", "model": MODEL, "usage": {"input_tokens": 60_000, "output_tokens": 0}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "tasks-1", "name": "tasks"}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": r#"{"tasks":[]}"#}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 100}}),
+            json!({"type": "message_stop"}),
+        ];
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(body_partial_json(json!({"model": MODEL, "stream": true})))
+            .respond_with(
+                sse_response(sse_body(&frames)).set_delay(std::time::Duration::from_millis(200)),
+            )
+            .up_to_n_times(1)
+            .mount(server)
+            .await;
     }
 
     #[tokio::test]
