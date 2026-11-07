@@ -2018,6 +2018,7 @@ dependencies = [
  "fastrand",
  "indoc",
  "insta",
+ "nix 0.31.3",
  "ox-core",
  "ox-tui",
  "serde",

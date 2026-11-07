@@ -84,8 +84,8 @@ impl Shutdown {
 }
 
 /// The SIGINT / SIGTERM / SIGHUP listeners of one run, registered once so a signal arriving
-/// between two waits is still delivered. A failed registration is logged, and that signal keeps
-/// its default action, which ends ox without finishing the session.
+/// between two waits is still delivered. An inherited ignored signal stays ignored. Disposition
+/// query and registration failures are logged.
 pub(crate) struct Signals {
     #[cfg(unix)]
     interrupt: Option<tokio::signal::unix::Signal>,
@@ -102,12 +102,12 @@ impl Signals {
     pub(crate) fn new() -> Self {
         #[cfg(unix)]
         {
-            use tokio::signal::unix::{SignalKind, signal};
+            use tokio::signal::unix::SignalKind;
 
             Self {
-                interrupt: listen("SIGINT", signal(SignalKind::interrupt())),
-                terminate: listen("SIGTERM", signal(SignalKind::terminate())),
-                hangup: listen("SIGHUP", signal(SignalKind::hangup())),
+                interrupt: unix_listener("SIGINT", SignalKind::interrupt()),
+                terminate: unix_listener("SIGTERM", SignalKind::terminate()),
+                hangup: unix_listener("SIGHUP", SignalKind::hangup()),
             }
         }
         #[cfg(not(unix))]
@@ -139,11 +139,43 @@ impl Signals {
     }
 }
 
-/// The listener `registered` made, or `None` after logging why `name` cannot be heard.
-fn listen<T>(name: &str, registered: std::io::Result<T>) -> Option<T> {
-    registered
+#[cfg(unix)]
+fn unix_listener(
+    name: &str,
+    kind: tokio::signal::unix::SignalKind,
+) -> Option<tokio::signal::unix::Signal> {
+    if listen(name, signal_is_ignored(kind.as_raw_value()))? {
+        None
+    } else {
+        listen(name, tokio::signal::unix::signal(kind))
+    }
+}
+
+fn listen<T>(name: &str, result: std::io::Result<T>) -> Option<T> {
+    result
         .inspect_err(|e| tracing::warn!(signal = name, error = %e, "failed to listen for a signal"))
         .ok()
+}
+
+#[cfg(unix)]
+#[expect(
+    unsafe_code,
+    reason = "no safe signal API queries the inherited disposition without changing it"
+)]
+fn signal_is_ignored(signal: i32) -> std::io::Result<bool> {
+    use std::mem::MaybeUninit;
+    use std::ptr;
+
+    use nix::libc;
+
+    let mut action = MaybeUninit::<libc::sigaction>::uninit();
+    // A null action only queries the disposition. The output points to writable storage, which
+    // sigaction initializes on success before assume_init reads it.
+    let result = unsafe { libc::sigaction(signal, ptr::null(), action.as_mut_ptr()) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { action.assume_init() }.sa_sigaction == libc::SIG_IGN)
 }
 
 /// Waits for the next signal on `listener`, or forever without one.
