@@ -160,7 +160,7 @@ impl Rule {
             (Some(Pattern::Any), _) => true,
             (_, Access::Path(path)) => self.path_matches(path, discipline),
             (_, Access::Command(command)) if matches!(discipline, MatchDiscipline::Allow) => {
-                command.unrecognized().is_none()
+                command.is_complete()
                     && !command.segments().is_empty()
                     && command
                         .segments()
@@ -341,7 +341,7 @@ impl PathGlob {
         ensure!(
             !raw.starts_with('!'),
             "a pattern cannot start with `!`, since patterns have no negation. \
-             Write the paths to match instead, or turn off the built-in rule that covers them."
+             Write the paths to match."
         );
         let mut pattern = slash_separated(Path::new(raw));
         if pattern == "~" || pattern.starts_with("~/") {

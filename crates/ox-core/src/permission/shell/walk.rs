@@ -8,7 +8,7 @@ use super::word::{Word, assignment_word};
 #[derive(Default)]
 pub(super) struct Walk {
     pub(super) segments: Vec<Segment>,
-    pub(super) unrecognized: Option<String>,
+    pub(super) incomplete: bool,
 }
 
 impl Walk {
@@ -16,14 +16,9 @@ impl Walk {
         let tree = parse_tree(source);
         let root = tree.root_node();
         if root.has_error() || !splits_words_like_bash(root, source) {
-            self.mark_unrecognized(source);
+            self.incomplete = true;
         }
         self.visit(root, source);
-    }
-
-    fn mark_unrecognized(&mut self, text: &str) {
-        self.unrecognized
-            .get_or_insert_with(|| text.chars().take(40).collect());
     }
 
     fn visit(&mut self, node: Node<'_>, src: &str) {
@@ -32,7 +27,7 @@ impl Walk {
             "comment" => {}
             "command" => self.command(node, src),
             _ => {
-                self.mark_unrecognized(&src[node.byte_range()]);
+                self.incomplete = true;
                 self.visit_children(node, src);
             }
         }
@@ -57,7 +52,7 @@ impl Walk {
                     }
                 }
                 "file_redirect" | "herestring_redirect" | "heredoc_redirect" => {
-                    self.mark_unrecognized(&src[part.byte_range()]);
+                    self.incomplete = true;
                 }
                 _ => nodes.push(part),
             }
@@ -65,12 +60,12 @@ impl Walk {
         let program = named.len();
         named.extend(words(&nodes, src).iter().map(|word| word.shell_word(src)));
         if named.iter().any(|word| !word.literal) {
-            self.mark_unrecognized(&src[command.byte_range()]);
+            self.incomplete = true;
         }
         if program < named.len() {
             self.segments.push(Segment { named, program });
         } else {
-            self.mark_unrecognized(&src[command.byte_range()]);
+            self.incomplete = true;
         }
         self.nested_commands(command, src);
     }
@@ -84,7 +79,7 @@ impl Walk {
                 | "expansion"
                 | "command_substitution"
                 | "process_substitution" => {
-                    self.mark_unrecognized(&src[child.byte_range()]);
+                    self.incomplete = true;
                     self.nested_commands(child, src);
                 }
                 _ => self.nested_commands(child, src),

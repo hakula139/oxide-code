@@ -47,9 +47,8 @@ impl Word {
     }
 }
 
-/// A leading `NAME=VALUE` assignment as a word, with its value unquoted and a leading `~` expanded.
-/// Neither pathname nor brace expansion applies to an assignment, so only a value or a subscript
-/// that expands keeps it from being literal.
+/// A leading `NAME=VALUE` assignment after quote removal. Expanding values and subscripts stay
+/// dynamic. Pathname and brace expansion do not apply to assignment values.
 pub(super) fn assignment_word(node: Node<'_>, src: &str) -> ShellWord {
     let written = || ShellWord {
         text: src[node.byte_range()].to_owned(),
@@ -111,9 +110,7 @@ fn unquote(node: Node<'_>, src: &str, leading: bool) -> Option<(String, bool)> {
 
 /// The value and glob flag of the one word `parts` spell in order, each read as [`unquote`] reads
 /// it and joined by the [`Gap::value`] between them, or `None` when any part has none. Adjacent
-/// unquoted parts are read as one, with the escapes and line continuations between them, so a
-/// tilde prefix spans them. A leading tilde expands only when its unquoted run holds the `/` that
-/// ends the prefix or ends the word, since bash leaves a prefix with a quoted character as written.
+/// unquoted parts share escape removal. Bash leaves a tilde prefix with a quoted suffix literal.
 fn unquote_parts<'t>(
     parts: impl IntoIterator<Item = Node<'t>>,
     src: &str,
