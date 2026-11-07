@@ -98,9 +98,9 @@ impl Tool for BashTool {
         }
     }
 
-    fn prepare(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<Prepared, String> {
+    fn prepare(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<Prepared, String> {
         Prepared::parse(input, |input: &Input| {
-            Ok(Access::for_command(&input.command, &ctx.workspace))
+            Ok(Access::for_command(&input.command))
         })
     }
 
@@ -848,10 +848,7 @@ mod tests {
                 .prepare(serde_json::json!({"command": "ls -la"}), &ctx)
                 .unwrap();
 
-            assert_eq!(
-                prepared.access,
-                Access::for_command("ls -la", &ctx.workspace)
-            );
+            assert_eq!(prepared.access, Access::for_command("ls -la"));
         }
 
         #[test]

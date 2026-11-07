@@ -13,9 +13,8 @@ const ONE_COMMAND: &str = "it must be one simple command, such as `cargo test *`
                            Write a pattern for each command of a chain or pipeline.";
 
 const HOLDS_REDIRECTION: &str = "it holds a redirection. \
-                                 Leave it out, since a pattern matches a command \
-                                 with its redirections set aside, \
-                                 and an `edit` pattern covers the file it writes.";
+                                 Write a pattern for the literal command words. \
+                                 Calls with redirections require approval or an exec-wide `*` rule.";
 
 /// Parses an `exec` pattern into its words: one simple command, optionally led by assignments,
 /// whose words are each literal or a lone unquoted `*`.
@@ -95,11 +94,7 @@ pub(super) fn parse(pattern: &str) -> Result<Vec<PatternWord>> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
-    use crate::util::path::local_testing::abs;
-    use crate::util::path::testing::HOME_VAR;
 
     mod parse {
         use super::*;
@@ -114,23 +109,20 @@ mod tests {
 
         #[test]
         fn unquotes_each_word_and_reads_a_lone_star_as_a_wildcard() {
-            temp_env::with_var(HOME_VAR, Some(abs("/home/u")), || {
-                let home = PathBuf::from(abs("/home/u")).join("x");
-                assert_eq!(
-                    pattern(r#"GIT_PAGER=cat git  commit -m "a b" '*' \* ~/x *"#),
-                    [
-                        literal("GIT_PAGER=cat"),
-                        literal("git"),
-                        literal("commit"),
-                        literal("-m"),
-                        literal("a b"),
-                        literal("*"),
-                        literal("*"),
-                        literal(&home.to_string_lossy()),
-                        PatternWord::Any,
-                    ]
-                );
-            });
+            assert_eq!(
+                pattern(r#"GIT_PAGER=cat git  commit -m "a b" '*' \* '~/x' *"#),
+                [
+                    literal("GIT_PAGER=cat"),
+                    literal("git"),
+                    literal("commit"),
+                    literal("-m"),
+                    literal("a b"),
+                    literal("*"),
+                    literal("*"),
+                    literal("~/x"),
+                    PatternWord::Any,
+                ]
+            );
             assert_eq!(pattern("*"), [PatternWord::Any]);
             assert_eq!(
                 pattern("git * --force"),

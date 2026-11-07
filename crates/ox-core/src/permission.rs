@@ -23,7 +23,7 @@ use strum::{Display, EnumString, IntoStaticStr, VariantArray};
 use unicode_normalization::UnicodeNormalization as _;
 
 use self::rule::{MatchDiscipline, Prefixes, Rule};
-use self::shell::{CommandTarget, Segment};
+use self::shell::CommandTarget;
 use crate::util::path::{expand_absolute, lexical_normalize, requires_directory, slash_separated};
 use crate::util::variant;
 
@@ -118,15 +118,12 @@ pub enum Tier {
 
 // ── Workspace ──
 
-/// Where tools run and relative path rules apply. Roots are the launch directory plus
-/// `permission.extra_roots`, resolved like path targets. There are none when the launch directory
-/// is `/`, `$HOME`, or an ancestor of it.
+/// The launch directory and configured roots that anchor path rules and inform classification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Workspace {
     cwd: PathBuf,
     roots: Vec<PathBuf>,
-    /// The directories anchored patterns apply below: the cwd, then each extra root while there are
-    /// roots.
+    /// The cwd followed by each distinct configured root, in configuration order.
     anchors: Vec<Anchor>,
 }
 
@@ -139,7 +136,7 @@ pub(crate) struct Anchor {
 }
 
 impl Anchor {
-    /// Resolves an absolute or `~/` extra root, excluding `/`, home, and home's ancestors.
+    /// Resolves an absolute or `~/` extra root.
     pub(crate) fn resolve(raw: &str) -> Result<Self> {
         let spelled =
             expand_absolute(raw).with_context(|| format!("invalid extra root {raw:?}"))?;
@@ -147,11 +144,6 @@ impl Anchor {
             Ok(root) => root,
             Err(unreachable) => bail!("invalid extra root {raw:?}: {unreachable}"),
         };
-        ensure!(
-            is_workspace(&resolved),
-            "invalid extra root {raw:?}: \
-             `/`, the home directory, and their ancestors cannot be workspace roots"
-        );
         Ok(Self {
             resolved,
             spelled: lexical_normalize(&spelled),
@@ -165,11 +157,7 @@ impl Workspace {
         let resolved = resolve(cwd).ok();
         Self {
             cwd: cwd.to_path_buf(),
-            roots: resolved
-                .clone()
-                .filter(|cwd| is_workspace(cwd))
-                .into_iter()
-                .collect(),
+            roots: resolved.clone().into_iter().collect(),
             anchors: vec![Anchor {
                 resolved: resolved.unwrap_or_else(|| cwd.to_path_buf()),
                 spelled: lexical_normalize(cwd),
@@ -186,15 +174,13 @@ impl Workspace {
         Ok(Self::with_roots(cwd, roots))
     }
 
-    /// The workspace launched in `cwd`, adding validated roots only when `cwd` permits roots.
+    /// The workspace launched in `cwd` with additional rule anchors.
     pub(crate) fn with_roots(cwd: &Path, extra_roots: Vec<Anchor>) -> Self {
         let mut workspace = Self::new(cwd);
-        if !workspace.roots.is_empty() {
-            for root in extra_roots {
-                if !workspace.roots.contains(&root.resolved) {
-                    workspace.roots.push(root.resolved.clone());
-                    workspace.anchors.push(root);
-                }
+        for root in extra_roots {
+            if !workspace.roots.contains(&root.resolved) {
+                workspace.roots.push(root.resolved.clone());
+                workspace.anchors.push(root);
             }
         }
         workspace
@@ -213,11 +199,6 @@ impl Workspace {
         &self.roots
     }
 
-    /// Returns whether the resolved `path` sits inside one of the roots.
-    fn contains(&self, path: &Path) -> bool {
-        self.roots.iter().any(|root| path.starts_with(root))
-    }
-
     /// Every spelling of `path` relative to an anchor directory in either of its spellings, with
     /// names compared by [`fold_name`].
     fn loose_rooted(&self, path: &Path, aliases: &mut DirectoryAliases) -> Vec<String> {
@@ -231,16 +212,6 @@ impl Workspace {
 
 // ── Target ──
 
-/// Whether a path target sits where an edit needs no rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Zone {
-    /// Inside a [`Workspace`] root, so an edit allows without a rule unless an ask rule, such as a
-    /// built-in protected name, holds it.
-    Workspace,
-    /// Anywhere else, so an edit needs an allow rule.
-    Outside,
-}
-
 /// What a tool call accesses, matched against rule patterns, which [`crate::tool::Tool::prepare`]
 /// resolves from its input once so the gate checks and the run act on the same values.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -253,16 +224,14 @@ pub(crate) enum Access {
 }
 
 impl Access {
-    /// Parses a `bash` command, resolving the files it reads and writes in `workspace`.
-    pub(crate) fn for_command(command: &str, workspace: &Workspace) -> Self {
-        Self::Command(CommandTarget::parse(command, workspace))
+    /// Parses a `bash` command for explicit exec rules.
+    pub(crate) fn for_command(command: &str) -> Self {
+        Self::Command(CommandTarget::parse(command))
     }
 
     /// Builds a path target for the location the tool will touch, resolving `path` against the
-    /// workspace's cwd with `resolve`. A path `resolve` cannot place keeps its joined spelling with
-    /// no rooted forms, so it never auto-allows. The tool follows native filesystem behavior. A
-    /// resolved path that is not valid UTF-8 never auto-allows either, since rules match it only by
-    /// its lossy spelling.
+    /// workspace's cwd with `resolve`. A path `resolve` cannot place keeps its joined spelling.
+    /// Non-UTF-8 paths retain their exact spelling for the tool and a lossy spelling for rules.
     pub(crate) fn for_path(path: impl AsRef<Path>, workspace: &Workspace) -> Self {
         Self::Path(PathResolver::new(workspace).resolve(path))
     }
@@ -280,8 +249,8 @@ impl Access {
 /// resolved path is not a substring of the input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PathTarget {
-    /// Where the call lands with every symlink followed. Allow rules, the zone, and the tool's run
-    /// use this spelling alone.
+    /// Where the call lands with every symlink followed. Allow rules and the tool's run use this
+    /// spelling alone.
     pub(crate) canonical: String,
     /// `canonical` as the file system names it, kept only when a name in it is not valid UTF-8,
     /// which `canonical` spells with replacement characters.
@@ -295,7 +264,6 @@ pub(crate) struct PathTarget {
     /// Either spelling relative to either spelling of each anchor directory, with names compared
     /// by [`fold_name`] so a case-variant prefix still counts. Only deny and ask rules match these.
     deny_rooted: Vec<String>,
-    pub(crate) zone: Zone,
 }
 
 impl PathTarget {
@@ -342,15 +310,9 @@ impl<'a> PathResolver<'a> {
             .collect();
         deny_rooted.sort();
         deny_rooted.dedup();
-        let in_root = resolved.as_deref().is_some_and(|r| workspace.contains(r));
         let canonical = resolved.unwrap_or(joined);
 
         let lossy = canonical.to_str().is_none();
-        let zone = if in_root && !lossy && !is_hard_linked(&canonical) {
-            Zone::Workspace
-        } else {
-            Zone::Outside
-        };
         PathTarget {
             canonical: canonical.to_string_lossy().into_owned(),
             exact: lossy.then_some(canonical),
@@ -358,7 +320,6 @@ impl<'a> PathResolver<'a> {
             rooted,
             requested: requested.to_string_lossy().into_owned(),
             deny_rooted,
-            zone,
         }
     }
 }
@@ -673,45 +634,6 @@ fn fold_name(name: &str) -> String {
         .to_owned()
 }
 
-/// Returns whether the resolved `dir` may be a workspace root, whose contents auto-allow edits.
-/// `/`, `$HOME`, and the ancestors of `$HOME` may not, since their insides span every dotfile.
-fn is_workspace(dir: &Path) -> bool {
-    let home = std::env::home_dir().map(|home| resolve(&home).unwrap_or(home));
-    dir.parent().is_some() && !home.is_some_and(|home| holds(dir, &home))
-}
-
-/// Returns whether `dir` is `home` or an ancestor of it, compared by identity as well as by
-/// spelling. An alias that `resolve` keeps, such as macOS's case-insensitive `/users/<name>` or the
-/// `/System/Volumes/Data` firmlink, reaches `home` through the same trailing names.
-fn holds(dir: &Path, home: &Path) -> bool {
-    home.starts_with(dir)
-        || home.ancestors().any(|ancestor| {
-            home.strip_prefix(ancestor)
-                .is_ok_and(|rest| same_file::is_same_file(dir.join(rest), home).unwrap_or(false))
-        })
-}
-
-/// Returns whether `path` is a regular file with more than one hard link, one of which may sit
-/// outside the workspace.
-fn is_hard_linked(path: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file() && meta.nlink() > 1)
-    }
-    // std's link count is unstable on Windows, and a zero access mode is enough to query a handle.
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
-            && std::fs::OpenOptions::new()
-                .access_mode(0)
-                .open(path)
-                .and_then(winapi_util::file::information)
-                .is_ok_and(|info| info.number_of_links() > 1)
-    }
-}
-
 // ── Decision ──
 
 /// The pipeline's verdict for one call. `Ask` goes to the frontend, which answers it (the gate
@@ -747,12 +669,8 @@ pub enum Basis {
     Internal,
     /// The mode: `plan` denying an edit, exec, or net call, or settling a call no rule does.
     Mode(Mode),
-    /// An allowed command, by what let each of its simple commands and its writes through.
+    /// The rules allowing each simple command.
     Command(Vec<Basis>),
-    /// A command holding `construct`, which the analysis does not recognize, so no allow rule
-    /// covers it. `manual` asks, and `yolo` runs it unless a deny or configured ask rule holds what
-    /// ox sees.
-    Unrecognized { construct: String },
 }
 
 impl Basis {
@@ -762,9 +680,6 @@ impl Basis {
         match self {
             Self::Mode(_) => None,
             Self::Classifier { reason } => Some(reason.clone()),
-            Self::Unrecognized { .. } => Some(format!(
-                "Asks because of {self}, so no permission rule can allow this command"
-            )),
             basis => Some(format!("Asks because of {basis}")),
         }
     }
@@ -799,21 +714,7 @@ impl fmt::Display for Basis {
                 }
                 Ok(())
             }
-            Self::Unrecognized { construct } => {
-                write!(f, "{}, which ox cannot analyze", code_span(construct))
-            }
         }
-    }
-}
-
-/// `text` as a Markdown code span, fenced past its longest backtick run and padded if it has one.
-fn code_span(text: &str) -> String {
-    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-    let fence = "`".repeat(longest + 1);
-    if longest > 0 {
-        format!("{fence} {text} {fence}")
-    } else {
-        format!("{fence}{text}{fence}")
     }
 }
 
@@ -845,17 +746,6 @@ impl TierRule {
     /// Returns whether this rule holds back a call in `class` with `target`.
     fn matches(&self, class: PermissionClass, target: &Access) -> bool {
         self.rule.matches(class, target, self.discipline())
-    }
-
-    /// Returns whether this rule holds back an access of `path` in `class`.
-    fn matches_path(&self, class: PermissionClass, path: &PathTarget) -> bool {
-        self.rule.matches_path(class, path, self.discipline())
-    }
-
-    /// Returns whether this `read` rule may hold a read of `path`, or of a file below it when
-    /// `recursive`.
-    fn holds_read(&self, path: &PathTarget, recursive: bool) -> bool {
-        self.rule.holds_read(path, recursive, &self.bases)
     }
 
     fn discipline(&self) -> MatchDiscipline<'_> {
@@ -994,14 +884,9 @@ impl Policy {
     /// Order, stopping at the first match:
     /// 1. A deny rule denies, in every mode.
     /// 2. `plan` denies an edit, exec, or net call.
-    /// 3. A configured ask rule or possible-read hold asks.
-    /// 4. An allow rule or a session allow rule allows.
+    /// 3. A configured ask rule asks.
+    /// 4. An internal read operation, allow rule, or session allow rule allows.
     /// 5. `auto` classifies, `manual` asks, and `yolo` or a read-only `plan` call allows.
-    ///
-    /// A `bash` command is denied when a deny rule matches one of its simple commands, an edit of a
-    /// file it writes, or a read of a file it reads for certain, such as an input redirection or a
-    /// reader's literal file argument. It asks at step 3 in each case [`Self::asks`] lists, and
-    /// step 4 allows it only when the analysis recognizes it and [`Self::allows_command`] holds.
     ///
     /// A call that would ask is [unapproved](Decision::Unapproved) in a run nobody attends.
     pub(crate) fn verdict(&self, class: PermissionClass, target: &Access) -> Verdict {
@@ -1018,7 +903,7 @@ impl Policy {
     /// The verdict of the pipeline [`Self::verdict`] lists, as if a person attended the run.
     fn settle(&self, class: PermissionClass, target: &Access) -> Verdict {
         let verdict = |decision, basis| Verdict { decision, basis };
-        if let Some(rule) = held_by(&self.deny.iter(), class, target) {
+        if let Some(rule) = held_by(&self.deny, class, target) {
             return verdict(Decision::Deny, rule.basis(Tier::Deny));
         }
 
@@ -1026,11 +911,8 @@ impl Policy {
             return verdict(Decision::Deny, Basis::Mode(self.mode));
         }
 
-        if let Some(rule) = held_by(&self.ask.iter(), class, target) {
+        if let Some(rule) = held_by(&self.ask, class, target) {
             return verdict(Decision::Ask, rule.basis(Tier::Ask));
-        }
-        if let Some(basis) = self.asks(target) {
-            return verdict(Decision::Ask, basis);
         }
 
         if class == PermissionClass::Read && matches!(target, Access::None) {
@@ -1049,43 +931,6 @@ impl Policy {
         verdict(fallback, Basis::Mode(self.mode))
     }
 
-    /// The configured read rule that may match a file a command reads.
-    fn asks(&self, target: &Access) -> Option<Basis> {
-        let Access::Command(command) = target else {
-            return None;
-        };
-        command
-            .segments()
-            .iter()
-            .find_map(|segment| self.possible_read_holder(segment))
-    }
-
-    /// The first deny or ask `read` rule that may match a file `segment` may read beyond those the
-    /// command reads for certain, or the first such rule when the segment may read any file.
-    fn possible_read_holder(&self, segment: &Segment) -> Option<Basis> {
-        let rules = self
-            .deny
-            .iter()
-            .map(|rule| (rule, Tier::Deny))
-            .chain(self.ask.iter().map(|rule| (rule, Tier::Ask)))
-            .filter(|(rule, _)| rule.rule.class() == PermissionClass::Read);
-        segment
-            .reads()
-            .iter()
-            .find_map(|read| {
-                rules
-                    .clone()
-                    .find(|(entry, _)| entry.holds_read(&read.path, read.recursive))
-            })
-            .or_else(|| {
-                segment
-                    .reads_anything()
-                    .then(|| rules.clone().next())
-                    .flatten()
-            })
-            .map(|(rule, tier)| rule.basis(tier))
-    }
-
     /// The allow rule or session allow rule that matches the call, or for a command what lets each
     /// of its parts through.
     fn allows(&self, class: PermissionClass, target: &Access) -> Option<Basis> {
@@ -1095,24 +940,21 @@ impl Policy {
         }
     }
 
-    /// The allow rules covering every simple command and file write in a recognized command.
+    /// The allow rules covering every simple command in a recognized command.
     fn allows_command(&self, command: &CommandTarget) -> Option<Basis> {
-        if command.unrecognized().is_some() || command.segments().is_empty() {
+        if let Some(basis) =
+            self.allow_rule(|rule| rule.class() == PermissionClass::Exec && rule.pattern() == "*")
+        {
+            return Some(basis);
+        }
+        if !command.is_complete() || command.segments().is_empty() {
             return None;
         }
         let segments = command
             .segments()
             .iter()
             .map(|segment| self.allow_rule(|rule| rule.allows(segment)));
-        let writes = command.writes().iter().map(|write| {
-            self.allow_rule(|rule| {
-                rule.matches_path(PermissionClass::Edit, write, MatchDiscipline::Allow)
-            })
-        });
-        segments
-            .chain(writes)
-            .collect::<Option<Vec<_>>>()
-            .map(Basis::Command)
+        segments.collect::<Option<Vec<_>>>().map(Basis::Command)
     }
 
     /// The first allow rule, then the first session allow rule, that `accepts`.
@@ -1133,33 +975,13 @@ impl Policy {
     }
 }
 
-/// The first of the deny or ask `rules` that matches the call, or, for a command, an edit of a file
-/// it writes or a read of a file it reads for certain.
+/// The first deny or ask rule that matches the call.
 fn held_by<'a>(
-    rules: &(impl Iterator<Item = &'a TierRule> + Clone),
+    rules: &'a [TierRule],
     class: PermissionClass,
     target: &Access,
 ) -> Option<&'a TierRule> {
-    rules
-        .clone()
-        .find(|entry| entry.matches(class, target))
-        .or_else(|| {
-            let Access::Command(command) = target else {
-                return None;
-            };
-            let path_held_by =
-                |class, path| rules.clone().find(|entry| entry.matches_path(class, path));
-            command
-                .writes()
-                .iter()
-                .find_map(|write| path_held_by(PermissionClass::Edit, write))
-                .or_else(|| {
-                    command
-                        .reads()
-                        .iter()
-                        .find_map(|read| path_held_by(PermissionClass::Read, read))
-                })
-        })
+    rules.iter().find(|entry| entry.matches(class, target))
 }
 
 /// An approval's "allow for this session" offer: the suggested rule, plus the call that any edit of
@@ -1287,7 +1109,6 @@ impl WalkFilter {
             relative: None,
             rooted: Vec::new(),
             deny_rooted,
-            zone: Zone::Outside,
         };
         self.rules.iter().any(|entry| {
             let discipline = MatchDiscipline::Deny(Prefixes::Walk(&entry.bases));
@@ -1309,17 +1130,12 @@ struct WalkRule {
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
-    use std::path::Path;
-
-    use super::{Access, PermissionClass, Policy, SessionGrant, Workspace};
+    use super::{Access, PermissionClass, Policy, SessionGrant};
 
     /// The session grant the default policy offers for running `command` in `/repo`.
     pub fn exec_grant(command: &str) -> SessionGrant {
         Policy::default()
-            .session_grant(
-                PermissionClass::Exec,
-                &Access::for_command(command, &Workspace::new(Path::new("/repo"))),
-            )
+            .session_grant(PermissionClass::Exec, &Access::for_command(command))
             .expect("the default policy offers a grant for the command")
     }
 }
@@ -1372,11 +1188,11 @@ mod tests {
     }
 
     fn command(s: &str) -> Access {
-        Access::for_command(s, &Workspace::new(Path::new("/repo")))
+        Access::for_command(s)
     }
 
     /// A path target at `canonical`, spelled the same way, rooted at `relative` when given.
-    fn path(canonical: &str, relative: Option<&str>, zone: Zone) -> Access {
+    fn path(canonical: &str, relative: Option<&str>) -> Access {
         let rooted: Vec<String> = relative.map(str::to_owned).into_iter().collect();
         Access::Path(PathTarget {
             canonical: canonical.to_owned(),
@@ -1385,42 +1201,28 @@ mod tests {
             rooted: rooted.clone(),
             requested: canonical.to_owned(),
             deny_rooted: rooted,
-            zone,
         })
     }
 
     fn workspace(canonical: &str, relative: &str) -> Access {
-        path(canonical, Some(relative), Zone::Workspace)
+        path(canonical, Some(relative))
     }
 
     fn outside(canonical: &str) -> Access {
-        path(canonical, None, Zone::Outside)
-    }
-
-    /// How `policy` settles running `command` in `workspace`.
-    fn decide_command(policy: &Policy, command: &str, workspace: &Workspace) -> Decision {
-        policy.decide(
-            PermissionClass::Exec,
-            &Access::for_command(command, workspace),
-        )
+        path(canonical, None)
     }
 
     /// The canonical and relative spellings as paths, which compare equal across separators.
-    fn resolved(target: &Access) -> (&Path, Option<&Path>, Zone) {
+    fn resolved(target: &Access) -> (&Path, Option<&Path>) {
         let Access::Path(PathTarget {
             canonical,
             relative,
-            zone,
             ..
         }) = target
         else {
             panic!("expected a path target, got {target:?}");
         };
-        (
-            Path::new(canonical),
-            relative.as_deref().map(Path::new),
-            *zone,
-        )
+        (Path::new(canonical), relative.as_deref().map(Path::new))
     }
 
     fn rule_basis(tier: Tier, class: PermissionClass, pattern: &str) -> Basis {
@@ -1495,37 +1297,15 @@ mod tests {
             }
 
             #[test]
-            fn rejects_a_relative_or_too_broad_extra_root() {
-                let base_dir = canonical_tempdir();
-                let base = base_dir.path();
-                let (repo, home) = (base.join("repo"), base.join("home"));
-                std::fs::create_dir(&repo).unwrap();
-                std::fs::create_dir(&home).unwrap();
-                let too_broad = |raw: &str| {
-                    format!(
-                        "invalid extra root {raw:?}: \
-                         `/`, the home directory, and their ancestors cannot be workspace roots"
-                    )
-                };
-                let fs_root = slash_separated(base.ancestors().last().unwrap());
-                let base_raw = slash_separated(base);
-                let home_raw = slash_separated(&home);
+            fn requires_an_absolute_or_tilde_extra_root() {
+                let repo = canonical_tempdir();
 
-                temp_env::with_var(HOME_VAR, Some(&home), || {
-                    for (raw, expected) in [
-                        (
-                            "shared",
-                            r#"invalid extra root "shared": expected an absolute or `~/` path"#
-                                .to_owned(),
-                        ),
-                        (home_raw.as_str(), too_broad(&home_raw)),
-                        (fs_root.as_str(), too_broad(&fs_root)),
-                        (base_raw.as_str(), too_broad(&base_raw)),
-                    ] {
-                        let err = Workspace::resolve(&repo, &[raw.to_owned()]).unwrap_err();
-                        assert_eq!(format!("{err:#}"), expected, "{raw}");
-                    }
-                });
+                let err = Workspace::resolve(repo.path(), &["shared".to_owned()]).unwrap_err();
+
+                assert_eq!(
+                    format!("{err:#}"),
+                    r#"invalid extra root "shared": expected an absolute or `~/` path"#
+                );
             }
 
             #[test]
@@ -1567,56 +1347,55 @@ mod tests {
             }
 
             #[test]
-            fn has_no_roots_when_launched_from_home() {
-                // A launch from `$HOME` drops every root, so a configured extra root cannot
-                // auto-allow edits outside any project. Each extra root must still be valid.
-                let base_dir = canonical_tempdir();
-                let base = base_dir.path();
-                let (home, shared) = (base.join("home"), base.join("shared"));
+            fn keeps_explicit_extra_roots_when_launched_from_home() {
+                let dir = canonical_tempdir();
+                let home = dir.path().join("home");
+                let shared = dir.path().join("shared");
                 std::fs::create_dir(&home).unwrap();
                 std::fs::create_dir(&shared).unwrap();
 
                 temp_env::with_var(HOME_VAR, Some(&home), || {
                     let workspace = Workspace::resolve(&home, &[slash_separated(&shared)]).unwrap();
-                    assert_eq!(workspace.roots(), [] as [PathBuf; 0]);
-                    assert_eq!(workspace.anchors.len(), 1, "the cwd still anchors patterns");
-                    let target =
-                        Access::for_path(shared.join("a.rs").to_str().unwrap(), &workspace);
-                    assert_eq!(resolved(&target).2, Zone::Outside);
+                    let p = policy_in(Mode::Manual, &[], &[], &[(READ, "./docs/**")], &workspace);
+                    let target = Access::for_path(shared.join("docs/notes.md"), &workspace);
 
-                    let err = Workspace::resolve(&home, &["shared".to_owned()]).unwrap_err();
-                    assert_eq!(
-                        format!("{err:#}"),
-                        r#"invalid extra root "shared": expected an absolute or `~/` path"#,
-                    );
+                    assert_eq!(p.decide(READ, &target), Decision::Allow);
+                    assert_eq!(workspace.roots(), [home.clone(), shared.clone()]);
                 });
             }
 
             #[test]
-            fn rejects_home_and_its_parent_under_another_name() {
-                // A symlink to `$HOME` resolves to it. An alias `resolve` keeps, such as `up` here,
-                // still reaches `$HOME` through the trailing names, so it is caught too.
-                let base_dir = canonical_tempdir();
-                let base = base_dir.path();
-                let (repo, home) = (base.join("repo"), base.join("home"));
-                std::fs::create_dir(&repo).unwrap();
+            fn explicit_home_root_and_ancestor_anchors_match_configured_path_rules() {
+                let dir = canonical_tempdir();
+                let base = dir.path();
+                let home = base.join("home");
+                let repo = base.join("repo");
                 std::fs::create_dir(&home).unwrap();
-                symlink_dir(&home, &base.join("home-link"));
-                symlink_dir(base, &base.join("up"));
-                let link = slash_separated(&base.join("home-link"));
+                std::fs::create_dir(&repo).unwrap();
+                let home_link = base.join("home-link");
+                symlink_dir(&home, &home_link);
+                let fs_root = base.ancestors().last().unwrap();
 
                 temp_env::with_var(HOME_VAR, Some(&home), || {
-                    let err = Workspace::resolve(&repo, std::slice::from_ref(&link)).unwrap_err();
-                    assert_eq!(
-                        err.to_string(),
-                        format!(
-                            "invalid extra root {link:?}: \
-                             `/`, the home directory, and their ancestors cannot be workspace roots"
-                        ),
-                    );
-                    assert!(!is_workspace(&base.join("up")));
-                    assert!(!is_workspace(&base.join("up/home")));
-                    assert!(is_workspace(&base.join("up/repo")));
+                    for (raw, root) in [
+                        (slash_separated(&home), home.as_path()),
+                        ("~/".to_owned(), home.as_path()),
+                        (slash_separated(base), base),
+                        (slash_separated(fs_root), fs_root),
+                        (slash_separated(&home_link), home.as_path()),
+                    ] {
+                        let workspace =
+                            Workspace::resolve(&repo, std::slice::from_ref(&raw)).unwrap();
+                        let p =
+                            policy_in(Mode::Manual, &[], &[], &[(READ, "./docs/**")], &workspace);
+                        let target = Access::for_path(root.join("docs/notes.md"), &workspace);
+
+                        assert_eq!(p.decide(READ, &target), Decision::Allow, "{raw}");
+                        assert!(
+                            workspace.roots().iter().any(|anchor| anchor == root),
+                            "{raw}"
+                        );
+                    }
                 });
             }
         }
@@ -1625,42 +1404,11 @@ mod tests {
     mod access {
         use super::*;
 
-        mod for_command {
-            use super::*;
-
-            #[test]
-            fn reads_a_quoted_tilde_under_the_cwd_as_bash_does() {
-                let base_dir = canonical_tempdir();
-                let root = base_dir.path().to_path_buf();
-                let (cwd, home) = (root.join("repo"), root.join("home"));
-                std::fs::create_dir_all(cwd.join("~")).unwrap();
-                std::fs::create_dir(&home).unwrap();
-                std::fs::write(cwd.join(".env"), "").unwrap();
-
-                temp_env::with_var(HOME_VAR, Some(&home), || {
-                    let workspace = Workspace::new(&cwd);
-                    let policy = Policy::resolve(
-                        Mode::Manual,
-                        rules(&[(READ, ".env")]),
-                        Vec::new(),
-                        Vec::new(),
-                        &workspace,
-                    );
-                    let run = |command: &str| {
-                        policy.decide(EXEC, &Access::for_command(command, &workspace))
-                    };
-
-                    assert_eq!(run(r#"cat "~/../.env""#), Decision::Deny);
-                    assert_eq!(run(r#"cat < "~/../.env""#), Decision::Deny);
-                });
-            }
-        }
-
         mod for_path {
             use super::*;
 
             #[test]
-            fn inside_an_extra_root_is_a_workspace_target_rooted_there() {
+            fn inside_an_extra_root_is_rooted_there() {
                 let base_dir = canonical_tempdir();
                 let base = base_dir.path();
                 let (repo, shared) = (base.join("repo"), base.join("shared"));
@@ -1668,16 +1416,16 @@ mod tests {
                 std::fs::create_dir(&shared).unwrap();
                 let workspace = Workspace::resolve(&repo, &[slash_separated(&shared)]).unwrap();
 
-                for (raw, zone, rooted) in [
-                    ("../shared/a.rs", Zone::Workspace, &["a.rs"][..]),
-                    ("../shared/.git/config", Zone::Workspace, &[".git/config"]),
-                    ("../elsewhere/a.rs", Zone::Outside, &[]),
+                for (raw, rooted) in [
+                    ("../shared/a.rs", &["a.rs"][..]),
+                    ("../shared/.git/config", &[".git/config"]),
+                    ("../elsewhere/a.rs", &[]),
                 ] {
                     let target = Access::for_path(raw, &workspace);
-                    let (canonical, relative, actual) = resolved(&target);
+                    let (canonical, relative) = resolved(&target);
                     assert_eq!(canonical, lexical_normalize(&repo.join(raw)), "{raw}");
                     assert_eq!(relative, None, "{raw}: outside the cwd");
-                    assert_eq!(actual, zone, "{raw}");
+
                     let Access::Path(PathTarget { rooted: actual, .. }) = &target else {
                         unreachable!();
                     };
@@ -1688,20 +1436,19 @@ mod tests {
             }
 
             #[test]
-            fn inside_cwd_is_a_workspace_target() {
+            fn inside_cwd_has_a_relative_pattern_target() {
                 let cwd_dir = canonical_tempdir();
                 let cwd = cwd_dir.path();
                 std::fs::write(cwd.join("a.rs"), "x").unwrap();
 
                 let target = Access::for_path("a.rs", &Workspace::new(cwd));
-                let (canonical, relative, zone) = resolved(&target);
+                let (canonical, relative) = resolved(&target);
                 assert_eq!(canonical, cwd.join("a.rs"));
                 assert_eq!(relative, Some(Path::new("a.rs")));
-                assert_eq!(zone, Zone::Workspace);
             }
 
             #[test]
-            fn brand_new_file_is_still_a_workspace_target() {
+            fn brand_new_file_keeps_its_cwd_relative_path() {
                 // A new file cannot canonicalize, but its missing tail still lands inside cwd.
                 let cwd_dir = canonical_tempdir();
                 let cwd = cwd_dir.path();
@@ -1711,7 +1458,6 @@ mod tests {
                     (
                         cwd.join("new/file.rs").as_path(),
                         Some(Path::new("new/file.rs")),
-                        Zone::Workspace,
                     ),
                 );
             }
@@ -1721,8 +1467,8 @@ mod tests {
                 let cwd_dir = canonical_tempdir();
                 let cwd = cwd_dir.path();
                 let target = Access::for_path("/etc/hosts", &Workspace::new(cwd));
-                let (_, relative, zone) = resolved(&target);
-                assert_eq!((relative, zone), (None, Zone::Outside));
+                let (_, relative) = resolved(&target);
+                assert_eq!(relative, None);
             }
 
             #[test]
@@ -1738,77 +1484,46 @@ mod tests {
                     let target = Access::for_path(raw, &Workspace::new(&cwd));
                     assert_eq!(
                         resolved(&target),
-                        (root.join("escape.rs").as_path(), None, Zone::Outside),
+                        (root.join("escape.rs").as_path(), None),
                         "{raw}",
                     );
                 }
             }
 
             #[test]
-            fn cwd_containing_home_is_not_a_workspace() {
-                // Launched from `$HOME` or any ancestor of it, "inside cwd" spans every dotfile, so
-                // edits there must not auto-allow. Anchored patterns still see the path.
-                let root_dir = canonical_tempdir();
-                let root = root_dir.path();
-                let home = root.join("home");
-                std::fs::create_dir(&home).unwrap();
-                let fs_root = root.ancestors().last().unwrap();
-
-                temp_env::with_var(HOME_VAR, Some(&home), || {
-                    for cwd in [home.as_path(), root, fs_root] {
-                        let target = Access::for_path("notes.md", &Workspace::new(cwd));
-                        let (_, relative, zone) = resolved(&target);
-                        assert_eq!(relative, Some(Path::new("notes.md")), "{cwd:?}");
-                        assert_eq!(zone, Zone::Outside, "{cwd:?}");
-                    }
-
-                    let project = home.join("project");
-                    std::fs::create_dir(&project).unwrap();
-                    let target = Access::for_path("notes.md", &Workspace::new(&project));
-                    assert_eq!(resolved(&target).2, Zone::Workspace);
-                });
-            }
-
-            #[test]
-            fn with_a_non_absolute_cwd_is_not_a_workspace_target() {
+            fn non_absolute_cwd_has_no_relative_pattern_target() {
                 // An empty cwd has no root, and `strip_prefix("")` succeeds for any path, so the
                 // target must get no cwd-relative form either.
                 let target = Access::for_path("a.rs", &Workspace::new(Path::new("")));
-                let (_, relative, zone) = resolved(&target);
-                assert_eq!((relative, zone), (None, Zone::Outside));
+                let (_, relative) = resolved(&target);
+                assert_eq!(relative, None);
             }
 
             #[test]
             fn relative_cwd_parent_traversal_preserves_permission_decisions() {
-                // With `$HOME` at `../..`, the spellings cover a workspace and a non-workspace cwd.
                 let policy = policy(Mode::Manual, &[], &[], &[(EDIT, "src/**")]);
                 let absolute_cwd = std::env::current_dir().unwrap();
-                let home = dunce::canonicalize(absolute_cwd.join("../..")).unwrap();
-                temp_env::with_var(HOME_VAR, Some(&home), || {
-                    for cwd in ["..", "../..", "missing/../.."] {
-                        for raw in ["notes.md", ".git/config", "src/a.rs"] {
-                            let target = Access::for_path(raw, &Workspace::new(Path::new(cwd)));
-                            let absolute =
-                                Access::for_path(raw, &Workspace::new(&absolute_cwd.join(cwd)));
-                            let (_, relative, zone) = resolved(&target);
-                            let (_, absolute_relative, absolute_zone) = resolved(&absolute);
-                            assert_eq!(
-                                (relative, zone),
-                                (absolute_relative, absolute_zone),
-                                "{cwd:?}/{raw}",
-                            );
-                            assert_eq!(
-                                policy.decide(EDIT, &target),
-                                policy.decide(EDIT, &absolute),
-                                "{cwd:?}/{raw}",
-                            );
-                        }
+
+                for cwd in ["..", "../..", "missing/../.."] {
+                    for raw in ["notes.md", ".git/config", "src/a.rs"] {
+                        let target = Access::for_path(raw, &Workspace::new(Path::new(cwd)));
+                        let absolute =
+                            Access::for_path(raw, &Workspace::new(&absolute_cwd.join(cwd)));
+                        let (_, relative) = resolved(&target);
+                        let (_, absolute_relative) = resolved(&absolute);
+
+                        assert_eq!(relative, absolute_relative, "{cwd:?}/{raw}");
+                        assert_eq!(
+                            policy.decide(EDIT, &target),
+                            policy.decide(EDIT, &absolute),
+                            "{cwd:?}/{raw}",
+                        );
                     }
-                });
+                }
             }
 
             #[test]
-            fn deep_existing_file_stays_a_workspace_target() {
+            fn deep_existing_file_keeps_its_cwd_relative_path() {
                 // Windows canonicalizes a path past 260 chars to a `\\?\` spelling the cwd lacks.
                 let cwd_dir = canonical_tempdir();
                 let cwd = cwd_dir.path();
@@ -1822,32 +1537,7 @@ mod tests {
                         file.to_str().unwrap(),
                         &Workspace::new(cwd)
                     )),
-                    (&*cwd.join(&file), Some(&*file), Zone::Workspace),
-                );
-            }
-
-            #[test]
-            fn hard_linked_file_is_not_a_workspace_target() {
-                // The second link sits outside cwd, so an edit through `a.rs` would change it too.
-                let cwd_dir = canonical_tempdir();
-                let cwd = cwd_dir.path();
-                let outside_dir = canonical_tempdir();
-                let outside = outside_dir.path();
-                std::fs::write(outside.join("a.rs"), "x").unwrap();
-                std::fs::hard_link(outside.join("a.rs"), cwd.join("a.rs")).unwrap();
-                std::fs::write(cwd.join("b.rs"), "x").unwrap();
-
-                assert_eq!(
-                    resolved(&Access::for_path("a.rs", &Workspace::new(cwd))),
-                    (
-                        cwd.join("a.rs").as_path(),
-                        Some(Path::new("a.rs")),
-                        Zone::Outside
-                    ),
-                );
-                assert_eq!(
-                    resolved(&Access::for_path("b.rs", &Workspace::new(cwd))).2,
-                    Zone::Workspace
+                    (&*cwd.join(&file), Some(&*file)),
                 );
             }
 
@@ -1860,10 +1550,7 @@ mod tests {
                 symlink_dir(outside, &cwd.join("link"));
 
                 let target = Access::for_path("link/new.rs", &Workspace::new(cwd));
-                assert_eq!(
-                    resolved(&target),
-                    (outside.join("new.rs").as_path(), None, Zone::Outside),
-                );
+                assert_eq!(resolved(&target), (outside.join("new.rs").as_path(), None),);
             }
 
             #[test]
@@ -1877,10 +1564,7 @@ mod tests {
                 symlink_file(Path::new("../escape.txt"), &cwd.join("notes.md"));
 
                 let target = Access::for_path("notes.md", &Workspace::new(&cwd));
-                assert_eq!(
-                    resolved(&target),
-                    (root.join("escape.txt").as_path(), None, Zone::Outside),
-                );
+                assert_eq!(resolved(&target), (root.join("escape.txt").as_path(), None),);
             }
 
             #[test]
@@ -1898,11 +1582,7 @@ mod tests {
                 let target = Access::for_path("out/new.rs", &Workspace::new(&cwd));
                 assert_eq!(
                     resolved(&target),
-                    (
-                        root.join("elsewhere/dir/new.rs").as_path(),
-                        None,
-                        Zone::Outside,
-                    ),
+                    (root.join("elsewhere/dir/new.rs").as_path(), None,),
                 );
             }
 
@@ -1919,10 +1599,7 @@ mod tests {
                 symlink_dir(&cwd.join(".git/hooks"), &cwd.join("tools"));
 
                 let target = Access::for_path("missing/../link/x", &Workspace::new(cwd));
-                assert_eq!(
-                    resolved(&target),
-                    (outside.join("x").as_path(), None, Zone::Outside),
-                );
+                assert_eq!(resolved(&target), (outside.join("x").as_path(), None),);
 
                 let target = Access::for_path("x/../tools/pre-commit", &Workspace::new(cwd));
                 let p = policy_in(
@@ -1945,22 +1622,19 @@ mod tests {
                 symlink_file(Path::new("missing/../out/new"), &cwd.join("notes.md"));
 
                 let target = Access::for_path("notes.md", &Workspace::new(cwd));
-                assert_eq!(
-                    resolved(&target),
-                    (outside.join("new").as_path(), None, Zone::Outside),
-                );
+                assert_eq!(resolved(&target), (outside.join("new").as_path(), None),);
             }
 
             #[test]
-            fn symlink_loop_never_auto_allows() {
+            fn symlink_loop_has_no_relative_pattern_target() {
                 let cwd_dir = canonical_tempdir();
                 let cwd = cwd_dir.path();
                 symlink_file(Path::new("b"), &cwd.join("a"));
                 symlink_file(Path::new("a"), &cwd.join("b"));
 
                 let target = Access::for_path("a/new.rs", &Workspace::new(cwd));
-                let (_, relative, zone) = resolved(&target);
-                assert_eq!((relative, zone), (None, Zone::Outside));
+                let (_, relative) = resolved(&target);
+                assert_eq!(relative, None);
             }
 
             #[test]
@@ -1975,18 +1649,14 @@ mod tests {
                 ] {
                     let target = Access::for_path(path.to_str().unwrap(), &Workspace::new(cwd));
 
-                    assert_eq!(
-                        resolved(&target),
-                        (&*cwd.join(&path), None, Zone::Outside),
-                        "{path:?}",
-                    );
+                    assert_eq!(resolved(&target), (&*cwd.join(&path), None), "{path:?}");
                 }
             }
 
             // A Unix name is raw bytes, so only there can one fail to be UTF-8, as `caf\xe9` does.
             #[cfg(unix)]
             #[test]
-            fn resolving_to_a_name_that_is_not_utf8_never_auto_allows() {
+            fn preserves_non_utf8_paths_and_their_lossy_pattern_spellings() {
                 use std::ffi::OsStr;
                 use std::os::unix::ffi::OsStrExt as _;
                 let base_dir = canonical_tempdir();
@@ -1996,20 +1666,18 @@ mod tests {
                 let target = Access::for_path("notes.md", &Workspace::new(&cwd));
 
                 assert_eq!(target.resolved(), Some(cwd.join("notes.md")));
-                let (canonical, _, zone) = resolved(&target);
+                let (canonical, _) = resolved(&target);
                 assert_eq!(
                     canonical,
                     Path::new(&*cwd.join("notes.md").to_string_lossy())
                 );
-                assert_eq!(zone, Zone::Outside);
             }
 
             // Windows drops `..` lexically before a lookup, so only Unix stops at a file before it.
             #[cfg(unix)]
             #[test]
             fn dot_dot_past_a_file_is_not_resolved_lexically() {
-                // The kernel cannot step back out of the file `notes`, so the target keeps its
-                // spelling and never auto-allows as `x` or `link/x`.
+                // The kernel cannot step back out of a file.
                 let cwd_dir = canonical_tempdir();
                 let cwd = cwd_dir.path();
                 let outside_dir = canonical_tempdir();
@@ -2020,11 +1688,7 @@ mod tests {
                 for path in ["notes/../x", "notes/sub/../../link/x"] {
                     let target = Access::for_path(path, &Workspace::new(cwd));
 
-                    assert_eq!(
-                        resolved(&target),
-                        (&*cwd.join(path), None, Zone::Outside),
-                        "{path}",
-                    );
+                    assert_eq!(resolved(&target), (&*cwd.join(path), None), "{path}");
                 }
             }
 
@@ -2040,7 +1704,7 @@ mod tests {
 
                 let target =
                     Access::for_path(r".git::$INDEX_ALLOCATION\config", &Workspace::new(cwd));
-                let (path, relative, _) = resolved(&target);
+                let (path, relative) = resolved(&target);
                 assert_eq!(path.as_os_str(), cwd.join(r".git\config").as_os_str());
                 assert_eq!(relative, Some(Path::new(r".git\config")));
                 let p = policy_in(
@@ -2053,7 +1717,7 @@ mod tests {
                 let target = Access::for_path(r"secrets-store\key::$DATA", &Workspace::new(cwd));
                 assert_eq!(p.decide(EDIT, &target), Decision::Deny);
 
-                // The home directory spelled with a stream suffix is still never a workspace.
+                // The stream suffix names the same home directory.
                 let home = cwd.join("home-directory");
                 std::fs::create_dir(&home).unwrap();
                 temp_env::with_var(HOME_VAR, Some(&home), || {
@@ -2061,11 +1725,7 @@ mod tests {
                     let target = Access::for_path("notes.md", &Workspace::new(&home_alias));
                     assert_eq!(
                         resolved(&target),
-                        (
-                            &*home.join("notes.md"),
-                            Some(Path::new("notes.md")),
-                            Zone::Outside
-                        ),
+                        (&*home.join("notes.md"), Some(Path::new("notes.md")),),
                     );
                 });
             }
@@ -2219,18 +1879,6 @@ mod tests {
                     Basis::Command(vec![Basis::Session(make)]),
                     "the session `allow.exec` pattern `make *`",
                 ),
-                (
-                    Basis::Unrecognized {
-                        construct: "$((1 + 2))".to_owned(),
-                    },
-                    "`$((1 + 2))`, which ox cannot analyze",
-                ),
-                (
-                    Basis::Unrecognized {
-                        construct: "echo `id`".to_owned(),
-                    },
-                    "`` echo `id` ``, which ox cannot analyze",
-                ),
             ] {
                 assert_eq!(basis.to_string(), expected);
             }
@@ -2256,37 +1904,6 @@ mod tests {
                     Some("Needs approval"),
                 );
                 assert_eq!(Basis::Mode(Mode::Manual).reason(), None);
-            }
-
-            #[test]
-            fn says_that_no_rule_can_allow_a_command_ox_cannot_analyze() {
-                let basis = Basis::Unrecognized {
-                    construct: "alias ls=rm".to_owned(),
-                };
-
-                assert_eq!(
-                    basis.reason().as_deref(),
-                    Some(
-                        "Asks because of `alias ls=rm`, which ox cannot analyze, \
-                         so no permission rule can allow this command"
-                    ),
-                );
-            }
-        }
-    }
-
-    mod code_span {
-        use super::*;
-
-        #[test]
-        fn fences_longer_than_the_longest_backtick_run_and_pads_against_the_fence() {
-            for (text, span) in [
-                ("alias ls=rm", "`alias ls=rm`"),
-                ("echo `id`", "`` echo `id` ``"),
-                ("echo ``id``", "``` echo ``id`` ```"),
-                ("`id`", "`` `id` ``"),
-            ] {
-                assert_eq!(code_span(text), span, "{text}");
             }
         }
     }
@@ -2618,10 +2235,10 @@ mod tests {
             #[test]
             fn suggests_a_rule_that_allows_the_call() {
                 let p = policy(Mode::Manual, &[], &[], &[]);
-                let target = command("RUST_LOG=debug cargo test 2>&1");
+                let target = command("RUST_LOG=debug cargo test");
 
                 let grant = p.session_grant(EXEC, &target).unwrap();
-                assert_eq!(grant.suggested().pattern(), "cargo test");
+                assert_eq!(grant.suggested().pattern(), "RUST_LOG=debug cargo test");
                 let mut granted = p.clone();
                 granted.allow_for_session(grant.suggested().clone());
                 assert_eq!(granted.decide(EXEC, &target), Decision::Allow);
@@ -2974,14 +2591,7 @@ mod tests {
                 );
                 for (class, target) in [
                     (EDIT, workspace(&abs("/repo/Cargo.lock"), "Cargo.lock")),
-                    (
-                        EDIT,
-                        path(
-                            &abs("/repo/.git/config"),
-                            Some(".git/config"),
-                            Zone::Workspace,
-                        ),
-                    ),
+                    (EDIT, path(&abs("/repo/.git/config"), Some(".git/config"))),
                     (EXEC, command("git push origin")),
                 ] {
                     assert_eq!(p.decide(class, &target), Decision::Deny, "{target:?}");
@@ -2989,858 +2599,122 @@ mod tests {
             }
 
             #[test]
-            fn command_allows_only_when_every_simple_command_is_explicitly_allowed() {
-                let p = policy(Mode::Manual, &[], &[], &[(EXEC, "cargo test *")]);
+            fn exec_star_allows_unsupported_calls_after_explicit_exec_holds() {
+                for mode in [Mode::Auto, Mode::Manual, Mode::Yolo] {
+                    for session in [false, true] {
+                        let mut p = policy(
+                            mode,
+                            &[(EXEC, "git push *")],
+                            &[(EXEC, "git commit *")],
+                            if session { &[] } else { &[(EXEC, "*")] },
+                        );
+                        if session {
+                            p.allow_for_session(Rule::parse(EXEC, "*").unwrap());
+                        }
+
+                        for (case, expected) in [
+                            ("cargo build && cargo test", Decision::Allow),
+                            ("$RUN task", Decision::Allow),
+                            ("cargo test > output", Decision::Allow),
+                            ("if true; then cargo test; fi", Decision::Allow),
+                            ("git push origin main > output", Decision::Deny),
+                            ("git commit -m update > output", Decision::Ask),
+                        ] {
+                            assert_eq!(
+                                p.decide(EXEC, &command(case)),
+                                expected,
+                                "{mode} session={session}: {case}"
+                            );
+                        }
+                    }
+                }
+            }
+
+            #[test]
+            fn patterned_exec_allow_requires_every_literal_component() {
+                let p = policy(Mode::Auto, &[], &[], &[(EXEC, "cargo *")]);
+
                 for (case, expected) in [
-                    ("cargo test && cargo test --lib", Decision::Allow),
-                    ("cargo test && cat Cargo.toml | wc -l", Decision::Ask),
-                    ("RUST_LOG=debug nice -n 5 cargo test --all", Decision::Allow),
-                    ("CARGO_TARGET_DIR=/tmp cargo test", Decision::Ask),
-                    ("cargo test && rm -rf target", Decision::Ask),
-                    ("git status", Decision::Ask),
-                    ("FOO=1", Decision::Ask),
+                    ("cargo build && cargo test", Decision::Allow),
+                    ("cargo test | cargo report", Decision::Allow),
+                    ("cargo build && printf done", Decision::Classify),
+                    ("printf ready | cargo test", Decision::Classify),
                 ] {
                     assert_eq!(p.decide(EXEC, &command(case)), expected, "{case}");
                 }
             }
 
             #[test]
-            fn command_deny_and_ask_hold_a_command_whatever_its_words_expand_to() {
+            fn dynamic_or_unsupported_calls_follow_the_selected_mode() {
+                for (mode, expected) in [
+                    (Mode::Auto, Decision::Classify),
+                    (Mode::Manual, Decision::Ask),
+                    (Mode::Yolo, Decision::Allow),
+                ] {
+                    let p = policy(mode, &[], &[], &[(EXEC, "cargo *")]);
+
+                    for case in [
+                        "$RUN task",
+                        "cargo test $FLAGS",
+                        "cargo test *.rs",
+                        "cargo test > output",
+                        "if true; then cargo test; fi",
+                    ] {
+                        assert_eq!(p.decide(EXEC, &command(case)), expected, "{mode}: {case}");
+                    }
+                }
+            }
+
+            #[test]
+            fn wrapper_names_are_matched_as_the_actual_commands() {
+                let p = policy(Mode::Auto, &[], &[], &[(EXEC, "cat *")]);
+
+                for (case, expected) in [
+                    ("cat notes", Decision::Allow),
+                    ("FOO=1 cat notes", Decision::Classify),
+                    ("env cat notes", Decision::Classify),
+                    ("nice cat notes", Decision::Classify),
+                    ("sh -c 'cat notes'", Decision::Classify),
+                ] {
+                    assert_eq!(p.decide(EXEC, &command(case)), expected, "{case}");
+                }
+                let env = policy(Mode::Auto, &[], &[], &[(EXEC, "env *")]);
+                assert_eq!(env.decide(EXEC, &command("env cat notes")), Decision::Allow);
+            }
+
+            #[test]
+            fn path_rules_hold_native_calls_without_projecting_into_bash() {
                 let p = policy(
-                    Mode::Manual,
-                    &[(EXEC, "git push --force *")],
-                    &[(EXEC, "git push *")],
-                    &[(EXEC, "git *")],
+                    Mode::Auto,
+                    &[(READ, "./private")],
+                    &[(EDIT, "./private")],
+                    &[(EXEC, "*")],
                 );
-                for (case, expected) in [
-                    ("git status", Decision::Allow),
-                    ("git ${X:-push} origin", Decision::Ask),
-                    ("git $'push' origin", Decision::Ask),
-                    ("git pu$'sh' origin", Decision::Ask),
-                    ("git -c a=b push origin", Decision::Ask),
-                    ("git push $'--force'", Decision::Deny),
-                    ("git push origin --force", Decision::Deny),
-                ] {
-                    assert_eq!(p.decide(EXEC, &command(case)), expected, "{case}");
-                }
-            }
+                let target = workspace("/repo/private/key", "private/key");
 
-            #[test]
-            fn explicit_allow_has_no_builtin_rm_exclusion() {
-                let p = policy(Mode::Manual, &[], &[], &[(EXEC, "*")]);
-                for case in ["rm -rf build", "rm -r --force build", "rm build -rf"] {
+                assert_eq!(p.decide(READ, &target), Decision::Deny);
+                assert_eq!(p.decide(EDIT, &target), Decision::Ask);
+                for case in [
+                    "cat private/key",
+                    "cat < private/key",
+                    "echo value > private/key",
+                    "sed -i s/a/b/ private/key",
+                    "HOME=private bash -c true",
+                ] {
                     assert_eq!(p.decide(EXEC, &command(case)), Decision::Allow, "{case}");
                 }
-            }
-
-            #[test]
-            fn command_never_allows_an_unrecognized_command_but_still_denies_one() {
-                let p = policy(Mode::Manual, &[(EXEC, "rm -rf *")], &[], &[(EXEC, "*")]);
-                assert_eq!(p.decide(EXEC, &command("ls")), Decision::Allow);
-                assert_eq!(p.decide(EXEC, &command("eval \"$CMD\"")), Decision::Ask);
-                for case in [
-                    "echo $(rm -rf /)",
-                    "sh -c 'rm -rf /'",
-                    "\"/bin/rm\" -rf /",
-                    "exec rm -rf /",
-                    "command rm -rf /",
-                ] {
-                    assert_eq!(p.decide(EXEC, &command(case)), Decision::Deny, "{case}");
-                }
-            }
-
-            #[test]
-            fn command_allows_nothing_after_a_directory_change_it_cannot_place_in_the_workspace() {
-                let p = policy(
-                    Mode::Manual,
+                let specific = policy(
+                    Mode::Auto,
+                    &[(READ, "./private"), (EDIT, "./private")],
                     &[],
-                    &[],
-                    &[
-                        (EXEC, "./build.sh"),
-                        (EXEC, "./nice *"),
-                        (EXEC, "cargo build"),
-                        (EXEC, "cd *"),
-                    ],
+                    &[(EXEC, "cat *"), (EXEC, "sed *")],
                 );
-                for (case, expected) in [
-                    ("./build.sh", Decision::Allow),
-                    ("cd x && cargo build", Decision::Allow),
-                    ("cd x && cargo build 2>&1 | tail -20", Decision::Ask),
-                    ("cd x && cargo build | grep -A 5 error", Decision::Ask),
-                    ("cd x && cargo build | tail -20 log", Decision::Ask),
-                    ("cd /tmp/evil && ./build.sh", Decision::Ask),
-                    ("cd x && ./build.sh", Decision::Ask),
-                    ("cd x && ./nice cargo build", Decision::Ask),
-                    ("cd /tmp/evil && cargo build", Decision::Ask),
-                    ("cd $DIR; cargo build", Decision::Ask),
-                    ("cd /tmp/evil && ls", Decision::Ask),
-                ] {
-                    assert_eq!(p.decide(EXEC, &command(case)), expected, "{case}");
-                }
-            }
-
-            #[test]
-            fn command_deny_holds_what_a_followed_runner_runs_even_in_yolo() {
-                let p = policy(Mode::Yolo, &[(EXEC, "rm *")], &[], &[]);
-                for case in [
-                    "sudo rm x",
-                    "doas -u root rm x",
-                    "pkexec rm x",
-                    "busybox rm x",
-                    "echo x | xargs rm",
-                    "echo rm x | xargs sudo",
-                    r"find . -execdir sudo rm {} +",
-                    "sudo --unknown value rm x",
-                    "sudo FOO=1 -u root rm x",
-                    "runuser -u nobody rm x",
-                    "su --command='rm x' root",
-                    "busybox hush -c 'rm x'",
-                ] {
-                    assert_eq!(p.decide(EXEC, &command(case)), Decision::Deny, "{case}");
-                }
-                assert_eq!(p.decide(EXEC, &command("echo x | xargs")), Decision::Allow);
-            }
-
-            #[test]
-            fn an_allow_rule_cannot_allow_a_command_that_hides_a_program_from_the_rules() {
-                let allow = &[
-                    (EXEC, "git commit *"),
-                    (EXEC, "cargo build *"),
-                    (EXEC, "cat *"),
-                ];
-                let p = policy(Mode::Manual, &[], &[], allow);
-                for case in [
-                    "GIT_EDITOR='rm -rf y'; git commit --amend",
-                    "cargo build ${x:n}",
-                    "cat ${!n}",
-                ] {
-                    assert_eq!(p.decide(EXEC, &command(case)), Decision::Ask, "{case}");
-                }
-
-                let denied = policy(Mode::Yolo, &[(EXEC, "git *")], &[], allow);
-                assert_eq!(
-                    denied.decide(EXEC, &command("GIT_EDITOR=x; git commit --amend")),
-                    Decision::Deny,
-                );
-
-                assert_eq!(
-                    p.decide(EXEC, &command("cargo build ${profile:-release}")),
-                    Decision::Allow,
-                );
-            }
-
-            #[test]
-            fn command_asks_in_manual_and_runs_in_yolo_when_ox_cannot_analyze_it_unless_denied() {
-                let unrecognized = [
-                    ("BASH_CMDS[ls]=/bin/rm; ls -rf x", "BASH_CMDS[ls]=/bin/rm"),
-                    (
-                        "BASH_CMDS+=([ls]=/bin/rm); ls -rf x",
-                        "BASH_CMDS+=([ls]=/bin/rm)",
-                    ),
-                    (
-                        "builtin declare \"BASH_CMDS[ls]=/bin/rm\"; ls -rf x",
-                        "declare \"BASH_CMDS[ls]=/bin/rm\"",
-                    ),
-                    ("ls 'unterminated", "'unterminated"),
-                    ("sh -c 'ls (('", "(("),
-                ];
-                for mode in [Mode::Manual, Mode::Yolo] {
-                    let p = policy(mode, &[(EXEC, "rm *")], &[], &[(EXEC, "*")]);
-                    for (case, _) in unrecognized {
-                        let verdict = p.verdict(EXEC, &command(case));
-                        let expected = match mode {
-                            Mode::Yolo => (Decision::Allow, Basis::Mode(Mode::Yolo)),
-                            _ => (Decision::Ask, Basis::Mode(Mode::Manual)),
-                        };
-                        assert_eq!(
-                            (verdict.decision, verdict.basis),
-                            expected,
-                            "{mode} {case:?}"
-                        );
-                    }
-                    for case in ["rm x; ls 'unterminated", "PATH=/tmp rm -rf x"] {
-                        assert_eq!(p.decide(EXEC, &command(case)), Decision::Deny, "{mode}");
-                    }
+                for case in ["cat private/key", "sed -i s/a/b/ private/key"] {
                     assert_eq!(
-                        p.decide(EXEC, &command("ls 'done'")),
+                        specific.decide(EXEC, &command(case)),
                         Decision::Allow,
-                        "{mode}"
-                    );
-                }
-            }
-
-            #[test]
-            fn command_rules_see_the_words_a_heredoc_passes_to_its_command() {
-                let base_dir = canonical_tempdir();
-                let cwd = base_dir.path().to_path_buf();
-                let workspace = Workspace::new(&cwd);
-                let decide =
-                    |p: &Policy, case: &str| p.decide(EXEC, &Access::for_command(case, &workspace));
-                let yolo = policy_in(Mode::Yolo, &[(EXEC, "git push *")], &[], &[], &workspace);
-                let manual = policy_in(
-                    Mode::Manual,
-                    &[(READ, ".env")],
-                    &[],
-                    &[(EXEC, "cat *")],
-                    &workspace,
-                );
-
-                for case in [
-                    "git <<EOF push --force origin main\nx\nEOF",
-                    "true && git <<EOF push\nx\nEOF",
-                    "ls | git <<EOF push\nx\nEOF",
-                    "! git <<EOF push\nx\nEOF",
-                    "FOO=1 <<EOF git push\nx\nEOF",
-                    "git <<EOF 2>&1 push\nx\nEOF",
-                    "git >/dev/null push",
-                ] {
-                    assert_eq!(decide(&yolo, case), Decision::Deny, "{case:?}");
-                }
-                assert_eq!(
-                    decide(&manual, "cat <<'EOF' README.md\nx\nEOF"),
-                    Decision::Allow
-                );
-                assert_eq!(decide(&manual, "cat <<'EOF' .env\nx\nEOF"), Decision::Deny);
-                for case in [
-                    "find <<EOF . -delete\nx\nEOF",
-                    "{ cat; } <<EOF README.md\nx\nEOF",
-                ] {
-                    assert_eq!(decide(&manual, case), Decision::Ask, "{case:?}");
-                }
-            }
-
-            #[test]
-            fn command_rules_see_a_joined_word_and_yolo_runs_a_split_ox_cannot_follow() {
-                let yolo = policy(Mode::Yolo, &[(EXEC, "git push *")], &[], &[]);
-
-                for (case, expected) in [
-                    ("gi\\\nt push origin", Decision::Deny),
-                    ("LC_ALL=$ git push origin", Decision::Allow),
-                    ("git status \\  x", Decision::Allow),
-                ] {
-                    assert_eq!(yolo.decide(EXEC, &command(case)), expected, "{case:?}");
-                }
-
-                let yolo = policy(Mode::Yolo, &[(EXEC, "kubectl delete -f -")], &[], &[]);
-                let case = "kubectl delete -f - <<EOF\nkind: Namespace\nEOF";
-                assert_eq!(yolo.decide(EXEC, &command(case)), Decision::Deny);
-            }
-
-            #[test]
-            fn command_rules_see_coproc_and_yolo_runs_a_compound_after_a_reserved_word() {
-                let yolo = policy(Mode::Yolo, &[(EXEC, "rm *")], &[], &[]);
-
-                assert_eq!(
-                    yolo.decide(EXEC, &command("coproc rm -rf x")),
-                    Decision::Deny
-                );
-                for case in [
-                    "coproc worker { rm -rf x; }",
-                    "time coproc worker { rm -rf x; }",
-                    "time while true; do rm -rf x; done",
-                    "time -p ! rm -rf x",
-                    "time -- ! rm -rf x",
-                ] {
-                    let verdict = yolo.verdict(EXEC, &command(case));
-                    assert_eq!(
-                        (verdict.decision, verdict.basis),
-                        (Decision::Allow, Basis::Mode(Mode::Yolo)),
-                        "{case:?}"
-                    );
-                }
-            }
-
-            #[test]
-            fn command_rules_see_the_program_a_runner_starts_past_an_operator_or_dollar_word() {
-                let yolo = policy(Mode::Yolo, &[(EXEC, "rm *")], &[], &[]);
-                let manual = policy(Mode::Manual, &[], &[], &[(EXEC, "git status")]);
-
-                for case in [
-                    "xargs -I == rm -rf x",
-                    "xargs -I =~ rm -rf x",
-                    r#"xargs -I =="x" rm -rf x"#,
-                    "xargs -I =~'x' rm -rf x",
-                    "xargs -I ==$x rm -rf x",
-                    r#"xargs -I $"x" rm -rf x"#,
-                    r#"xargs -I$"x" rm -rf x"#,
-                ] {
-                    assert_eq!(yolo.decide(EXEC, &command(case)), Decision::Deny, "{case}");
-                }
-                for case in ["git == status", r#"exec -a =="echo" rm -rf x"#] {
-                    assert_eq!(manual.decide(EXEC, &command(case)), Decision::Ask, "{case}");
-                }
-            }
-
-            #[test]
-            fn command_allow_sees_through_only_wrappers_that_keep_who_runs_it_and_its_arguments() {
-                let p = policy(Mode::Manual, &[], &[], &[(EXEC, "cat *"), (EXEC, "find *")]);
-                for (case, expected) in [
-                    ("nice timeout 5 cat a", Decision::Allow),
-                    ("sudo cat a", Decision::Ask),
-                    ("echo a | xargs cat", Decision::Ask),
-                    (r"find . -exec cat {} +", Decision::Allow),
-                    (r"find . -exec wc {} +", Decision::Ask),
-                ] {
-                    assert_eq!(p.decide(EXEC, &command(case)), expected, "{case}");
-                }
-            }
-
-            #[test]
-            fn command_weighs_each_redirection_target_as_an_edit() {
-                let cwd_dir = canonical_tempdir();
-                let cwd = cwd_dir.path();
-                std::fs::create_dir(cwd.join(".git")).unwrap();
-                let outside = abs("/etc/hosts");
-                let p = policy_in(
-                    Mode::Manual,
-                    &[(EDIT, "secret.txt")],
-                    &[(EDIT, "*.lock"), (EDIT, ".envrc"), (EDIT, ".git/**")],
-                    &[(EXEC, "echo *"), (EDIT, "out.txt")],
-                    &Workspace::new(cwd),
-                );
-                let workspace = Workspace::new(cwd);
-                let decide = |case: &str| decide_command(&p, case, &workspace);
-                assert_eq!(decide("echo hi > out.txt 2>&1"), Decision::Allow);
-                assert_eq!(decide("echo hi > .envrc"), Decision::Ask);
-                assert_eq!(decide("echo hi > .git/hooks/pre-commit"), Decision::Ask);
-                assert_eq!(decide("echo hi > Cargo.lock"), Decision::Ask);
-                assert_eq!(decide("env -C /etc echo hi > hosts"), Decision::Ask);
-                assert_eq!(decide(&format!("echo hi >> {outside}")), Decision::Ask);
-                assert_eq!(decide("echo hi > secret.txt"), Decision::Deny);
-
-                let elsewhere_dir = canonical_tempdir();
-
-                let elsewhere = elsewhere_dir.path();
-                let notes = slash_separated(&elsewhere.join("notes.txt"));
-                let allowed = policy_in(
-                    Mode::Manual,
-                    &[],
-                    &[],
-                    &[(EXEC, "echo *"), (EDIT, &notes)],
-                    &Workspace::new(cwd),
-                );
-                assert_eq!(
-                    decide_command(&allowed, &format!("echo hi >> {notes}"), &workspace),
-                    Decision::Allow
-                );
-            }
-
-            #[test]
-            fn command_settles_a_known_safe_read_of_a_held_file_by_its_rule_tier() {
-                let cwd_dir = canonical_tempdir();
-                let cwd = cwd_dir.path();
-                let workspace = Workspace::new(cwd);
-                for mode in [Mode::Manual, Mode::Yolo] {
-                    let p = policy_in(
-                        mode,
-                        &[(READ, ".env")],
-                        &[(READ, "secrets")],
-                        &[(EXEC, "cat *"), (EXEC, "grep *")],
-                        &workspace,
-                    );
-                    for (case, expected) in [
-                        ("cat README.md", Decision::Allow),
-                        ("cat .env", Decision::Deny),
-                        ("cat secrets/key", Decision::Ask),
-                        ("grep --file=.env x", Decision::Deny),
-                        ("grep --reg=x .env", Decision::Deny),
-                        ("grep --binary x .env", Decision::Deny),
-                        ("grep --unknown=x key .env", Decision::Deny),
-                        ("grep x README.md -e .env", Decision::Deny),
-                    ] {
-                        assert_eq!(
-                            decide_command(&p, case, &workspace),
-                            expected,
-                            "{mode:?}: {case}"
-                        );
-                    }
-                }
-            }
-
-            #[test]
-            fn command_denies_a_reader_glob_naming_a_denied_file_and_asks_for_a_variable() {
-                let root_dir = canonical_tempdir();
-                let root = root_dir.path();
-                let (cwd, home) = (root.join("repo"), root.join("home"));
-                std::fs::create_dir_all(cwd.join("src")).unwrap();
-                std::fs::create_dir_all(home.join(".ssh")).unwrap();
-                std::fs::write(cwd.join("src/main.rs"), "").unwrap();
-                std::fs::write(home.join(".ssh/id_rsa"), "").unwrap();
-                temp_env::with_var(HOME_VAR, Some(&home), || {
-                    let workspace = Workspace::new(&cwd);
-                    let p = policy_in(
-                        Mode::Manual,
-                        &[(READ, "~/.ssh")],
-                        &[(READ, "secrets")],
-                        &[(EXEC, "cat *"), (EXEC, "grep *")],
-                        &workspace,
-                    );
-                    for (case, expected) in [
-                        ("cat src/*.rs", Decision::Allow),
-                        ("cat ~/*/id_rsa", Decision::Allow),
-                        ("cat ~/.ssh/id_*", Decision::Deny),
-                        ("cat ~/.ss?/id_rsa", Decision::Deny),
-                        ("cat ~/.*/id_rsa", Decision::Deny),
-                        ("grep -r key ~/.ssh", Decision::Deny),
-                        ("ls -R ~/.ssh", Decision::Deny),
-                        ("grep -r key ~", Decision::Ask),
-                        ("wc --files0-from ~/.ssh/id_rsa", Decision::Deny),
-                        ("wc --files0-from=secrets/list", Decision::Ask),
-                        ("cat $HOME/.ssh/id_rsa", Decision::Deny),
-                        ("cat \"${HOME}/.ssh/id_rsa\"", Decision::Deny),
-                        ("cat $F", Decision::Ask),
-                    ] {
-                        assert_eq!(decide_command(&p, case, &workspace), expected, "{case}");
-                    }
-                    let unguarded =
-                        policy_in(Mode::Manual, &[], &[], &[(EXEC, "cat *")], &workspace);
-                    assert_eq!(
-                        decide_command(&unguarded, "cat $F", &workspace),
-                        Decision::Allow,
-                        "no read rule is left to hold it"
-                    );
-                });
-            }
-
-            #[test]
-            fn yolo_denies_certain_reads_and_asks_for_possible_reads_of_explicitly_held_files() {
-                let root_dir = canonical_tempdir();
-                let root = root_dir.path();
-                let (cwd, home) = (root.join("repo"), root.join("home"));
-                std::fs::create_dir_all(&cwd).unwrap();
-                std::fs::create_dir_all(home.join(".ssh")).unwrap();
-                std::fs::write(home.join(".ssh/id_rsa"), "").unwrap();
-                std::fs::write(cwd.join("-n"), "").unwrap();
-                std::fs::write(cwd.join("notes"), "").unwrap();
-                temp_env::with_var(HOME_VAR, Some(&home), || {
-                    let workspace = Workspace::new(&cwd);
-                    let yolo = policy_in(
-                        Mode::Yolo,
-                        &[(READ, "~/.ssh")],
-                        &[(READ, "secrets")],
-                        &[],
-                        &workspace,
-                    );
-
-                    for (case, expected) in [
-                        ("cat ~/.ssh/id_*", Decision::Deny),
-                        ("cat $HOME/.ssh/id_rsa", Decision::Deny),
-                        ("cat \"${HOME}/.ssh/id_rsa\"", Decision::Deny),
-                        ("cat secrets/key", Decision::Ask),
-                        ("grep -r key ~/.ssh", Decision::Deny),
-                        ("grep -r key ~", Decision::Ask),
-                        ("grep -r key secrets", Decision::Ask),
-                        ("cat ~/.ssh/id_rsa *", Decision::Deny),
-                        ("cat * ~/.ssh/id_rsa", Decision::Deny),
-                        ("head * ~/.ssh/id_rsa", Decision::Deny),
-                        ("grep key * ~/.ssh/id_rsa", Decision::Deny),
-                        ("grep * ~/.ssh/id_rsa", Decision::Deny),
-                        ("grep -e key * ~/.ssh/id_rsa", Decision::Deny),
-                        ("find ~ -path ~/.ssh/id_rsa", Decision::Ask),
-                        ("wc --files0-from ~/.ssh/id_rsa", Decision::Deny),
-                        ("wc --files0-from=secrets/list", Decision::Ask),
-                        ("test -f ~/.ssh/id_rsa", Decision::Ask),
-                        ("cat $F", Decision::Ask),
-                        ("echo x | xargs cat", Decision::Ask),
-                    ] {
-                        assert_eq!(decide_command(&yolo, case, &workspace), expected, "{case}");
-                    }
-                });
-            }
-
-            #[test]
-            fn command_weighs_a_relative_path_under_each_directory_it_may_have_entered() {
-                let root_dir = canonical_tempdir();
-                let root = root_dir.path();
-                let (cwd, home) = (root.join("repo"), root.join("home"));
-                std::fs::create_dir_all(cwd.join("secrets")).unwrap();
-                std::fs::create_dir_all(cwd.join("src")).unwrap();
-                std::fs::create_dir_all(cwd.join("sub/private")).unwrap();
-                std::fs::create_dir_all(cwd.join("vault")).unwrap();
-                std::fs::create_dir_all(home.join(".ssh")).unwrap();
-                std::fs::write(cwd.join("secrets/key"), "").unwrap();
-                std::fs::write(cwd.join("sub/private/key"), "").unwrap();
-                std::fs::write(cwd.join("notes"), "").unwrap();
-                std::fs::write(cwd.join("vault/key"), "").unwrap();
-                std::fs::write(cwd.join("vault/readme"), "").unwrap();
-                std::fs::write(home.join(".ssh/id_rsa"), "").unwrap();
-                let sed_write = format!(
-                    "cd secrets && sed -n w\\ key {}",
-                    slash_separated(&cwd.join("notes"))
-                );
-                temp_env::with_var(HOME_VAR, Some(&home), || {
-                    let workspace = Workspace::new(&cwd);
-                    for mode in [Mode::Manual, Mode::Yolo] {
-                        let p = policy_in(
-                            mode,
-                            &[
-                                (READ, "./secrets"),
-                                (EDIT, "./secrets"),
-                                (READ, "./sub/private"),
-                                (READ, "./vault/key"),
-                                (READ, "~/.ssh"),
-                            ],
-                            &[],
-                            &[(EXEC, "*")],
-                            &workspace,
-                        );
-                        let moved = if mode == Mode::Yolo {
-                            Decision::Allow
-                        } else {
-                            Decision::Ask
-                        };
-                        for (case, expected) in [
-                            ("cd ~/.ssh && cat id_rsa", Decision::Deny),
-                            ("cd -P ~/.ssh && cat id_rsa", Decision::Deny),
-                            ("cd -L ~/.ssh && cat id_rsa", Decision::Deny),
-                            ("cd -- ~/.ssh && cat id_rsa", Decision::Deny),
-                            ("cd -Pe -- secrets && cat key", Decision::Deny),
-                            ("pushd secrets; cat key", Decision::Deny),
-                            ("pushd -n secrets; cat key", moved),
-                            ("cd vault && cat k*", Decision::Deny),
-                            ("cd -P vault; head -n 1 k* readme", Decision::Deny),
-                            ("cd ~/.ssh && ls -R", Decision::Deny),
-                            ("cd ~/.ssh; wc -l < id_rsa", Decision::Deny),
-                            ("cd; cat .ssh/id_rsa", Decision::Deny),
-                            ("cd secrets && cat key", Decision::Deny),
-                            ("cd src && cd ../secrets && cat key", Decision::Deny),
-                            ("cd secrets || cat key", Decision::Deny),
-                            ("cd secrets && echo x > key", Decision::Deny),
-                            (&sed_write, Decision::Deny),
-                            ("cat $PWD/secrets/key", Decision::Deny),
-                            ("cat \"${PWD}/secrets/key\"", Decision::Deny),
-                            ("cd secrets && cat $PWD/key", Decision::Deny),
-                            ("cat ~+/secrets/key", Decision::Deny),
-                            ("cd secrets; cd ..; cat ~-/key", Decision::Deny),
-                            ("pushd -n secrets; cat ~1/key", Decision::Deny),
-                            ("pushd -n secrets; cd sub; cat ~1/key", Decision::Deny),
-                            ("pushd -n private; cd sub; cat ~1/key", Decision::Deny),
-                            ("cat ~\\\n/.ssh/id_rsa", Decision::Deny),
-                            ("pushd -n ~/.ssh; cat ~+1/id_rsa", Decision::Deny),
-                            ("cd ~/.ssh; cd ..; head ~-/id_rsa", Decision::Deny),
-                            ("cd src && cat main.rs", moved),
-                            ("cd $DIR && cat key", Decision::Ask),
-                            ("pushd -n $DIR; cat ~1/key", Decision::Ask),
-                            ("cd ~1 && cat key", Decision::Ask),
-                            ("echo x > $PWD.log", moved),
-                            ("echo x > ${PWD}x", moved),
-                            ("cd ${PWD}x && cat key", Decision::Ask),
-                        ] {
-                            assert_eq!(
-                                decide_command(&p, case, &workspace),
-                                expected,
-                                "{mode} {case}"
-                            );
-                        }
-                    }
-                });
-            }
-
-            #[test]
-            fn command_weighs_the_files_a_sed_script_reads_writes_and_runs() {
-                let root_dir = canonical_tempdir();
-                let root = root_dir.path();
-                let (cwd, home) = (root.join("repo"), root.join("home"));
-                std::fs::create_dir_all(cwd.join(".git")).unwrap();
-                std::fs::create_dir_all(cwd.join("docs")).unwrap();
-                std::fs::create_dir_all(home.join(".ssh")).unwrap();
-                std::fs::write(cwd.join("README.md"), "").unwrap();
-                std::fs::write(cwd.join(".git/config"), "").unwrap();
-                std::fs::write(cwd.join("docs/guide.md"), "").unwrap();
-                std::fs::write(home.join(".ssh/id_rsa"), "").unwrap();
-                let key = slash_separated(&home.join(".ssh/id_rsa"));
-                let elsewhere = slash_separated(&root.join("elsewhere"));
-                temp_env::with_var(HOME_VAR, Some(&home), || {
-                    let workspace = Workspace::new(&cwd);
-                    for mode in [Mode::Manual, Mode::Yolo] {
-                        let p = policy_in(
-                            mode,
-                            &[
-                                (READ, "~/.ssh"),
-                                (EDIT, "./locked"),
-                                (EDIT, "./docs/old/guide.md"),
-                            ],
-                            &[(EDIT, ".git/**")],
-                            &[(EXEC, "cd *"), (EXEC, "sed *"), (EDIT, "./**")],
-                            &workspace,
-                        );
-                        let held = if mode == Mode::Yolo {
-                            Decision::Allow
-                        } else {
-                            Decision::Ask
-                        };
-                        for (case, expected) in [
-                            (format!("sed '1r {key}' README.md"), Decision::Deny),
-                            (format!("sed -e p -e '$R {key}' README.md"), Decision::Deny),
-                            (format!("sed --posix '1r {key}' README.md"), Decision::Deny),
-                            (format!("sed --qu -s '1r {key}' README.md"), Decision::Deny),
-                            (format!("sed '1r {key}' README.md --x"), Decision::Deny),
-                            (format!("sed -i '1r {key}' README.md"), Decision::Deny),
-                            (format!("sed -l 5 '1r {key}' README.md"), Decision::Deny),
-                            ("sed 'w locked' README.md".to_owned(), Decision::Deny),
-                            ("sed -i 'w locked' README.md".to_owned(), Decision::Deny),
-                            ("sed -e 'w locked' --x README.md".to_owned(), Decision::Deny),
-                            ("sed 's/a/b/w locked' README.md".to_owned(), Decision::Deny),
-                            (
-                                "sed -n $'w locked\\nk' README.md".to_owned(),
-                                Decision::Deny,
-                            ),
-                            ("sed -i s/a/b/ locked".to_owned(), Decision::Deny),
-                            ("sed --in-place=.bak 1d locked".to_owned(), Decision::Deny),
-                            (
-                                "sed -i'locked/*' s/a/b/ README.md".to_owned(),
-                                Decision::Deny,
-                            ),
-                            (
-                                "cd docs && sed -i'old/*' s/a/b/ g*.md".to_owned(),
-                                Decision::Deny,
-                            ),
-                            (format!("sed -i'{elsewhere}/*' s/a/b/ README.md"), held),
-                            ("sed -i $X s/a/b/ README.md".to_owned(), Decision::Ask),
-                            ("sed -i s/a/b/ .git/config".to_owned(), Decision::Ask),
-                            ("sed '1e date' README.md".to_owned(), Decision::Ask),
-                            ("sed -f script.sed README.md".to_owned(), Decision::Ask),
-                            ("sed -f script.sed --x README.md".to_owned(), Decision::Ask),
-                            ("sed 's/a/b/' README.md".to_owned(), Decision::Allow),
-                            ("sed -n 1,5p README.md".to_owned(), Decision::Allow),
-                            ("sed -i s/a/b/ README.md".to_owned(), Decision::Allow),
-                            ("sed -i s/a/b/ example.txt".to_owned(), Decision::Allow),
-                            (
-                                "sed -n '/x/p;$r notes' README.md".to_owned(),
-                                Decision::Allow,
-                            ),
-                        ] {
-                            assert_eq!(
-                                decide_command(&p, &case, &workspace),
-                                expected,
-                                "{mode} {case}"
-                            );
-                        }
-                    }
-                });
-            }
-
-            fn assert_script_decisions(cases: impl Fn(Decision) -> Vec<(&'static str, Decision)>) {
-                let root_dir = canonical_tempdir();
-                let root = root_dir.path();
-                let (cwd, home) = (root.join("repo"), root.join("home"));
-                std::fs::create_dir_all(cwd.join("secrets")).unwrap();
-                std::fs::create_dir_all(home.join(".ssh")).unwrap();
-                std::fs::write(cwd.join("secrets/key"), "").unwrap();
-                std::fs::write(cwd.join("env.sh"), "").unwrap();
-                std::fs::write(home.join(".ssh/id_rsa"), "").unwrap();
-                temp_env::with_var(HOME_VAR, Some(&home), || {
-                    let workspace = Workspace::new(&cwd);
-                    for mode in [Mode::Manual, Mode::Yolo] {
-                        let p = policy_in(
-                            mode,
-                            &[(READ, "./secrets"), (READ, "~/.ssh")],
-                            &[],
-                            &[(EXEC, "*")],
-                            &workspace,
-                        );
-                        let fallback = if mode == Mode::Yolo {
-                            Decision::Allow
-                        } else {
-                            Decision::Ask
-                        };
-                        let expected = cases(fallback);
-                        let actual: Vec<_> = expected
-                            .iter()
-                            .map(|(case, _)| (*case, decide_command(&p, case, &workspace)))
-                            .collect();
-
-                        assert_eq!(actual, expected, "{mode}");
-                    }
-                });
-            }
-
-            #[test]
-            fn command_weighs_the_script_source_or_a_shell_runs() {
-                assert_script_decisions(|held| {
-                    vec![
-                        ("source ~/.ssh/id_rsa", Decision::Deny),
-                        (". secrets/key", Decision::Deny),
-                        (". -- secrets/key", Decision::Deny),
-                        ("cd secrets && . ./key", Decision::Deny),
-                        ("bash ~/.ssh/id_rsa", Decision::Deny),
-                        ("sh -e -o pipefail secrets/key arg", Decision::Deny),
-                        ("bash --rcfile env.sh -- secrets/key", Decision::Deny),
-                        ("bash -init-file env.sh secrets/key", Decision::Deny),
-                        ("bash --norc secrets/key", Decision::Deny),
-                        ("bash -noprofile secrets/key", Decision::Deny),
-                        ("bash - secrets/key", Decision::Deny),
-                        ("bash + secrets/key", Decision::Deny),
-                        ("bash -O extglob secrets/key", Decision::Deny),
-                        ("bash -oO pipefail extglob secrets/key", Decision::Deny),
-                        ("bash secrets/key -c debug", Decision::Deny),
-                        ("bash +c 'cat secrets/key'", Decision::Deny),
-                        ("bash -c -x 'cat secrets/key'", Decision::Deny),
-                        ("dash -eu secrets/key", Decision::Deny),
-                        ("fish secrets/key", Decision::Deny),
-                        ("bash --rcfile secrets/key -i", Decision::Deny),
-                        ("fish -c 'cat secrets/key'", Decision::Deny),
-                        ("bash --rcfile '~/.ssh/id_rsa' -i", Decision::Deny),
-                        ("bash --init-file \\~/.ssh/id_rsa -c true", Decision::Deny),
-                        ("source -p . key", held),
-                        ("bash $F", held),
-                        ("bash -c \"$X\"", held),
-                        ("bash --bogus secrets/key", held),
-                        ("fish -n secrets/key", held),
-                        ("dash -O extglob secrets/key", held),
-                        ("zsh -ovi secrets/key", held),
-                        ("echo secrets/key | xargs bash", Decision::Ask),
-                        ("echo secrets/key | xargs -I % bash -c 'cat %'", held),
-                        ("echo secrets/key | xargs su root", Decision::Ask),
-                        ("su root secrets/key", Decision::Ask),
-                        ("su -s/bin/sh root secrets/key", Decision::Ask),
-                        ("su -- -x secrets/key", Decision::Ask),
-                        ("source env.sh", Decision::Allow),
-                        ("bash -s secrets/key < env.sh", Decision::Allow),
-                        ("bash -s -- \"$V\" < env.sh", Decision::Allow),
-                        ("echo a | xargs bash env.sh", Decision::Allow),
-                        ("bash -o secrets/key env.sh", Decision::Allow),
-                        ("su secrets/key", Decision::Allow),
-                        ("su - secrets/key", Decision::Allow),
-                        ("su -s /bin/sh secrets/key", Decision::Allow),
-                        ("su --sh /bin/sh secrets/key", Decision::Allow),
-                    ]
-                });
-            }
-
-            #[test]
-            fn command_weighs_what_the_environment_a_command_sets_names() {
-                assert_script_decisions(|held| {
-                    vec![
-                        ("BASH_ENV=secrets/key bash -c true", Decision::Deny),
-                        ("env BASH_ENV=secrets/key bash -c true", Decision::Deny),
-                        ("ENV=secrets/key dash -i", Decision::Deny),
-                        ("ZDOTDIR=secrets zsh -c true", Decision::Deny),
-                        ("env BASH_ENV=~/.ssh/id_rsa bash -c true", Decision::Deny),
-                        ("BASH_ENV='~/.ssh/id_rsa' bash -c true", Decision::Deny),
-                        ("BASH_ENV=secrets/key eval 'bash -c true'", Decision::Deny),
-                        ("BASH_ENV=secrets/key sh -c 'bash -c true'", Decision::Deny),
-                        ("BASH_ENV=secrets/key su root -c true", Decision::Deny),
-                        ("HOME=secrets zsh -c true", Decision::Deny),
-                        ("HOME=secrets bash -i", Decision::Deny),
-                        ("HOME=secrets bash -c true", Decision::Deny),
-                        ("HOME=secrets fish", Decision::Deny),
-                        ("HOME=secrets exec -l dash -c true", Decision::Deny),
-                        ("HOME=secrets su -m root", Decision::Deny),
-                        ("HOME=secrets eval 'ksh -i -c true'", Decision::Deny),
-                        (
-                            "BASH_ENV='~/key' sh -c 'HOME=secrets dash -c true'",
-                            Decision::Deny,
-                        ),
-                        ("env X.Y=1 cat secrets/key", Decision::Deny),
-                        ("env A=1 -x=y cat secrets/key", Decision::Deny),
-                        ("env -- -x=y cat secrets/key", Decision::Deny),
-                        ("BASH_ENV='$(cat secrets/key)' bash -c true", Decision::Ask),
-                        ("env -S 'cat secrets/key'", held),
-                        ("HOME=./secrets cat ~/.ssh/id_rsa", Decision::Ask),
-                        ("env HOME=./secrets cat ~/.ssh/id_rsa", Decision::Ask),
-                        ("HOME=./secrets eval 'cat ${HOME}/.ssh/id_rsa'", held),
-                        ("PWD=./secrets eval 'cat ${PWD}/key'", held),
-                        ("HOME=. bash -c true", Decision::Ask),
-                        ("ZDOTDIR=. zsh -c true", Decision::Ask),
-                        (
-                            "BASH_ENV='~+/key' sh -c 'true; PWD=./secrets bash -c true'",
-                            Decision::Ask,
-                        ),
-                        ("HOME=./secrets eval 'cat ~/.ssh/id_rsa'", held),
-                        ("PWD=./secrets eval 'cat $PWD/key'", held),
-                        ("PWD=./secrets eval 'cat ~+/key'", held),
-                        ("OLDPWD=./secrets eval 'cat ~-/key'", held),
-                        ("PWD=./secrets BASH_ENV=~+/key bash -c true", Decision::Ask),
-                        (
-                            "OLDPWD=./secrets BASH_ENV='~-/key' bash -c true",
-                            Decision::Ask,
-                        ),
-                        ("PWD=./secrets sh -c 'BASH_ENV=~+/key bash -c true'", held),
-                        (
-                            "HOME=./secrets X=\"$(cat $HOME/.ssh/id_rsa)\" env",
-                            Decision::Ask,
-                        ),
-                        ("HOME=./secrets cd && cat key", Decision::Ask),
-                        (
-                            "echo BASH_ENV | xargs -I % env %=secrets/key bash -c true",
-                            held,
-                        ),
-                        ("env A=1 -x=y rm -rf y", Decision::Allow),
-                        ("ENV=secrets/key zsh -c true", Decision::Allow),
-                        ("HOME=secrets/sub su root -c true", Decision::Allow),
-                    ]
-                });
-            }
-
-            #[cfg(unix)]
-            #[test]
-            fn command_weighs_a_tilde_user_path_under_that_users_home() {
-                let cwd_dir = canonical_tempdir();
-                let workspace = Workspace::new(cwd_dir.path());
-                let root = nix::unistd::User::from_name("root").unwrap().unwrap();
-                let secret = slash_separated(&root.dir.join("secret"));
-                for mode in [Mode::Manual, Mode::Yolo] {
-                    let p = policy_in(mode, &[(READ, &secret)], &[], &[(EXEC, "*")], &workspace);
-
-                    assert_eq!(
-                        decide_command(&p, "cat ~root/secret", &workspace),
-                        Decision::Deny,
-                        "{mode}"
-                    );
-                }
-            }
-
-            #[test]
-            fn yolo_holds_a_recursive_read_of_the_cwd_that_a_rule_names() {
-                let cwd_dir = canonical_tempdir();
-                let cwd = cwd_dir.path();
-                let workspace = Workspace::new(cwd);
-                let yolo = policy_in(
-                    Mode::Yolo,
-                    &[],
-                    &[(READ, &slash_separated(cwd))],
-                    &[],
-                    &workspace,
-                );
-
-                for case in ["grep -r key", "grep -r key .", "ls -R", "ls -R ."] {
-                    assert_eq!(
-                        decide_command(&yolo, case, &workspace),
-                        Decision::Ask,
                         "{case}"
                     );
-                }
-            }
-
-            #[test]
-            fn command_weighs_each_input_redirection_as_a_read_and_each_read_write_one_as_both() {
-                let cwd_dir = canonical_tempdir();
-                let cwd = cwd_dir.path();
-                let workspace = Workspace::new(cwd);
-                let p = policy_in(
-                    Mode::Yolo,
-                    &[(READ, ".env"), (EDIT, "locked")],
-                    &[(READ, "secrets")],
-                    &[(EXEC, "*")],
-                    &workspace,
-                );
-                let decide = |case: &str| decide_command(&p, case, &workspace);
-                for (case, expected) in [
-                    ("cat < README.md", Decision::Allow),
-                    ("cat < .env", Decision::Deny),
-                    ("wc -l 3< config/.env", Decision::Deny),
-                    ("python3 run.py < secrets/key", Decision::Ask),
-                    ("cat <> .env", Decision::Deny),
-                    ("cat 3<>.env", Decision::Deny),
-                    ("cat <>\".env\"", Decision::Deny),
-                    ("cat <\\\n>.env", Decision::Deny),
-                    ("cat 3<\\\n> .env", Decision::Deny),
-                    ("echo x <> locked", Decision::Deny),
-                    ("echo x 3<>locked", Decision::Deny),
-                    ("echo a\\<>.env", Decision::Allow),
-                ] {
-                    assert_eq!(decide(case), expected, "{case}");
                 }
             }
         }
@@ -3855,306 +2729,6 @@ mod tests {
             ) -> (Decision, Basis) {
                 let verdict = policy.verdict(class, target);
                 (verdict.decision, verdict.basis)
-            }
-
-            #[test]
-            fn recursive_readers_keep_configured_tiers_and_unattended_decisions() {
-                let dir = canonical_tempdir();
-                let cwd = dir.path();
-                temp_env::with_var(HOME_VAR, Some(cwd), || {
-                    let workspace = Workspace::new(cwd);
-                    for (tier, deny, ask) in [
-                        (Tier::Deny, &[(READ, "./vault/key")][..], &[][..]),
-                        (Tier::Ask, &[][..], &[(READ, "./vault/key")][..]),
-                    ] {
-                        for attended in [true, false] {
-                            let mut p =
-                                policy_in(Mode::Manual, deny, ask, &[(EXEC, "grep *")], &workspace);
-                            if !attended {
-                                p.set_unattended();
-                            }
-                            let expected = if attended {
-                                Decision::Ask
-                            } else {
-                                Decision::Unapproved
-                            };
-                            for case in [
-                                "grep -r needle .",
-                                "grep -r needle",
-                                "grep -r needle $DIR",
-                                "find",
-                                "find -name needle",
-                                r"find \( -name needle \)",
-                                "find ! -name needle",
-                                "ls -R",
-                            ] {
-                                let access = Access::for_command(case, &workspace);
-
-                                let verdict = p.verdict(EXEC, &access);
-
-                                assert_eq!(
-                                    (verdict.decision, verdict.basis),
-                                    (expected, rule_basis(tier, READ, "./vault/key")),
-                                    "attended={attended}: {case}"
-                                );
-                            }
-                        }
-                    }
-                });
-            }
-
-            #[test]
-            fn recursive_reader_globs_reparse_expanded_argument_roles() {
-                for (name, command, protected, files) in [
-                    (
-                        "expanded pattern-file value leaves a recursive search root",
-                        "grep -r -f patterns/* src",
-                        "./patterns/z-vault/key",
-                        &["patterns/a-patterns", "patterns/z-vault/key", "src/file"][..],
-                    ),
-                    (
-                        "expanded search operand supplies a recursive option",
-                        "grep PRIVATE *",
-                        "./vault/key",
-                        &["-r", "src/file", "vault/key"][..],
-                    ),
-                    (
-                        "expanded option upgrades a root in another source word",
-                        "grep PRIVATE *r vault",
-                        "./vault/key",
-                        &["-r", "other", "vault/key"][..],
-                    ),
-                    (
-                        "expanded long option supplies recursive directory mode",
-                        "grep PRIVATE *",
-                        "./vault/key",
-                        &["--directories=recurse", "src/file", "vault/key"][..],
-                    ),
-                    (
-                        "expanded directory mode can take another expansion's value",
-                        "grep PRIVATE *",
-                        "./vault/key",
-                        &["-d", "recurse", "src/file", "vault/key"][..],
-                    ),
-                    (
-                        "single match supplies a recursive option",
-                        "grep PRIVATE *r vault",
-                        "./vault/key",
-                        &["-r", "vault/key"][..],
-                    ),
-                    (
-                        "a build-specific option value may be an ordinary root",
-                        "ls -D vault -* 80",
-                        "./vault/key",
-                        &["-w", "-R", "vault/key"][..],
-                    ),
-                    (
-                        "an exposed ls flag retains recursion without a following value",
-                        "ls --format *",
-                        "./vault/key",
-                        &["-R", "long", "vault/key"][..],
-                    ),
-                    (
-                        "an expanded option may consume the final explicit root",
-                        "grep -e PRIVATE -* pats",
-                        "./vault/key",
-                        &["-f", "-R", "pats", "vault/key"][..],
-                    ),
-                    (
-                        "an expanded find expression may make cwd implicit",
-                        r"find [-\(v]* \)",
-                        "./secret/key",
-                        &["vault/file", "(", "-name", "secret/key"][..],
-                    ),
-                    (
-                        "an earlier single match changes a later group's roles",
-                        "grep -r -e needle -? patterns/* src",
-                        "./patterns/z-vault/key",
-                        &[
-                            "-f",
-                            "patterns/a-patterns",
-                            "patterns/z-vault/key",
-                            "src/file",
-                        ][..],
-                    ),
-                    (
-                        "an earlier single match consumes an apparent fixed root",
-                        "grep -e PRIVATE -[f] pats -* more",
-                        "./vault/key",
-                        &["-f", "-R", "pats", "more", "vault/key"][..],
-                    ),
-                ] {
-                    let dir = canonical_tempdir();
-                    let cwd = dir.path();
-                    for file in files {
-                        let path = cwd.join(file);
-                        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                        std::fs::write(path, "needle").unwrap();
-                    }
-                    temp_env::with_var(HOME_VAR, Some(cwd), || {
-                        let workspace = Workspace::new(cwd);
-                        for (tier, deny, ask) in [
-                            (Tier::Deny, &[(READ, protected)][..], &[][..]),
-                            (Tier::Ask, &[][..], &[(READ, protected)][..]),
-                        ] {
-                            let p = policy_in(
-                                Mode::Manual,
-                                deny,
-                                ask,
-                                &[(EXEC, "grep *"), (EXEC, "find *"), (EXEC, "ls *")],
-                                &workspace,
-                            );
-
-                            let access = Access::for_command(command, &workspace);
-                            let verdict = p.verdict(EXEC, &access);
-
-                            assert_eq!(
-                                (verdict.decision, verdict.basis),
-                                (Decision::Ask, rule_basis(tier, READ, protected)),
-                                "{name}: {command}"
-                            );
-                        }
-                    });
-                }
-            }
-
-            #[test]
-            fn recursive_reader_globs_keep_unrelated_roots_and_fixed_auxiliary_files_exact() {
-                let dir = canonical_tempdir();
-                let cwd = dir.path();
-                for file in [
-                    "aux/list",
-                    "aux/protected/key",
-                    "aux/public",
-                    "src/a/file",
-                    "src/b/file",
-                    "--recursive",
-                    "-r",
-                    "other",
-                ] {
-                    let path = cwd.join(file);
-                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                    std::fs::write(path, "needle").unwrap();
-                }
-                temp_env::with_var(HOME_VAR, Some(cwd), || {
-                    let workspace = Workspace::new(cwd);
-                    for mode in [Mode::Manual, Mode::Yolo] {
-                        let p = policy_in(
-                            mode,
-                            &[(READ, "./aux/list"), (READ, "./aux/protected/key")],
-                            &[],
-                            &[(EXEC, "grep *"), (EXEC, "find *"), (EXEC, "ls *")],
-                            &workspace,
-                        );
-                        for (case, unknown) in [
-                            ("grep -r -f aux/public* src", false),
-                            ("grep -r -f aux/protected* src", false),
-                            ("grep -f aux/p* PRIVATE src", true),
-                            ("grep -r --file=aux/lis? src", false),
-                            ("grep -r -faux/lis? src", false),
-                            ("grep -r PRIVATE src/*", false),
-                            ("find src/*", false),
-                            ("ls -R src/*", false),
-                            ("grep -- PRIVATE *r src", false),
-                            ("grep -r -- PRIVATE -* src", false),
-                            ("grep -- -* aux/protected", true),
-                            ("grep -f aux/protected PRIVATE *r src", true),
-                        ] {
-                            let expected = if unknown {
-                                Decision::Ask
-                            } else {
-                                Decision::Allow
-                            };
-
-                            let decision = decide_command(&p, case, &workspace);
-
-                            assert_eq!(decision, expected, "{mode:?}: {case}");
-                        }
-                    }
-                });
-            }
-
-            #[test]
-            fn recursive_options_keep_pattern_files_and_regular_files_exact() {
-                let dir = canonical_tempdir();
-                let cwd = dir.path();
-                std::fs::create_dir(cwd.join("src")).unwrap();
-                std::fs::write(cwd.join("patterns"), "needle").unwrap();
-                std::fs::write(cwd.join("src/file"), "needle").unwrap();
-                temp_env::with_var(HOME_VAR, Some(cwd), || {
-                    let workspace = Workspace::new(cwd);
-                    let p = policy_in(
-                        Mode::Manual,
-                        &[(READ, "./patterns/key"), (READ, "./src/file/key")],
-                        &[],
-                        &[(EXEC, "grep *")],
-                        &workspace,
-                    );
-
-                    for case in [
-                        "grep -r -f patterns src/file",
-                        "grep -r --file=patterns src/file",
-                        "grep -r --exclude-from=patterns needle src/file",
-                        "grep -r needle -",
-                    ] {
-                        assert_eq!(
-                            decide_command(&p, case, &workspace),
-                            Decision::Allow,
-                            "{case}"
-                        );
-                    }
-                    let protected = policy_in(
-                        Mode::Manual,
-                        &[(READ, "./patterns")],
-                        &[],
-                        &[(EXEC, "grep *")],
-                        &workspace,
-                    );
-                    assert_eq!(
-                        decide_command(&protected, "grep -r -f patterns src", &workspace),
-                        Decision::Deny
-                    );
-                });
-            }
-
-            #[test]
-            fn recursive_readers_compare_requested_and_resolved_rule_prefixes() {
-                let dir = canonical_tempdir();
-                let cwd = dir.path();
-                std::fs::create_dir(cwd.join("vault")).unwrap();
-                symlink_dir(Path::new("vault"), &cwd.join("alias"));
-                temp_env::with_var(HOME_VAR, Some(cwd), || {
-                    let workspace = Workspace::new(cwd);
-                    let p = policy_in(
-                        Mode::Manual,
-                        &[(READ, "./alias/nested/key")],
-                        &[],
-                        &[(EXEC, "grep *")],
-                        &workspace,
-                    );
-
-                    for (case, expected) in [
-                        ("grep -r needle vault", Decision::Ask),
-                        ("grep -r needle alias", Decision::Ask),
-                        ("grep -r needle other", Decision::Allow),
-                        ("grep -r needle ALIAS", Decision::Ask),
-                    ] {
-                        assert_eq!(decide_command(&p, case, &workspace), expected, "{case}");
-                    }
-                    let late = policy_in(
-                        Mode::Manual,
-                        &[(READ, "./late/nested/key")],
-                        &[],
-                        &[],
-                        &workspace,
-                    );
-                    symlink_dir(Path::new("vault"), &cwd.join("late"));
-
-                    assert_eq!(
-                        decide_command(&late, "grep -r needle vault", &workspace),
-                        Decision::Ask
-                    );
-                });
             }
 
             #[test]
@@ -4210,15 +2784,11 @@ mod tests {
                     Mode::Manual,
                     &[],
                     &[],
-                    &[(EXEC, "cargo test *"), (EXEC, "wc *"), (EDIT, "out.txt")],
+                    &[(EXEC, "cargo test *"), (EXEC, "wc *")],
                 );
                 p.allow_for_session(make.clone());
 
-                let settled = verdict(
-                    &p,
-                    EXEC,
-                    &command("cargo test > out.txt && make all | wc -l"),
-                );
+                let settled = verdict(&p, EXEC, &command("cargo test && make all | wc -l"));
 
                 assert_eq!(
                     settled,
@@ -4228,24 +2798,9 @@ mod tests {
                             rule_basis(Tier::Allow, EXEC, "cargo test *"),
                             Basis::Session(make),
                             rule_basis(Tier::Allow, EXEC, "wc *"),
-                            rule_basis(Tier::Allow, EDIT, "out.txt"),
                         ]),
                     ),
                 );
-            }
-
-            #[test]
-            fn of_a_held_command_names_the_configured_read_rule() {
-                let p = policy(Mode::Manual, &[], &[(READ, "*.pem")], &[(EXEC, "cat *")]);
-                let pem = rule_basis(Tier::Ask, READ, "*.pem");
-
-                for (case, expected) in [("cat key.pem", pem.clone()), ("cat $F", pem)] {
-                    assert_eq!(
-                        verdict(&p, EXEC, &command(case)),
-                        (Decision::Ask, expected),
-                        "{case}"
-                    );
-                }
             }
 
             #[test]

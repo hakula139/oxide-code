@@ -102,15 +102,11 @@ pub fn expand_user(raw: &str) -> Result<PathBuf> {
     Ok(home.join(tail.trim_start_matches(std::path::is_separator)))
 }
 
-/// Expands `raw` like [`expand_user`] and requires an absolute path other than the home directory
-/// itself, so a configured path cannot depend on the working directory. Errors never quote `raw`,
-/// which may hold a pasted secret.
+/// Expands `raw` like [`expand_user`] and requires an absolute path, so a configured path cannot
+/// depend on the working directory. Errors never quote `raw`, which may hold a pasted secret.
 pub(crate) fn expand_absolute(raw: &str) -> Result<PathBuf> {
     let path = expand_user(raw)?;
-    ensure!(
-        path.is_absolute() && raw.trim_end_matches(std::path::is_separator) != "~",
-        "expected an absolute or `~/` path"
-    );
+    ensure!(path.is_absolute(), "expected an absolute or `~/` path");
     Ok(path)
 }
 
@@ -404,21 +400,25 @@ mod tests {
             let home = std::env::temp_dir();
             let absolute = home.join("ca.pem");
             temp_env::with_var(HOME_VAR, Some(&home), || {
-                for raw in [absolute.to_str().unwrap(), "~/ca.pem"] {
-                    assert_eq!(expand_absolute(raw).unwrap(), absolute, "{raw:?}");
+                for (raw, expected) in [
+                    (absolute.to_str().unwrap(), absolute.as_path()),
+                    ("~/ca.pem", absolute.as_path()),
+                    (home.to_str().unwrap(), home.as_path()),
+                    ("~", home.as_path()),
+                    ("~/", home.as_path()),
+                ] {
+                    assert_eq!(expand_absolute(raw).unwrap(), expected, "{raw:?}");
                 }
             });
         }
 
         #[test]
-        fn rejects_a_relative_path_or_the_bare_home_directory_without_quoting_it() {
+        fn rejects_a_relative_path_without_quoting_it() {
             let home = std::env::temp_dir();
             let home = home.to_str().unwrap();
             for (home, raw) in [
                 (home, "certs/ca.pem"),
                 (home, "~alice/ca.pem"),
-                (home, "~"),
-                (home, "~/"),
                 ("relative-home", "~/ca.pem"),
             ] {
                 let err =

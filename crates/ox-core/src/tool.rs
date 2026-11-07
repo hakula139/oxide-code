@@ -662,7 +662,7 @@ mod tests {
     use super::view::NumberedLine;
     use super::*;
     use crate::permission::rule::Rule;
-    use crate::permission::{Decision, Mode, PathTarget, PermissionClass, Policy, Zone};
+    use crate::permission::{Decision, Mode, PathTarget, PermissionClass, Policy};
     use crate::util::fs::testing::{symlink_dir, symlink_file};
     use crate::util::path::local_testing::canonical_tempdir;
     use crate::util::path::testing::HOME_VAR;
@@ -808,7 +808,6 @@ mod tests {
                 let Access::Path(PathTarget {
                     canonical,
                     relative,
-                    zone,
                     ..
                 }) = &prepared.access
                 else {
@@ -816,7 +815,7 @@ mod tests {
                 };
                 assert_eq!(canonical, resolved.to_str().unwrap(), "tool {name}");
                 assert_eq!(relative.as_deref(), Some("a.rs"), "tool {name}");
-                assert_eq!(*zone, Zone::Workspace, "tool {name}");
+
                 assert_eq!(prepared.input, input, "tool {name}");
             }
         }
@@ -922,10 +921,6 @@ mod tests {
                 let prepared = ReadTool
                     .prepare(serde_json::json!({"file_path": name}), &ctx)
                     .unwrap();
-                let Access::Path(PathTarget { zone, .. }) = &prepared.access else {
-                    panic!("expected a path target, got {prepared:?}");
-                };
-                assert_eq!(*zone, Zone::Outside, "{name}");
                 let read = ReadTool.run(prepared, &ctx).await;
                 assert_eq!(read.is_error, !succeeds, "{name}: {}", read.content);
                 if let Ok(content) = native {
@@ -1026,7 +1021,6 @@ mod tests {
             let Access::Path(PathTarget {
                 canonical,
                 relative,
-                zone,
                 ..
             }) = &prepared.access
             else {
@@ -1034,7 +1028,6 @@ mod tests {
             };
             assert_eq!(canonical, target.to_str().unwrap());
             assert_eq!(*relative, None);
-            assert_eq!(*zone, Zone::Outside);
         }
     }
 
