@@ -121,7 +121,7 @@ pub(super) async fn run_tool_round(
         dispatch_ctx,
         questions,
         pending_questions,
-        user_answers: Vec::new(),
+        user_texts: Vec::new(),
     };
     let parallel_safe = |name: &str| tools.get(name).is_some_and(|(spec, _)| spec.parallel_safe);
     let mut calls = tool_uses.into_iter().peekable();
@@ -142,7 +142,7 @@ pub(super) async fn run_tool_round(
     }
     round
         .results
-        .extend(dispatcher.user_answers.into_iter().map(ContentBlock::text));
+        .extend(dispatcher.user_texts.into_iter().map(ContentBlock::text));
     round
 }
 
@@ -162,7 +162,7 @@ struct Dispatcher<'r, 'm, 'd> {
     dispatch_ctx: &'r mut DispatchContext<'d>,
     questions: mpsc::Sender<QuestionRequest>,
     pending_questions: mpsc::Receiver<QuestionRequest>,
-    user_answers: Vec<String>,
+    user_texts: Vec<String>,
 }
 
 /// A call that passed the gate, ready to run.
@@ -367,14 +367,15 @@ impl<'r> Dispatcher<'r, '_, '_> {
                 The user answered:
                 {text}"
             };
-            self.dispatch_ctx
-                .classifier
-                .user_prompts
-                .push(intent.clone());
-            self.user_answers.push(intent);
+            self.record_user_text(intent);
         }
         _ = reply.send(answer);
         Ok(())
+    }
+
+    fn record_user_text(&mut self, text: String) {
+        self.dispatch_ctx.classifier.user_prompts.push(text.clone());
+        self.user_texts.push(text);
     }
 
     /// Prepares one call and runs it through the permission gate. Returns the call ready to run, a
@@ -501,9 +502,11 @@ impl<'r> Dispatcher<'r, '_, '_> {
                         Ok(self.allow_for_session(grant.as_ref(), *rule, name))
                     }
                     ApprovalDecision::Deny => Ok(Some(denied_output(name, "by the user"))),
-                    ApprovalDecision::DenyWithFeedback { feedback } => Ok(Some(ToolOutput::error(
-                        format!("The user denied the {name} call and wrote: {feedback}"),
-                    ))),
+                    ApprovalDecision::DenyWithFeedback { feedback } => {
+                        let text = format!("The user denied the {name} call and wrote: {feedback}");
+                        self.record_user_text(text.clone());
+                        Ok(Some(ToolOutput::error(text)))
+                    }
                     ApprovalDecision::Abort => Err(TurnAbort::Cancelled),
                 }
             }
@@ -1238,7 +1241,7 @@ mod tests {
                     dispatch_ctx,
                     questions,
                     pending_questions,
-                    user_answers: Vec::new(),
+                    user_texts: Vec::new(),
                 };
                 Ok(dispatcher
                     .gate(id, name, input)
