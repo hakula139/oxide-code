@@ -659,6 +659,21 @@ mod tests {
         }
 
         #[test]
+        fn accepts_host_and_server_tool_globs() {
+            for (class, pattern) in [
+                (PermissionClass::Net, "api.example.com"),
+                (PermissionClass::Net, "*.example.com"),
+                (PermissionClass::Mcp, "files/read"),
+                (PermissionClass::Mcp, "files/read_*"),
+                (PermissionClass::Mcp, "*/read_*"),
+            ] {
+                let parsed = Rule::parse(class, pattern);
+
+                assert!(parsed.is_ok(), "{class} {pattern:?}: {parsed:?}");
+            }
+        }
+
+        #[test]
         fn rejects_a_malformed_exec_pattern_saying_how_to_fix_it() {
             let names_no_command = "it must name a command, such as `cargo test *`";
             let one_command = "it must be one simple command, such as `cargo test *`. \
