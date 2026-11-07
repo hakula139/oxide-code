@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail, ensure};
-use globset::{Glob, GlobBuilder, GlobMatcher, GlobSet, GlobSetBuilder};
+use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 use regex_syntax::hir::literal::Extractor;
 
 use super::shell::{PatternWord, Segment, ShellWord, bare_program, pattern_words};
@@ -31,7 +31,7 @@ pub struct Rule {
     class: PermissionClass,
     /// The pattern as written, such as `cargo test *`.
     source: String,
-    pattern: Pattern,
+    pattern: Option<Pattern>,
 }
 
 /// The matchable body of a rule, chosen by its class at parse time.
@@ -41,8 +41,6 @@ enum Pattern {
     Any,
     Exec(Vec<PatternWord>),
     Path(PathGlob),
-    Host(GlobMatcher),
-    Tool(GlobMatcher),
 }
 
 /// A `read` / `edit` glob that also matches everything below a path it matches, compiled as written
@@ -89,15 +87,21 @@ impl Rule {
     pub fn parse(class: PermissionClass, pattern: &str) -> Result<Self> {
         let source = pattern.trim();
         let pattern = if source == "*" {
-            Pattern::Any
+            Some(Pattern::Any)
         } else {
             match class {
-                PermissionClass::Exec => Pattern::Exec(pattern_words(source)?),
+                PermissionClass::Exec => Some(Pattern::Exec(pattern_words(source)?)),
                 PermissionClass::Read | PermissionClass::Edit => {
-                    Pattern::Path(PathGlob::parse(source)?)
+                    Some(Pattern::Path(PathGlob::parse(source)?))
                 }
-                PermissionClass::Net => Pattern::Host(host_glob(source)?),
-                PermissionClass::Mcp => Pattern::Tool(tool_glob(source)?),
+                PermissionClass::Net => {
+                    validate_host_pattern(source)?;
+                    None
+                }
+                PermissionClass::Mcp => {
+                    validate_tool_pattern(source)?;
+                    None
+                }
             }
         };
         Ok(Self {
@@ -108,10 +112,10 @@ impl Rule {
     }
 
     /// The narrowest rule that allows the call in `class` with `target`: the one simple command a
-    /// command runs as its named words, the path the tool resolved, under `./` inside cwd, or the
-    /// name an MCP or network call targets. `None` when no pattern names the call alone, as for a
-    /// command that runs several or has a word that expands, or when a character of it would not
-    /// paint as itself, so the user always sees the exact rule they grant.
+    /// command runs as its named words, or the path the tool resolved, under `./` inside cwd.
+    /// `None` when no pattern names the call alone, as for a command that runs several or has a word
+    /// that expands, or when a character of it would not paint as itself, so the user always sees
+    /// the exact rule they grant.
     pub(super) fn for_call(class: PermissionClass, target: &Access) -> Option<Self> {
         let pattern = match target {
             Access::Command(command) => match command.segments() {
@@ -123,7 +127,6 @@ impl Rule {
                 Some(relative) => format!("./{}", escaped(Path::new(relative))),
                 None => escaped(Path::new(&path.canonical)),
             },
-            Access::Name(name) => globset::escape(name),
             Access::None => return None,
         };
         if !pattern.chars().all(paints_as_itself) {
@@ -153,7 +156,7 @@ impl Rule {
         if self.class != class {
             return false;
         }
-        match (&self.pattern, target) {
+        match (self.pattern.as_ref(), target) {
             (_, Access::Path(path)) => self.path_matches(path, discipline),
             (_, Access::Command(command)) if matches!(discipline, MatchDiscipline::Allow) => {
                 command.unrecognized().is_none()
@@ -163,12 +166,11 @@ impl Rule {
                         .iter()
                         .all(|segment| self.allows(segment))
             }
-            (Pattern::Any, _) => true,
-            (Pattern::Exec(words), Access::Command(command)) => command
+            (Some(Pattern::Any), _) => true,
+            (Some(Pattern::Exec(words)), Access::Command(command)) => command
                 .segments()
                 .iter()
                 .any(|segment| segment_held(words, segment)),
-            (Pattern::Host(glob) | Pattern::Tool(glob), Access::Name(name)) => glob.is_match(name),
             _ => false,
         }
     }
@@ -184,20 +186,20 @@ impl Rule {
     }
 
     fn path_matches(&self, path: &PathTarget, discipline: MatchDiscipline) -> bool {
-        match &self.pattern {
-            Pattern::Any => true,
-            Pattern::Path(glob) => glob.is_match(path, discipline),
-            Pattern::Exec(_) | Pattern::Host(_) | Pattern::Tool(_) => false,
+        match self.pattern.as_ref() {
+            Some(Pattern::Any) => true,
+            Some(Pattern::Path(glob)) => glob.is_match(path, discipline),
+            Some(Pattern::Exec(_)) | None => false,
         }
     }
 
     /// Returns whether this `exec` rule allows `segment`, one simple command of a command the
     /// analysis recognizes.
     pub(super) fn allows(&self, segment: &Segment) -> bool {
-        match &self.pattern {
-            Pattern::Any => self.class == PermissionClass::Exec,
-            Pattern::Exec(words) => words_allowed(words, segment.named()),
-            Pattern::Path(_) | Pattern::Host(_) | Pattern::Tool(_) => false,
+        match self.pattern.as_ref() {
+            Some(Pattern::Any) => self.class == PermissionClass::Exec,
+            Some(Pattern::Exec(words)) => words_allowed(words, segment.named()),
+            Some(Pattern::Path(_)) | None => false,
         }
     }
 
@@ -211,8 +213,8 @@ impl Rule {
         self.class == PermissionClass::Read
             && recursive
             && matches!(
-                &self.pattern,
-                Pattern::Path(glob)
+                self.pattern.as_ref(),
+                Some(Pattern::Path(glob))
                     if (glob.absolute && glob.literal.as_os_str().is_empty())
                         || may_match_below(bases, [&path.canonical, &path.requested])
             )
@@ -222,7 +224,7 @@ impl Rule {
     /// pattern is absolute, plus where each such location resolves now. Empty for any rule but a
     /// path glob.
     pub(super) fn prefix_bases(&self, anchors: &[PathBuf]) -> Vec<PathBuf> {
-        let Pattern::Path(glob) = &self.pattern else {
+        let Some(Pattern::Path(glob)) = self.pattern.as_ref() else {
             return Vec::new();
         };
         let mut bases: Vec<PathBuf> = if glob.absolute {
@@ -557,30 +559,26 @@ fn fold_path(path: &str) -> String {
 
 // ── Net and MCP Patterns ──
 
-/// A host glob compared without case, where `*` matches any run of characters.
-fn host_glob(raw: &str) -> Result<GlobMatcher> {
+/// Validates a host glob without a scheme, port, or path.
+fn validate_host_pattern(raw: &str) -> Result<()> {
     ensure!(
         !raw.is_empty() && !raw.contains(['/', ':']) && !raw.chars().any(char::is_whitespace),
         "expected a host name such as `*.example.com`, without a scheme, port, or path"
     );
-    Ok(GlobBuilder::new(raw)
-        .case_insensitive(true)
-        .build()?
-        .compile_matcher())
+    GlobBuilder::new(raw).case_insensitive(true).build()?;
+    Ok(())
 }
 
-/// A `server/tool` glob, where `*` stays within the server or the tool name.
-fn tool_glob(raw: &str) -> Result<GlobMatcher> {
+/// Validates a `server/tool` glob.
+fn validate_tool_pattern(raw: &str) -> Result<()> {
     ensure!(
         raw.split_once('/').is_some_and(|(server, tool)| {
             !server.is_empty() && !tool.is_empty() && !tool.contains('/')
         }),
         "expected `server/tool`, such as `github/get_*`"
     );
-    Ok(GlobBuilder::new(raw)
-        .literal_separator(true)
-        .build()?
-        .compile_matcher())
+    GlobBuilder::new(raw).literal_separator(true).build()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -872,20 +870,6 @@ mod tests {
                     "{target:?}"
                 );
             }
-        }
-
-        #[test]
-        fn names_a_host_or_tool_by_its_escaped_name() {
-            let name = |name: &str| Access::Name(name.to_owned());
-            let host = Rule::for_call(PermissionClass::Net, &name("api.example.com")).unwrap();
-            assert_eq!(host.pattern(), "api.example.com");
-
-            let tool = Rule::for_call(PermissionClass::Mcp, &name("srv/a*b")).unwrap();
-            assert_eq!(tool.pattern(), "srv/a[*]b");
-            let matches =
-                |called| tool.matches(PermissionClass::Mcp, &name(called), MatchDiscipline::Allow);
-            assert!(matches("srv/a*b"));
-            assert!(!matches("srv/axb"));
         }
     }
 
@@ -1203,41 +1187,6 @@ mod tests {
             for raw in ["/secrets/**", "/**", r"\tmp\**"] {
                 let err = format!("{:#}", Rule::parse(PermissionClass::Read, raw).unwrap_err());
                 assert!(err.contains("needs a drive"), "{raw}: {err}");
-            }
-        }
-
-        #[test]
-        fn host_globs_without_case_and_tool_globs_within_each_name() {
-            let host = rule(PermissionClass::Net, "*.github.com");
-            for (name, expected) in [
-                ("api.github.com", true),
-                ("a.b.GitHub.com", true),
-                ("github.com", false),
-                ("github.com.evil.io", false),
-            ] {
-                assert_eq!(
-                    host.matches(
-                        PermissionClass::Net,
-                        &Access::Name(name.to_owned()),
-                        MatchDiscipline::Allow
-                    ),
-                    expected,
-                    "{name}"
-                );
-            }
-
-            let tool = rule(PermissionClass::Mcp, "github/get_*");
-            for (name, expected) in [
-                ("github/get_me", true),
-                ("github/create_issue", false),
-                ("github/get_x/y", false),
-                ("gitlab/get_me", false),
-            ] {
-                assert_eq!(
-                    tool.matches(PermissionClass::Mcp, &Access::Name(name.to_owned()), DENY),
-                    expected,
-                    "{name}"
-                );
             }
         }
     }
