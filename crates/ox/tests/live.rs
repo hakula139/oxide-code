@@ -5,7 +5,6 @@ mod env;
 
 use std::fmt::Write as _;
 use std::fs;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -92,18 +91,24 @@ fn thinking_after_tool_results_is_replayed_across_three_turns() {
     fs::write(live.cwd().join("data.txt"), "91\n97\n221\n43\n87\n").unwrap();
     fs::write(live.cwd().join("more.txt"), "27\n37\n113\n49\n").unwrap();
 
-    let mut repl = live.repl(&env_or("OX_LIVE_THINKING_MODEL", DEFAULT_THINKING_MODEL));
-    repl.env("OX_EFFORT", "high");
-    let output = live.send(
-        repl,
-        &[
-            "Read data.txt. Which of its numbers are prime? Check each one carefully.",
-            "Read more.txt. Across both files, which two numbers multiply closest to 4000?",
-            "Use the grep tool to find lines containing 7 in both files. Give their sum modulo 13.",
-        ],
-    );
+    for (index, prompt) in [
+        "Read data.txt. Which of its numbers are prime? Check each one carefully.",
+        "Read more.txt. Across both files, which two numbers multiply closest to 4000?",
+        "Use the grep tool to find lines containing 7 in both files. Give their sum modulo 13.",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut command = live.ox(&env_or("OX_LIVE_THINKING_MODEL", DEFAULT_THINKING_MODEL));
+        command.args(["-p", prompt]).env("OX_EFFORT", "high");
+        if index > 0 {
+            command.arg("-c");
+        }
 
-    assert!(output.status.success(), "{output:?}");
+        let output = live.send(command);
+        assert!(output.status.success(), "turn {}: {output:?}", index + 1);
+    }
+
     let session = live.session();
     let turns = split_turns(&session);
     assert_eq!(turns.len(), 3, "{session:?}");
@@ -130,17 +135,25 @@ fn auto_compaction_summarizes_from_the_cached_conversation() {
     fs::write(live.cwd().join("log-a.txt"), log_text(1, "copper-otter")).unwrap();
     fs::write(live.cwd().join("log-b.txt"), log_text(2, "silver-heron")).unwrap();
 
-    let mut repl = live.repl(&env_or("OX_LIVE_MODEL", DEFAULT_MODEL));
-    repl.env("OX_COMPACTION_AUTO_THRESHOLD_TOKENS", "50000");
-    let output = live.send(
-        repl,
-        &[
-            "Read log-a.txt and log-b.txt in full, then reply with only their final markers.",
-            "Which two final markers did you report?",
-        ],
-    );
+    for (index, prompt) in [
+        "Read log-a.txt and log-b.txt in full, then reply with only their final markers.",
+        "Which two final markers did you report?",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut command = live.ox(&env_or("OX_LIVE_MODEL", DEFAULT_MODEL));
+        command
+            .args(["-p", prompt])
+            .env("OX_COMPACTION_AUTO_THRESHOLD_TOKENS", "50000");
+        if index > 0 {
+            command.arg("-c");
+        }
 
-    assert!(output.status.success(), "{output:?}");
+        let output = live.send(command);
+        assert!(output.status.success(), "turn {}: {output:?}", index + 1);
+    }
+
     let session = live.session();
     let compacted_at = messages(&session)
         .find(|message| !message["compact"].is_null())
@@ -173,12 +186,15 @@ fn continue_answers_from_the_resumed_transcript_and_cache() {
         .as_str()
         .unwrap()
         .to_owned();
-    let mut repl = live.repl(&env_or("OX_LIVE_MODEL", DEFAULT_MODEL));
-    repl.args(["--resume", &session_id]);
-    let output = live.send(
-        repl,
-        &["What code word did I ask you to remember? Reply with only the word."],
-    );
+    let mut command = live.ox(&env_or("OX_LIVE_MODEL", DEFAULT_MODEL));
+    command.args([
+        "-p",
+        "What code word did I ask you to remember? Reply with only the word.",
+        "--resume",
+        &session_id,
+    ]);
+
+    let output = live.send(command);
 
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -223,19 +239,13 @@ impl Live {
     fn headless(&self, prompt: &str) -> Vec<Value> {
         let mut command = self.ox(&env_or("OX_LIVE_MODEL", DEFAULT_MODEL));
         command.args(["-p", prompt, "--output", "stream-json"]);
-        let output = self.send(command, &[]);
+        let output = self.send(command);
         assert!(output.status.success(), "{output:?}");
         let events = json_lines(&String::from_utf8_lossy(&output.stdout));
         let result = events.last().expect("a result line");
         assert_eq!(result["type"], "result", "{result}");
         assert_eq!(result["data"]["stop_reason"], "completed", "{result}");
         events
-    }
-
-    fn repl(&self, model: &str) -> Command {
-        let mut command = self.ox(model);
-        command.arg("--no-tui");
-        command
     }
 
     fn ox(&self, model: &str) -> Command {
@@ -246,22 +256,14 @@ impl Live {
         command
     }
 
-    /// Pipes each prompt to `command` as one input line, closes its input, and waits for it to
-    /// exit. Fails the test before returning when a credential reached the captured output or any
-    /// file under the scratch directory, so later assertions never format one.
-    fn send(&self, mut command: Command, prompts: &[&str]) -> Output {
-        let mut child = command
-            .stdin(Stdio::piped())
+    /// Runs `command`, checking for credential leaks before later assertions format its output.
+    fn send(&self, mut command: Command) -> Output {
+        let output = command
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
-            .expect("start ox");
-        let mut stdin = child.stdin.take().expect("piped stdin");
-        for prompt in prompts {
-            writeln!(stdin, "{prompt}").expect("write a prompt");
-        }
-        drop(stdin);
-        let output = child.wait_with_output().expect("wait for ox");
+            .output()
+            .expect("run ox");
         self.assert_no_credentials(&output);
         output
     }

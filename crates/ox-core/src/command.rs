@@ -235,23 +235,13 @@ mod tests {
         Op::SetModel(ConfigPick::Effort(level))
     }
 
-    mod typed_op {
+    mod typed_form {
         use super::*;
 
         /// The op the typed `line` runs at `/repo`.
         fn typed(line: &str) -> Option<Result<Op, String>> {
-            typed_op(&parse_slash(line).unwrap(), Path::new("/repo"))
-        }
-
-        /// The op the canonical `name` with `args` runs at `root`.
-        fn parsed(name: &str, args: &str, root: &Path) -> Option<Result<Op, String>> {
-            typed_op(
-                &Parsed {
-                    name: name.to_owned(),
-                    args: args.to_owned(),
-                },
-                root,
-            )
+            let parsed = parse_slash(line).unwrap();
+            typed_form(&parsed.name, &parsed.args, Path::new("/repo"))
         }
 
         #[test]
@@ -272,33 +262,6 @@ mod tests {
         }
 
         #[test]
-        fn titles_a_prompt_after_the_command_line() {
-            assert_eq!(
-                typed("/init AGENTS.md"),
-                Some(Ok(Op::Prompt {
-                    text: init::create_prompt(Path::new("/repo"), "AGENTS.md"),
-                    title: Some("/init AGENTS.md".to_owned()),
-                })),
-            );
-        }
-
-        #[test]
-        fn error_names_the_command_as_typed() {
-            assert_eq!(
-                typed("/continue"),
-                Some(Err(
-                    "/continue: Missing session ID. Usage: `/resume <id-prefix>`.".to_owned()
-                )),
-            );
-        }
-
-        #[test]
-        fn command_without_a_typed_form_or_an_unknown_one_has_no_op() {
-            assert_eq!(typed("/help"), None);
-            assert_eq!(typed("/no-such-thing x"), None);
-        }
-
-        #[test]
         fn routes_each_name_to_its_form() {
             let root = tempfile::tempdir().unwrap();
             let cases = [
@@ -311,7 +274,7 @@ mod tests {
                     "AGENTS.md",
                     Op::Prompt {
                         text: init::create_prompt(root.path(), "AGENTS.md"),
-                        title: Some("/init AGENTS.md".to_owned()),
+                        title: None,
                     },
                 ),
                 ("mode", "plan", Op::SetMode(Mode::Plan)),
@@ -325,14 +288,14 @@ mod tests {
                 names().collect::<Vec<_>>()
             );
             for (name, args, op) in cases {
-                assert_eq!(parsed(name, args, root.path()), Some(Ok(op)), "{name}");
+                assert_eq!(typed_form(name, args, root.path()), Some(Ok(op)), "{name}");
             }
         }
 
         #[test]
         fn knows_no_other_name() {
             for name in ["help", "theme", "compact-all", "no-such-thing"] {
-                assert_eq!(parsed(name, "x", Path::new("/repo")), None, "{name}");
+                assert_eq!(typed_form(name, "x", Path::new("/repo")), None, "{name}");
             }
         }
 
@@ -355,8 +318,8 @@ mod tests {
                 ),
             ] {
                 assert_eq!(
-                    parsed(name, "  ", Path::new("/repo")),
-                    Some(Err(format!("/{name}: {usage}"))),
+                    typed_form(name, "  ", Path::new("/repo")),
+                    Some(Err(usage.to_owned())),
                     "{name}",
                 );
             }

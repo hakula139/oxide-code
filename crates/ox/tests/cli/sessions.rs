@@ -39,8 +39,10 @@ fn list_with_unusable_storage_fails() {
     );
 }
 
-#[test]
-fn resume_in_the_repl_imports_an_archived_export_and_unarchives_it_with_a_note() {
+#[tokio::test]
+async fn resume_imports_an_archived_export_and_unarchives_it_with_a_note() {
+    let server = MockServer::start().await;
+    mount_reply(&server, "Done.").await;
     let dir = tempfile::tempdir().unwrap();
     let export = dir.path().join("session.jsonl");
     std::fs::write(
@@ -52,14 +54,14 @@ fn resume_in_the_repl_imports_an_archived_export_and_unarchives_it_with_a_note()
     )
     .unwrap();
 
-    let output = ox(dir.path())
-        .arg("--no-tui")
-        .arg("--resume")
+    let output = tokio::process::Command::from(ox(dir.path()))
+        .args(["-p", "next step", "--resume"])
         .arg(&export)
         .current_dir(dir.path())
         .env("ANTHROPIC_AUTH_TOKEN", "test-token")
-        .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
+        .env("ANTHROPIC_BASE_URL", server.uri())
         .output()
+        .await
         .unwrap();
 
     assert!(output.status.success(), "{output:?}");
@@ -166,7 +168,7 @@ async fn headless_continues_an_exported_session_in_a_fresh_data_dir() {
 fn resume_with_an_unmatched_prefix_fails() {
     let dir = tempfile::tempdir().unwrap();
     let output = ox(dir.path())
-        .args(["--no-tui", "--resume", "deadbeef"])
+        .args(["-p", "hello", "--resume", "deadbeef"])
         .current_dir(dir.path())
         .env("ANTHROPIC_AUTH_TOKEN", "test-token")
         .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
@@ -195,7 +197,7 @@ fn resume_without_a_terminal_fails_before_writing_anything() {
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("`--resume` without a session opens the picker in the TUI"),
+        stderr.contains("the TUI needs a terminal on stdin and stdout. Pass `-p`"),
         "{stderr}"
     );
     assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());

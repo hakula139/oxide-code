@@ -897,11 +897,10 @@ mod tests {
             use super::*;
 
             #[test]
-            fn accepts_continue_a_named_resume_or_no_tui_beside_print() {
+            fn accepts_continue_or_a_named_resume_beside_print() {
                 for args in [
                     &["ox", "-c", "-p", "next step"][..],
                     &["ox", "-r", "a1b2", "-p", "next step"],
-                    &["ox", "--no-tui", "-p", "next step"],
                 ] {
                     let cli = Cli::try_parse_from(args).unwrap();
 
@@ -913,10 +912,9 @@ mod tests {
             }
 
             #[test]
-            fn rejects_the_picker_beside_print_no_tui_or_a_prompt() {
+            fn rejects_the_picker_beside_print_or_a_prompt() {
                 for (args, other) in [
                     (&["ox", "-r", "-p", "hello"][..], "--print"),
-                    (&["ox", "--no-tui", "-r"], "--no-tui"),
                     (&["ox", "hello", "-r"], "[PROMPT]"),
                 ] {
                     let cli = Cli::try_parse_from(args).unwrap();
@@ -952,8 +950,8 @@ mod tests {
             #[test]
             fn follows_the_flags_and_opens_the_tui_only_with_the_terminals_it_needs() {
                 let tui = |picker| Ok(Run::Session(Frontend::Tui { picker }));
-                let repl = |unattended| Ok(Run::Session(Frontend::Repl { unattended }));
-                let cases: [RunCase; 16] = [
+                let terminal_error = "the TUI needs a terminal on stdin and stdout. Pass `-p`";
+                let cases: &[RunCase] = &[
                     (
                         &["ox", "config", "check"],
                         false,
@@ -981,10 +979,9 @@ mod tests {
                     ),
                     (&["ox"], true, true, tui(None)),
                     (&["ox", "-c", "hi"], true, true, tui(None)),
-                    (&["ox"], false, true, Err("stdin is not a terminal")),
-                    (&["ox"], true, false, repl(false)),
-                    (&["ox", "--no-tui"], true, true, repl(false)),
-                    (&["ox", "--no-tui"], false, true, repl(true)),
+                    (&["ox"], false, true, Err(terminal_error)),
+                    (&["ox"], true, false, Err(terminal_error)),
+                    (&["ox"], false, false, Err(terminal_error)),
                     (
                         &["ox", "--resume"],
                         true,
@@ -997,33 +994,17 @@ mod tests {
                         true,
                         tui(Some(ProjectScope::Every)),
                     ),
-                    (
-                        &["ox", "--resume"],
-                        true,
-                        false,
-                        Err("needs a terminal on stdout"),
-                    ),
-                    (
-                        &["ox", "--resume"],
-                        false,
-                        true,
-                        Err("stdin is not a terminal"),
-                    ),
-                    (
-                        &["ox", "--resume", "--no-tui"],
-                        true,
-                        true,
-                        Err("needs a terminal on stdout"),
-                    ),
+                    (&["ox", "--resume"], true, false, Err(terminal_error)),
+                    (&["ox", "--resume"], false, true, Err(terminal_error)),
                 ];
 
                 for (args, stdin_is_terminal, stdout_is_terminal, expected) in cases {
-                    let cli = Cli::try_parse_from(args).unwrap();
+                    let cli = Cli::try_parse_from(*args).unwrap();
 
-                    let result = cli.run(stdin_is_terminal, stdout_is_terminal);
+                    let result = cli.run(*stdin_is_terminal, *stdout_is_terminal);
 
                     match (result, expected) {
-                        (Ok(run), Ok(expected)) => assert_eq!(run, expected, "{args:?}"),
+                        (Ok(run), Ok(expected)) => assert_eq!(&run, expected, "{args:?}"),
                         (Err(error), Err(message)) => {
                             assert!(error.to_string().contains(message), "{args:?}: {error}");
                         }
@@ -1107,26 +1088,6 @@ mod tests {
                 ),
                 "{error}",
             );
-        }
-    }
-
-    mod frontend {
-        use super::*;
-
-        mod unattended {
-            use super::*;
-
-            #[test]
-            fn holds_for_print_and_a_repl_on_piped_stdin() {
-                for (frontend, expected) in [
-                    (Frontend::Print, true),
-                    (Frontend::Repl { unattended: true }, true),
-                    (Frontend::Repl { unattended: false }, false),
-                    (Frontend::Tui { picker: None }, false),
-                ] {
-                    assert_eq!(frontend.unattended(), expected, "{frontend:?}");
-                }
-            }
         }
     }
 }
