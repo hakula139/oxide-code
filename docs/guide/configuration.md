@@ -203,7 +203,7 @@ See [Theming](theming.md) for the full slot reference, color value formats (hex,
 `ox` logs warnings and errors by default. Set `RUST_LOG=info` (or `debug`) for more detail. `ox` skips a directive it cannot parse and names it on stderr at startup. Where the log goes depends on the frontend:
 
 - **TUI**: `$XDG_STATE_HOME/ox/log/oxide-code.log` (default `~/.local/state/ox/log/oxide-code.log`), which keeps log lines from painting over the full-screen frame. Before an event would push a nonempty file past 10 MiB, it moves to `oxide-code.log.1`, replacing the previous backup. An oversized event stays whole in the active file. Concurrent sessions share these two log files and coordinate writes and rotation through `oxide-code.log.lock`. On Unix, the directory and all three files are private to your user.
-- **Bare REPL, headless runs, and `--list`**: stderr.
+- **Headless runs and `--list`**: stderr.
 
 ## Reference
 

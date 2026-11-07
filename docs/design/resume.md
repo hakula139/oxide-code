@@ -6,7 +6,7 @@ Companion docs: [Slash Commands](slash-commands.md), [Modals](modals.md).
 
 ## Resume Surfaces
 
-`slash/resume` hosts `ResumeCmd` and `ResumePicker`. Bare `/resume` opens the picker, which forwards `Op::Resume` with `SessionRef::Id`, the chosen session's ID. The typed form forwards `SessionRef::Prefix` through `command::resume`, which the bare REPL runs too. At startup, `ox -r <file>` names a session export, which `resolve_session` imports before it resumes the session, so import never reaches the engine. The engine resolves a prefix through `resolve_prefix`, which searches the current project first and widens to every project on a miss, and skips the live session, so a prefix that matches only the live session fails with a message saying so.
+`slash/resume` hosts `ResumeCmd` and `ResumePicker`. Bare `/resume` opens the picker, which forwards `Op::Resume` with `SessionRef::Id`, the chosen session's ID. The typed form forwards `SessionRef::Prefix` through `command::resume`. At startup, `ox -r <file>` names a session export, which `resolve_session` imports before it resumes the session, so import never reaches the engine. The engine resolves a prefix through `resolve_prefix`, which searches the current project first and widens to every project on a miss, and skips the live session, so a prefix that matches only the live session fails with a message saying so.
 
 `ox --resume` without a session starts the TUI in a fresh session with no row yet and pushes `ResumePicker::at_startup` before the event loop starts. That picker quits `ox` when dismissed, and Enter resumes through the same swap as `/resume`. A session's row is created only with its first message, so neither path leaves an empty session in the store.
 

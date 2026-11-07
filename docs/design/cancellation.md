@@ -12,8 +12,6 @@ The TUI exposes these controls and behaviors:
 - **Interrupt work.** Cancellation drops the `agent_turn` future: reqwest closes the SSE stream, the bash tool kills the command's process tree, and a dim italic `(interrupted)` marker lands in chat. The transcript then ends on a `[Request interrupted by user]` user message, so the model knows the user abandoned that prompt.
 - **Show status.** The status bar names the operation in flight beside the spinner, with the key that stops it where one does, as in `Streaming · Esc to interrupt`, and shows `Cancelling` until the cancelled operation ends. An armed exit names the keys that confirm it, leaving out Ctrl+D while the input holds a draft, where Ctrl+D deletes forward.
 
-The bare REPL maps SIGINT the way a shell does when stdin is a terminal. During an operation, it sends `Op::Interrupt`, and `run_op` drops any approval question still awaiting an answer. At the prompt, SIGINT discards the line and prompts again, so only the end of input exits. With piped stdin, SIGINT ends the run, as SIGTERM and SIGHUP always do.
-
 ## Design Decisions
 
 The picks lean toward the Codex precedent on most surfaces, since it is the one Rust reference and its patterns map onto our async / actor architecture without reshaping. The wire-shape choice (**Mid-turn drain at round boundary, raw consecutive User messages on the wire**) is the deliberate exception.
@@ -51,5 +49,4 @@ The picks lean toward the Codex precedent on most surfaces, since it is the one 
 - `crates/ox-tui/src/app/operation.rs`: `InFlight`, which tracks the idle-only op until its `OpEnded`, and the `Activity` the status bar shows.
 - `crates/ox-tui/src/app/queue.rs`: `PromptQueue` and its `QueuedPrompt` entries, the active prompt, the queued prompts, what a failed turn hands back, and the prompts a session switch leaves behind.
 - `crates/ox-tui/src/app/render.rs`: `App::run_label`, the status bar's operation label and the key that stops it.
-- `crates/ox/src/driver/repl.rs`: `drive`, which turns SIGINT at the prompt into a fresh prompt when stdin is a terminal.
-- `crates/ox/src/driver/stdio.rs`: `run_op`, which renders one operation until its `OpEnded` and turns SIGINT during an attended operation into `Op::Interrupt`, and `TextState::render`, which prints the `(interrupted)` marker.
+- `crates/ox/src/driver/stdio.rs`: `run_op`, which renders one operation until its `OpEnded` or a signal, and `TextState::render`, which prints the `(interrupted)` marker.

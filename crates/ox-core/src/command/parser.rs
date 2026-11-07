@@ -13,15 +13,6 @@ impl Parsed {
     pub fn named_error(&self, msg: &str) -> String {
         format!("/{}: {msg}", self.name)
     }
-
-    /// Reconstructs the command line with one space between the name and any trimmed arguments.
-    pub(super) fn line(&self) -> String {
-        if self.args.is_empty() {
-            format!("/{}", self.name)
-        } else {
-            format!("/{} {}", self.name, self.args)
-        }
-    }
 }
 
 /// `None` for plain prompts, `//` escape, bare `/`, or names with disallowed chars.
@@ -72,15 +63,16 @@ mod tests {
     mod parsed {
         use super::*;
 
-        mod line {
+        mod named_error {
             use super::*;
 
             #[test]
-            fn joins_the_name_and_args_with_one_space() {
-                assert_eq!(parse_slash("/init").unwrap().line(), "/init");
+            fn prefixes_the_error_with_the_command_as_typed() {
                 assert_eq!(
-                    parse_slash(" /init   AGENTS.md ").unwrap().line(),
-                    "/init AGENTS.md"
+                    parse_slash(" /continue ")
+                        .unwrap()
+                        .named_error("Missing session ID."),
+                    "/continue: Missing session ID.",
                 );
             }
         }

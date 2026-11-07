@@ -1,5 +1,5 @@
 //! End-to-end tests of the `ox` binary: startup, `ox config check`, credential discovery, the
-//! headless and REPL drivers, session listing and resume, and signal exits.
+//! headless output, session listing and resume, and signal exits.
 
 #[path = "../support/env.rs"]
 mod env;
@@ -7,7 +7,6 @@ mod env;
 mod config_check;
 mod headless;
 mod native_auth;
-mod repl;
 mod sessions;
 #[cfg(unix)]
 mod signals;

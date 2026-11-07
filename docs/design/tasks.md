@@ -22,7 +22,6 @@ The engine emits `TasksUpdated` after each successful call and adopts the last l
 | Frontend | Presentation                                                                                         |
 | -------- | ---------------------------------------------------------------------------------------------------- |
 | TUI      | Task panel and optional `task-progress` status-line segment                                          |
-| REPL     | Task list on stderr after each update                                                                |
 | Headless | Task list on stderr and [task events and result views](../guide/headless.md#events) in `stream-json` |
 
 ## Persistence
@@ -57,4 +56,4 @@ Manual and automatic compaction both pass the engine's list to `Engine::replace_
 - `crates/ox-tui/src/components/chat/blocks/tool/tasks.rs`: the chat block for a `tasks` call.
 - `crates/ox-tui/src/components/status/line.rs`: the `task-progress` segment.
 - `crates/ox-tui/src/components/tasks.rs`: `TaskPanel` and `window`.
-- `crates/ox/src/driver/stdio.rs`: `task_lines`, the REPL's task list.
+- `crates/ox/src/driver/stdio.rs`: `task_lines`, the headless task list.

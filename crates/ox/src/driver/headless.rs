@@ -13,7 +13,7 @@ use ox_core::engine::{Engine, EngineHandle, EnginePanic};
 use ox_core::protocol::notice::ENGINE_STOPPED;
 use ox_core::protocol::{Event, Op, OpEnd};
 
-use super::stdio::{Output, OutputFormat, RunEnd, Unattended, run_op};
+use super::stdio::{Output, OutputFormat, RunEnd, run_op};
 use super::{Exit, Shutdown, Signals, decode_input};
 
 /// How long [`read_prompt`] waits on an open stdin before saying what it waits for.
@@ -106,24 +106,16 @@ async fn drive<O: Write, E: Write>(
     signal: &mut impl AsyncFnMut() -> Shutdown,
 ) -> Result<Exit, EnginePanic> {
     let prompt = Op::prompt(command::unescape_literal(prompt));
-    let (end, mut exit) = match run_op(
-        &mut handle.events,
-        &handle.ops,
-        output,
-        signal,
-        prompt,
-        None::<&mut Unattended>,
-    )
-    .await
-    {
-        RunEnd::Ended(OpEnd::Completed) => (OpEnd::Completed, Exit::Success),
-        RunEnd::Ended(end) => (end, Exit::Failure),
-        RunEnd::EngineStopped => {
-            output.render(Event::TurnFailed(ENGINE_STOPPED.to_owned()));
-            (OpEnd::Failed, Exit::Failure)
-        }
-        RunEnd::Signal(signal) => (OpEnd::Shutdown, Exit::Signal(signal)),
-    };
+    let (end, mut exit) =
+        match run_op(&mut handle.events, &handle.ops, output, signal, prompt).await {
+            RunEnd::Ended(OpEnd::Completed) => (OpEnd::Completed, Exit::Success),
+            RunEnd::Ended(end) => (end, Exit::Failure),
+            RunEnd::EngineStopped => {
+                output.render(Event::TurnFailed(ENGINE_STOPPED.to_owned()));
+                (OpEnd::Failed, Exit::Failure)
+            }
+            RunEnd::Signal(signal) => (OpEnd::Shutdown, Exit::Signal(signal)),
+        };
     let finished = handle.shutdown().await;
     let session_failure = finished.as_ref().ok().and_then(Option::as_deref);
     if let Some(failure) = session_failure {

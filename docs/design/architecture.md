@@ -1,14 +1,14 @@
 # Architecture
 
-The `ox` binary runs the same agent engine through a terminal UI, a bare REPL, or a headless driver.
+The `ox` binary runs the same agent engine through a terminal UI or a headless driver.
 
 ## Crates
 
-| Crate                                        | Owns                                                                        | Depends On             |
-| -------------------------------------------- | --------------------------------------------------------------------------- | ---------------------- |
-| [`ox-core`](../../crates/ox-core/src/lib.rs) | Agent behavior, model requests, tools, permissions, and saved sessions      | Neither frontend crate |
-| [`ox-tui`](../../crates/ox-tui/src/lib.rs)   | Terminal interaction and presentation                                       | `ox-core`              |
-| [`ox`](../../crates/ox/src/main.rs)          | CLI parsing, startup, frontend selection, and the stdio drivers in `driver` | `ox-core`, `ox-tui`    |
+| Crate                                        | Owns                                                                          | Depends On             |
+| -------------------------------------------- | ----------------------------------------------------------------------------- | ---------------------- |
+| [`ox-core`](../../crates/ox-core/src/lib.rs) | Agent behavior, model requests, tools, permissions, and saved sessions        | Neither frontend crate |
+| [`ox-tui`](../../crates/ox-tui/src/lib.rs)   | Terminal interaction and presentation                                         | `ox-core`              |
+| [`ox`](../../crates/ox/src/main.rs)          | CLI parsing, startup, frontend selection, and the headless driver in `driver` | `ox-core`, `ox-tui`    |
 
 Only `ox-tui` depends on terminal UI libraries such as ratatui and crossterm.
 

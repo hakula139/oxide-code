@@ -106,10 +106,6 @@ struct Cli {
     )]
     output: OutputFormat,
 
-    /// Use a bare REPL that reads one prompt per line in place of the TUI.
-    #[arg(long)]
-    no_tui: bool,
-
     /// Start in this permission mode, overriding `permission.mode` and `OX_PERMISSION_MODE`.
     #[arg(long, value_name = "MODE", value_parser = ModeParser::new())]
     mode: Option<Mode>,
@@ -190,8 +186,6 @@ impl Cli {
         }
         let other = if self.print {
             "--print"
-        } else if self.no_tui {
-            "--no-tui"
         } else if self.prompt.is_some() {
             "[PROMPT]"
         } else {
@@ -229,9 +223,7 @@ impl Cli {
         matches!(self.resume, Some(None))
     }
 
-    /// What the run does. A session opens the TUI only with a terminal on stdout, and fails when
-    /// the TUI would open with stdin piped, since it reads keys from stdin, or when the session
-    /// picker needs the TUI but cannot have it.
+    /// Selects a command or frontend before config, credentials, or session storage are loaded.
     fn run(&self, stdin_is_terminal: bool, stdout_is_terminal: bool) -> Result<Run> {
         match &self.command {
             Some(Command::Config {
@@ -246,22 +238,13 @@ impl Cli {
         if self.print {
             return Ok(Run::Session(Frontend::Print));
         }
-        if self.no_tui || !stdout_is_terminal {
-            if self.opens_picker() {
-                bail!(
-                    "`--resume` without a session opens the picker in the TUI, which needs a \
-                     terminal on stdout. Pass the session's ID prefix to resume it directly."
-                );
-            }
-            return Ok(Run::Session(Frontend::Repl {
-                unattended: !stdin_is_terminal,
-            }));
-        }
-        if !stdin_is_terminal {
-            bail!(
-                "stdin is not a terminal, so the TUI cannot read keys. Pass `-p` to answer the \
-                 piped input, or `--no-tui` to read prompts from it."
-            );
+        if !stdin_is_terminal || !stdout_is_terminal {
+            let hint = if self.opens_picker() {
+                "Pass `ox -r <session-id> -p \"<prompt>\"` to resume a session directly."
+            } else {
+                "Pass `-p` to answer one prompt and any piped input."
+            };
+            bail!("the TUI needs a terminal on stdin and stdout. {hint}");
         }
         Ok(Run::Session(Frontend::Tui {
             picker: self.opens_picker().then(|| self.projects()),
@@ -425,17 +408,8 @@ enum Run {
 enum Frontend {
     /// `--print`, which answers one prompt and never waits for approval.
     Print,
-    /// The bare REPL, which nobody attends when its prompts come from piped stdin.
-    Repl { unattended: bool },
     /// The TUI, with the projects the session picker searches when bare `--resume` opens it.
     Tui { picker: Option<ProjectScope> },
-}
-
-impl Frontend {
-    /// Returns whether nobody can answer an approval request during the session.
-    fn unattended(&self) -> bool {
-        matches!(self, Self::Print | Self::Repl { unattended: true })
-    }
 }
 
 /// A frontend with what it reads before the engine starts.
@@ -443,7 +417,6 @@ enum Launch {
     Print {
         prompt: String,
     },
-    Repl,
     Tui {
         theme: Box<ResolvedTheme>,
         picker: Option<ProjectScope>,
@@ -503,7 +476,7 @@ async fn run_session(
     if let Some(mode) = cli.mode {
         config.apply_mode_flag(mode);
     }
-    if frontend.unattended() {
+    if !tui {
         config.set_unattended();
     }
     let show_thinking = config.show_thinking;
@@ -511,7 +484,6 @@ async fn run_session(
         Frontend::Print => Launch::Print {
             prompt: cli.print_prompt().await?,
         },
-        Frontend::Repl { .. } => Launch::Repl,
         Frontend::Tui { picker } => Launch::Tui {
             theme: Box::new(resolve_theme(&config.theme)?),
             picker,
@@ -561,7 +533,6 @@ async fn run_session(
         Launch::Print { prompt } => {
             return Ok(driver::headless::run(engine, show_thinking, &prompt, cli.output).await?);
         }
-        Launch::Repl => return driver::repl::run(engine, show_thinking, cli.prompt).await,
         Launch::Tui { theme, picker } => (theme, picker),
     };
 
@@ -928,11 +899,10 @@ mod tests {
             use super::*;
 
             #[test]
-            fn accepts_continue_a_named_resume_or_no_tui_beside_print() {
+            fn accepts_continue_or_a_named_resume_beside_print() {
                 for args in [
                     &["ox", "-c", "-p", "next step"][..],
                     &["ox", "-r", "a1b2", "-p", "next step"],
-                    &["ox", "--no-tui", "-p", "next step"],
                 ] {
                     let cli = Cli::try_parse_from(args).unwrap();
 
@@ -944,10 +914,9 @@ mod tests {
             }
 
             #[test]
-            fn rejects_the_picker_beside_print_no_tui_or_a_prompt() {
+            fn rejects_the_picker_beside_print_or_a_prompt() {
                 for (args, other) in [
                     (&["ox", "-r", "-p", "hello"][..], "--print"),
-                    (&["ox", "--no-tui", "-r"], "--no-tui"),
                     (&["ox", "hello", "-r"], "[PROMPT]"),
                 ] {
                     let cli = Cli::try_parse_from(args).unwrap();
@@ -983,8 +952,9 @@ mod tests {
             #[test]
             fn follows_the_flags_and_opens_the_tui_only_with_the_terminals_it_needs() {
                 let tui = |picker| Ok(Run::Session(Frontend::Tui { picker }));
-                let repl = |unattended| Ok(Run::Session(Frontend::Repl { unattended }));
-                let cases: [RunCase; 16] = [
+                let terminal_error = "the TUI needs a terminal on stdin and stdout. Pass `-p`";
+                let resume_error = "Pass `ox -r <session-id> -p \"<prompt>\"`";
+                let cases: &[RunCase] = &[
                     (
                         &["ox", "config", "check"],
                         false,
@@ -1012,10 +982,9 @@ mod tests {
                     ),
                     (&["ox"], true, true, tui(None)),
                     (&["ox", "-c", "hi"], true, true, tui(None)),
-                    (&["ox"], false, true, Err("stdin is not a terminal")),
-                    (&["ox"], true, false, repl(false)),
-                    (&["ox", "--no-tui"], true, true, repl(false)),
-                    (&["ox", "--no-tui"], false, true, repl(true)),
+                    (&["ox"], false, true, Err(terminal_error)),
+                    (&["ox"], true, false, Err(terminal_error)),
+                    (&["ox"], false, false, Err(terminal_error)),
                     (
                         &["ox", "--resume"],
                         true,
@@ -1028,33 +997,17 @@ mod tests {
                         true,
                         tui(Some(ProjectScope::Every)),
                     ),
-                    (
-                        &["ox", "--resume"],
-                        true,
-                        false,
-                        Err("needs a terminal on stdout"),
-                    ),
-                    (
-                        &["ox", "--resume"],
-                        false,
-                        true,
-                        Err("stdin is not a terminal"),
-                    ),
-                    (
-                        &["ox", "--resume", "--no-tui"],
-                        true,
-                        true,
-                        Err("needs a terminal on stdout"),
-                    ),
+                    (&["ox", "--resume"], true, false, Err(resume_error)),
+                    (&["ox", "--resume"], false, true, Err(resume_error)),
                 ];
 
                 for (args, stdin_is_terminal, stdout_is_terminal, expected) in cases {
-                    let cli = Cli::try_parse_from(args).unwrap();
+                    let cli = Cli::try_parse_from(*args).unwrap();
 
-                    let result = cli.run(stdin_is_terminal, stdout_is_terminal);
+                    let result = cli.run(*stdin_is_terminal, *stdout_is_terminal);
 
                     match (result, expected) {
-                        (Ok(run), Ok(expected)) => assert_eq!(run, expected, "{args:?}"),
+                        (Ok(run), Ok(expected)) => assert_eq!(&run, expected, "{args:?}"),
                         (Err(error), Err(message)) => {
                             assert!(error.to_string().contains(message), "{args:?}: {error}");
                         }
@@ -1138,26 +1091,6 @@ mod tests {
                 ),
                 "{error}",
             );
-        }
-    }
-
-    mod frontend {
-        use super::*;
-
-        mod unattended {
-            use super::*;
-
-            #[test]
-            fn holds_for_print_and_a_repl_on_piped_stdin() {
-                for (frontend, expected) in [
-                    (Frontend::Print, true),
-                    (Frontend::Repl { unattended: true }, true),
-                    (Frontend::Repl { unattended: false }, false),
-                    (Frontend::Tui { picker: None }, false),
-                ] {
-                    assert_eq!(frontend.unattended(), expected, "{frontend:?}");
-                }
-            }
         }
     }
 }

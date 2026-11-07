@@ -9,7 +9,7 @@ Each command runs in a `ShellTree` containing the shell and all its descendants,
 - **Unix.** The shell leads a new session and process group (`setsid`). A timeout or cancel sends `SIGKILL` to the whole group. On kernels other than Linux, such as XNU, the kill repeats for up to 1 s until no member it can signal is alive, because a child forked during `killpg` can miss the signal there.
 - **Windows.** The shell runs in a Job Object, whose termination ends every process in it. Git for Windows' `bash.exe` runs the command, and the call fails if Git Bash is missing. An idle Git Bash that ox keeps running sets up the [MSYS runtime](#msys-runtime) before any shell starts, so killing a shell leaves the runtime intact while that bash runs.
 
-Because the session has no controlling terminal, a command that prompts on `/dev/tty`, such as `sudo`, `ssh` with password authentication, or `git push` over HTTPS without a credential helper, fails immediately with an error the model can read. In ox's own session, the prompt would print over the TUI or REPL, and the read would stop the process with `SIGTTIN` until a timeout or `bash_stop` killed it.
+Because the session has no controlling terminal, a command that prompts on `/dev/tty`, such as `sudo`, `ssh` with password authentication, or `git push` over HTTPS without a credential helper, fails immediately with an error the model can read. In ox's own session, the prompt would print over the TUI, and the read would stop the process with `SIGTTIN` until a timeout or `bash_stop` killed it.
 
 ### MSYS Runtime
 
@@ -63,7 +63,6 @@ Shells stay open through `/compact` and auto-compaction. Because the `bash` call
 Whenever a shell starts, exits, or stops, the engine emits `Event::BackgroundShellsUpdated` with every open shell. Each entry includes the shell's ID, command, and state. Ending shells with the session emits no event, so frontends clear their copy on `SessionRolled` and `SessionResumed`, just as they do the task list.
 
 - **TUI.** `/status` lists each shell under a Background Shells heading, along with its state and command's first line.
-- **REPL.** `--no-tui` ignores the event, and the model receives output through `bash_output` results.
 - **Headless.** `stream-json` output includes the `background_shells_updated` event, as described in the [headless guide](../guide/headless.md#events).
 
 ## Design Decisions

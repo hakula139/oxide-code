@@ -108,16 +108,3 @@ async fn headless_dies_by_the_signal_after_a_shutdown_result() {
         assert_eq!(result["data"]["stop_reason"], "shutdown", "{stdout}");
     }
 }
-
-#[tokio::test]
-async fn repl_with_piped_input_dies_by_the_signal() {
-    for (signal, number) in [("HUP", 1), ("INT", 2), ("TERM", 15)] {
-        let (signaled, _, stderr) = interrupted_run(&["--no-tui"], signal).await;
-
-        assert_eq!(signaled, Some(number), "SIG{signal}");
-        assert!(
-            stderr.ends_with("> \n"),
-            "SIG{signal}: the break after the prompt proves the handler ran: {stderr:?}"
-        );
-    }
-}

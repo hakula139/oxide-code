@@ -891,7 +891,7 @@ impl Policy {
     /// A call that would ask is [unapproved](Decision::Unapproved) in a run nobody attends.
     pub(crate) fn verdict(&self, class: PermissionClass, target: &Access) -> Verdict {
         let verdict = self.settle(class, target);
-        if verdict.decision == Decision::Ask && !self.attended {
+        if verdict.decision == Decision::Ask && !self.attended() {
             return Verdict {
                 decision: Decision::Unapproved,
                 ..verdict

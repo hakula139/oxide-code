@@ -1,11 +1,10 @@
-//! Stdio output and the op loop shared by the `--no-tui` REPL and `--print` headless modes.
+//! Headless output and the loop that drives one engine operation.
 
 mod wire;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::{self, Write};
-use std::pin::pin;
 
 use anyhow::Result;
 use clap::ValueEnum;
@@ -13,14 +12,10 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use ox_core::permission::{Basis, SessionGrant};
-use ox_core::protocol::{
-    ApprovalDecision, Event, Op, OpEnd, OpSender, ToolCall, ToolResult, UsageSnapshot, notice,
-};
+use ox_core::protocol::{Event, Op, OpEnd, OpSender, ToolCall, ToolResult, UsageSnapshot, notice};
 use ox_core::session::display::{UNTITLED_MARKER, archive_notice, id_prefix};
 use ox_core::session::store::listing::ArchiveState;
 use ox_core::tool::tasks::{Progress, Task};
-use ox_core::tool::view::ApprovalPreview;
 use ox_core::util::text::{escape_controls, escape_line};
 use ox_tui::glyphs::{INTERRUPTED_MARKER, task_marker};
 
@@ -40,153 +35,50 @@ pub(super) enum RunEnd {
 }
 
 /// Sends `op`, then renders `events` to `output` until `op` ends, the engine stops, or a `signal`
-/// stops the run. Approval requests go to `approver`, and its answer goes back on `ops`. Events
-/// that arrive while `approver` decides wait until it answers, unless one ends `op`, such as the
-/// cancellation an interrupt causes, which drops the question. An engine for a run nobody attends
-/// requests no approval, so such a run passes no `approver`.
+/// stops the run. The unattended permission policy settles calls that require approval.
 ///
-/// SIGINT in a run with an `approver` interrupts `op`, as it does in a shell, while any other
-/// signal stops the run. Once stdout's reader goes away, `op` is interrupted, since nothing reads
+/// Signals stop the run. Once stdout's reader goes away, `op` is interrupted, since nothing reads
 /// the rest. Each `signal` call must be cancel safe, as [`Signals::recv`](super::Signals::recv) is,
 /// since the loop starts a new one for every event.
-pub(super) async fn run_op<O: Write, E: Write, A: Approver>(
+pub(super) async fn run_op<O: Write, E: Write>(
     events: &mut mpsc::UnboundedReceiver<Event>,
     ops: &OpSender,
     output: &mut Output<O, E>,
     signal: &mut impl AsyncFnMut() -> Shutdown,
     op: Op,
-    mut approver: Option<&mut A>,
 ) -> RunEnd {
-    let attended = approver.is_some();
     let Ok(op_id) = ops.submit(op).await else {
         return RunEnd::EngineStopped;
     };
-    let mut held = VecDeque::new();
     let mut interrupted = false;
     loop {
-        let event = if let Some(event) = held.pop_front() {
-            event
-        } else {
-            tokio::select! {
-                biased;
+        let event = tokio::select! {
+            biased;
 
-                shutdown = signal() => {
-                    if let Some(end) = on_signal(output, ops, attended, shutdown).await {
-                        return end;
-                    }
-                    continue;
-                }
-                event = events.recv() => match event {
-                    Some(event) => event,
-                    None => return RunEnd::EngineStopped,
-                },
+            shutdown = signal() => {
+                output.break_line();
+                return RunEnd::Signal(shutdown);
             }
+            event = events.recv() => match event {
+                Some(event) => event,
+                None => return RunEnd::EngineStopped,
+            },
         };
-        let Event::ApprovalRequested {
-            id,
-            preview,
-            basis,
-            grant,
-        } = event
-        else {
-            let end = event.end_of(op_id);
-            output.render(event);
-            if let Some(end) = end {
-                return RunEnd::Ended(end);
-            }
-            if output.stdout_lost() && !interrupted {
-                interrupted = true;
-                _ = ops.submit(Op::Interrupt).await;
-            }
-            continue;
-        };
-
-        let approver = approver
-            .as_deref_mut()
-            .expect("an engine requests approval only in an attended run");
-        let mut decision = pin!(approver.decide(&preview, &basis, grant.as_deref()));
-        let decision = loop {
-            tokio::select! {
-                biased;
-
-                decision = &mut decision => break Some(decision),
-                event = events.recv() => {
-                    let Some(event) = event else {
-                        return RunEnd::EngineStopped;
-                    };
-                    let ends = event.end_of(op_id).is_some();
-                    held.push_back(event);
-                    if ends {
-                        break None;
-                    }
-                }
-                shutdown = signal() => {
-                    if let Some(end) = on_signal(output, ops, attended, shutdown).await {
-                        return end;
-                    }
-                    break None;
-                }
-            }
-        };
-        if let Some(decision) = decision {
-            let decision = decision.unwrap_or_else(|error| {
-                output.record(Err(error));
-                ApprovalDecision::Abort
-            });
-            _ = ops.submit(Op::Resolve { id, decision }).await;
+        let end = event.end_of(op_id);
+        output.render(event);
+        if let Some(end) = end {
+            return RunEnd::Ended(end);
         }
-    }
-}
-
-/// Moves past the `^C` that `shutdown` echoed, then returns how the run ends, or `None` once SIGINT
-/// in an attended run has interrupted the op, which keeps rendering until the op ends.
-async fn on_signal<O: Write, E: Write>(
-    output: &mut Output<O, E>,
-    ops: &OpSender,
-    attended: bool,
-    shutdown: Shutdown,
-) -> Option<RunEnd> {
-    output.break_line();
-    if attended && shutdown == Shutdown::Interrupt {
-        _ = ops.submit(Op::Interrupt).await;
-        return None;
-    }
-    Some(RunEnd::Signal(shutdown))
-}
-
-/// How a stdio frontend answers an approval request.
-pub(super) trait Approver {
-    /// Decides the call `preview` shows, which `basis` made ask and `grant` may allow for the rest
-    /// of the session. An error aborts the call and is retained until the run ends.
-    fn decide(
-        &mut self,
-        preview: &ApprovalPreview,
-        basis: &Basis,
-        grant: Option<&SessionGrant>,
-    ) -> impl Future<Output = Result<ApprovalDecision>>;
-}
-
-/// Uninhabited approval type for unattended runs, which pass no approver.
-pub(super) enum Unattended {}
-
-impl Approver for Unattended {
-    #[expect(
-        clippy::unused_async_trait_impl,
-        reason = "an uninhabited type has no value to await on"
-    )]
-    async fn decide(
-        &mut self,
-        _: &ApprovalPreview,
-        _: &Basis,
-        _: Option<&SessionGrant>,
-    ) -> Result<ApprovalDecision> {
-        match *self {}
+        if output.stdout_lost() && !interrupted {
+            interrupted = true;
+            _ = ops.submit(Op::Interrupt).await;
+        }
     }
 }
 
 // ── Output ──
 
-/// What a stdio run prints on stdout. The REPL always prints text.
+/// What a headless run prints on stdout.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub(crate) enum OutputFormat {
     /// The reply as plain text.
@@ -263,13 +155,6 @@ impl<O: Write, E: Write> Output<O, E> {
         self.record(result);
     }
 
-    /// Prints the events already queued, such as the engine's startup warnings.
-    pub(super) fn render_queued(&mut self, events: &mut mpsc::UnboundedReceiver<Event>) {
-        while let Ok(event) = events.try_recv() {
-            self.render(event);
-        }
-    }
-
     /// Prints that the session could not be saved, which the result of a JSON run also reports.
     pub(super) fn session_write_error(&mut self, failure: &str) {
         self.summary.session_write_error = Some(failure.to_owned());
@@ -277,7 +162,7 @@ impl<O: Write, E: Write> Output<O, E> {
     }
 
     /// Moves to a new line after a signal, past the `^C` a terminal echoes.
-    pub(super) fn break_line(&mut self) {
+    fn break_line(&mut self) {
         if self.format != OutputFormat::Text {
             // The JSON formats render replies into a sink, so their open line is not on stdout.
             self.text.line_open = false;
@@ -313,12 +198,12 @@ impl<O: Write, E: Write> Output<O, E> {
     }
 
     /// Whether stdout's reader went away, so nothing reads the rest of the run.
-    pub(super) fn stdout_lost(&self) -> bool {
+    fn stdout_lost(&self) -> bool {
         self.stdout.lost
     }
 
     /// Retains the error of `result` unless an earlier one is retained.
-    pub(super) fn record(&mut self, result: Result<()>) {
+    fn record(&mut self, result: Result<()>) {
         if let Err(error) = result {
             debug!(error = %format_args!("{error:#}"), "stdio output failed");
             self.failure.get_or_insert(error);
@@ -394,8 +279,8 @@ const NORMAL_INTENSITY: &str = "\x1b[22m";
 
 /// Renders events as text: assistant tokens stream to stdout and everything else to stderr, so
 /// piped output stays clean. Model and tool text passes through [`escape_controls`], so it cannot
-/// redraw the terminal around a REPL approval prompt. An open reply line on stdout ends before a
-/// tool call starts, before the reply that follows shown thinking, and when the operation ends.
+/// redraw the terminal. An open reply line on stdout ends before a tool call starts, before the
+/// reply that follows shown thinking, and when the operation ends.
 struct TextState {
     show_thinking: bool,
     /// Whether the last text written to stdout left the current line open.
@@ -610,8 +495,7 @@ impl StartedCalls {
     }
 }
 
-/// A progress header, one marked line per task, and a closing blank line, or nothing for a cleared
-/// list.
+/// A progress header, one marked line per task, and a blank line, or nothing for a cleared list.
 fn task_lines(tasks: &[Task]) -> String {
     let Some(progress) = Progress::of(tasks) else {
         return String::new();
@@ -647,7 +531,6 @@ mod tests {
     use ox_core::engine::testing::{engine, with_pinned_home};
     use ox_core::model::{Effort, ModelSpec};
     use ox_core::permission::Mode;
-    use ox_core::permission::testing::exec_grant;
     use ox_core::protocol::testing::{OpReceiver, ls_call, op_channel, op_id, text_result};
     use ox_core::protocol::{CompactTrigger, ConfigPick, SessionRef};
     use ox_core::session::saved::{SavedAction, SavedError};
@@ -655,7 +538,6 @@ mod tests {
     use ox_core::tool::bash::background::testing::shells_in_each_state;
     use ox_core::tool::tasks::TaskStatus;
     use ox_core::tool::tasks::testing::{plan, task};
-    use ox_core::tool::testing::bash_preview;
     use ox_core::util::log::testing::LogCapture;
 
     use super::*;
@@ -671,57 +553,8 @@ mod tests {
     mod run_op {
         use super::*;
 
-        /// Answers every approval with its decision, recording what each request offered.
-        struct Fixed {
-            decision: ApprovalDecision,
-            offered: Vec<(String, Option<String>)>,
-        }
-
-        impl Approver for Fixed {
-            fn decide(
-                &mut self,
-                preview: &ApprovalPreview,
-                _: &Basis,
-                grant: Option<&SessionGrant>,
-            ) -> impl Future<Output = Result<ApprovalDecision>> {
-                let rule = grant.map(|grant| grant.suggested().pattern().to_owned());
-                self.offered.push((preview.title.clone(), rule));
-                std::future::ready(Ok(self.decision.clone()))
-            }
-        }
-
-        /// Never answers, as a person who has not typed an answer yet.
-        struct Undecided;
-
-        impl Approver for Undecided {
-            fn decide(
-                &mut self,
-                _: &ApprovalPreview,
-                _: &Basis,
-                _: Option<&SessionGrant>,
-            ) -> impl Future<Output = Result<ApprovalDecision>> {
-                std::future::pending()
-            }
-        }
-
-        fn fixed(decision: ApprovalDecision) -> Fixed {
-            Fixed {
-                decision,
-                offered: Vec::new(),
-            }
-        }
-
         fn prompt() -> Op {
             Op::prompt("hi")
-        }
-
-        fn approval(grant: Option<SessionGrant>) -> Event {
-            Event::ApprovalRequested {
-                id: "t1".to_owned(),
-                preview: bash_preview("ls"),
-                basis: Basis::Mode(Mode::Manual),
-                grant: grant.map(Box::new),
-            }
         }
 
         /// A channel of `events`, its sender kept open.
@@ -749,122 +582,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn answers_each_approval_on_ops() {
-            let (_tx, mut events) = queued([
-                approval(Some(exec_grant("ls"))),
-                Event::Notice("Done.".to_owned()),
-                op_ended(OpEnd::Completed),
-            ]);
-            let (ops_tx, mut ops) = op_channel(4);
-            let (mut output, _, stderr) = output(OutputFormat::Text);
-            let mut approver = fixed(ApprovalDecision::Deny);
-
-            let end = run_op(
-                &mut events,
-                &ops_tx,
-                &mut output,
-                &mut no_signal,
-                prompt(),
-                Some(&mut approver),
-            )
-            .await;
-
-            assert_eq!(end, RunEnd::Ended(OpEnd::Completed));
-            assert_eq!(
-                approver.offered,
-                [("Bash".to_owned(), Some("ls".to_owned()))],
-            );
-            assert_eq!(
-                sent(&mut ops),
-                [
-                    prompt(),
-                    Op::Resolve {
-                        id: "t1".to_owned(),
-                        decision: ApprovalDecision::Deny,
-                    },
-                ],
-            );
-            assert_eq!(stderr.text(), "Done.\n");
-        }
-
-        #[tokio::test]
-        async fn drops_an_unanswered_approval_once_the_op_ends() {
-            let (_tx, mut events) = queued([
-                approval(None),
-                Event::ModeChanged(Mode::Plan),
-                op_ended(OpEnd::Cancelled),
-            ]);
-            let (ops_tx, mut ops) = op_channel(4);
-            let (mut output, _, stderr) = output(OutputFormat::Text);
-
-            let end = run_op(
-                &mut events,
-                &ops_tx,
-                &mut output,
-                &mut no_signal,
-                prompt(),
-                Some(&mut Undecided),
-            )
-            .await;
-
-            assert_eq!(end, RunEnd::Ended(OpEnd::Cancelled));
-            assert_eq!(
-                stderr.text(),
-                format!("Switched to plan mode\n{INTERRUPTED_MARKER}\n"),
-            );
-            assert_eq!(sent(&mut ops), [prompt()]);
-        }
-
-        #[tokio::test]
-        async fn holds_events_that_arrive_during_an_approval_until_it_is_answered() {
-            /// Answers once the events sent with the request have arrived, recording what had
-            /// rendered by then.
-            struct Watching {
-                screen: Screen,
-                rendered: Option<String>,
-            }
-
-            impl Approver for Watching {
-                async fn decide(
-                    &mut self,
-                    _: &ApprovalPreview,
-                    _: &Basis,
-                    _: Option<&SessionGrant>,
-                ) -> Result<ApprovalDecision> {
-                    tokio::task::yield_now().await;
-                    self.rendered = Some(self.screen.text());
-                    Ok(ApprovalDecision::Deny)
-                }
-            }
-
-            let (_tx, mut events) = queued([
-                approval(None),
-                Event::ModeChanged(Mode::Plan),
-                op_ended(OpEnd::Completed),
-            ]);
-            let (ops, _ops_rx) = op_channel(4);
-            let (mut output, _, stderr) = output(OutputFormat::Text);
-            let mut approver = Watching {
-                screen: stderr.clone(),
-                rendered: None,
-            };
-
-            let end = run_op(
-                &mut events,
-                &ops,
-                &mut output,
-                &mut no_signal,
-                prompt(),
-                Some(&mut approver),
-            )
-            .await;
-
-            assert_eq!(end, RunEnd::Ended(OpEnd::Completed));
-            assert_eq!(approver.rendered.as_deref(), Some(""));
-            assert_eq!(stderr.text(), "Switched to plan mode\n");
-        }
-
-        #[tokio::test]
         async fn stops_at_its_ops_end_even_when_rendering_fails() {
             let (_tx, mut events) = queued([
                 Event::StreamToken("reply".to_owned()),
@@ -879,75 +596,12 @@ mod tests {
                 FailingWriter::new(failure),
                 io::sink(),
             );
-            let mut approver = fixed(ApprovalDecision::Deny);
 
-            let end = run_op(
-                &mut events,
-                &ops,
-                &mut output,
-                &mut no_signal,
-                prompt(),
-                Some(&mut approver),
-            )
-            .await;
+            let end = run_op(&mut events, &ops, &mut output, &mut no_signal, prompt()).await;
 
             assert_eq!(end, RunEnd::Ended(OpEnd::Cancelled));
             assert_eq!(events.try_recv().ok(), Some(later_op_ended()));
             assert_eq!(output.finish().unwrap_err().to_string(), failure.message());
-        }
-
-        #[tokio::test]
-        async fn aborts_an_approval_with_failed_output_and_drains_its_ops_end() {
-            struct LostPrompt;
-
-            impl Approver for LostPrompt {
-                fn decide(
-                    &mut self,
-                    _: &ApprovalPreview,
-                    _: &Basis,
-                    _: Option<&SessionGrant>,
-                ) -> impl Future<Output = Result<ApprovalDecision>> {
-                    std::future::ready(Err(anyhow::anyhow!("lost approval prompt")))
-                }
-            }
-
-            let (_tx, mut events) = queued([
-                approval(Some(exec_grant("ls"))),
-                Event::StreamToken("later output".to_owned()),
-                op_ended(OpEnd::Cancelled),
-                later_op_ended(),
-            ]);
-            let (ops_tx, mut ops) = op_channel(4);
-            let (mut output, stdout, stderr) = output(OutputFormat::Text);
-
-            let end = run_op(
-                &mut events,
-                &ops_tx,
-                &mut output,
-                &mut no_signal,
-                prompt(),
-                Some(&mut LostPrompt),
-            )
-            .await;
-
-            assert_eq!(end, RunEnd::Ended(OpEnd::Cancelled));
-            assert_eq!(
-                sent(&mut ops),
-                [
-                    prompt(),
-                    Op::Resolve {
-                        id: "t1".to_owned(),
-                        decision: ApprovalDecision::Abort,
-                    },
-                ],
-            );
-            assert_eq!(stdout.text(), "later output\n");
-            assert_eq!(stderr.text(), format!("{INTERRUPTED_MARKER}\n"));
-            assert_eq!(events.try_recv().ok(), Some(later_op_ended()));
-            assert_eq!(
-                output.finish().unwrap_err().to_string(),
-                "lost approval prompt"
-            );
         }
 
         #[tokio::test]
@@ -968,17 +622,8 @@ mod tests {
             drop(tx);
             let (ops, _ops_rx) = op_channel(4);
             let (mut output, _, stderr) = output(OutputFormat::Text);
-            let mut approver = fixed(ApprovalDecision::Deny);
 
-            let end = run_op(
-                &mut events,
-                &ops,
-                &mut output,
-                &mut no_signal,
-                Op::Clear,
-                Some(&mut approver),
-            )
-            .await;
+            let end = run_op(&mut events, &ops, &mut output, &mut no_signal, Op::Clear).await;
 
             assert_eq!(end, RunEnd::Ended(OpEnd::Completed));
             assert_eq!(
@@ -1001,7 +646,6 @@ mod tests {
                 std::fs::write(&instructions, b"\xff\xfe").unwrap();
                 let mut handle = engine.spawn();
                 let (mut output, _, stderr) = output(OutputFormat::Text);
-                let mut approver = fixed(ApprovalDecision::Deny);
 
                 let end = run_op(
                     &mut handle.events,
@@ -1009,7 +653,6 @@ mod tests {
                     &mut output,
                     &mut no_signal,
                     Op::Clear,
-                    Some(&mut approver),
                 )
                 .await;
 
@@ -1033,32 +676,16 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn reports_a_stopped_engine() {
-            for held in [false, true] {
-                let pending = if held {
-                    approval(None)
-                } else {
-                    Event::StreamToken("partial".to_owned())
-                };
-                let (tx, mut events) = queued([pending]);
-                drop(tx);
-                let (ops, _ops_rx) = op_channel(4);
-                let (mut output, stdout, _) = output(OutputFormat::Text);
+        async fn reports_a_stopped_engine_after_rendering_partial_output() {
+            let (tx, mut events) = queued([Event::StreamToken("partial".to_owned())]);
+            drop(tx);
+            let (ops, _ops_rx) = op_channel(4);
+            let (mut output, stdout, _) = output(OutputFormat::Text);
 
-                let end = run_op(
-                    &mut events,
-                    &ops,
-                    &mut output,
-                    &mut no_signal,
-                    prompt(),
-                    Some(&mut Undecided),
-                )
-                .await;
+            let end = run_op(&mut events, &ops, &mut output, &mut no_signal, prompt()).await;
 
-                assert_eq!(end, RunEnd::EngineStopped, "held: {held}");
-                let expected = if held { "" } else { "partial" };
-                assert_eq!(stdout.text(), expected, "held: {held}");
-            }
+            assert_eq!(end, RunEnd::EngineStopped);
+            assert_eq!(stdout.text(), "partial");
         }
 
         #[tokio::test]
@@ -1095,15 +722,7 @@ mod tests {
                 let (ops_tx, mut ops) = op_channel(4);
                 let mut output = Output::new(OutputFormat::StreamJson, false, stdout, stderr);
 
-                let end = run_op(
-                    &mut events,
-                    &ops_tx,
-                    &mut output,
-                    &mut no_signal,
-                    prompt(),
-                    None::<&mut Unattended>,
-                )
-                .await;
+                let end = run_op(&mut events, &ops_tx, &mut output, &mut no_signal, prompt()).await;
 
                 assert_eq!(end, RunEnd::Ended(OpEnd::Completed), "{case}");
                 let expected = if interrupts {
@@ -1117,119 +736,34 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn sigint_interrupts_an_attended_op_and_other_signals_stop_the_run() {
-            for (attended, signal, ends) in [
-                (true, Shutdown::Interrupt, RunEnd::Ended(OpEnd::Cancelled)),
-                (
-                    false,
-                    Shutdown::Interrupt,
-                    RunEnd::Signal(Shutdown::Interrupt),
-                ),
+        async fn signals_stop_the_run_after_ending_its_open_output_line() {
+            for signal in [
+                Shutdown::Interrupt,
                 #[cfg(unix)]
-                (
-                    true,
-                    Shutdown::Terminate,
-                    RunEnd::Signal(Shutdown::Terminate),
-                ),
+                Shutdown::Terminate,
             ] {
-                let (tx, mut events) = queued([Event::StreamToken("partial".to_owned())]);
+                let (_tx, mut events) = queued([Event::StreamToken("partial".to_owned())]);
                 let (ops_tx, mut ops) = op_channel(4);
                 let (mut output, stdout, stderr) = output(OutputFormat::Text);
-                let mut fired = false;
-                let mut once = async || {
-                    if fired {
-                        return std::future::pending().await;
-                    }
+                let mut signal_once = async || {
                     tokio::task::yield_now().await;
-                    fired = true;
-                    tx.send(op_ended(OpEnd::Cancelled)).unwrap();
                     signal
                 };
-                let mut approver = fixed(ApprovalDecision::Deny);
 
                 let end = run_op(
                     &mut events,
                     &ops_tx,
                     &mut output,
-                    &mut once,
+                    &mut signal_once,
                     prompt(),
-                    attended.then_some(&mut approver),
                 )
                 .await;
 
-                assert_eq!(end, ends, "{attended}, {signal:?}");
-                let interrupts = matches!(end, RunEnd::Ended(_));
-                let expected = if interrupts {
-                    vec![prompt(), Op::Interrupt]
-                } else {
-                    vec![prompt()]
-                };
-                assert_eq!(sent(&mut ops), expected, "{attended}, {signal:?}");
-                assert_eq!(stdout.text(), "partial\n", "{attended}, {signal:?}");
-                let marker = if interrupts {
-                    format!("{INTERRUPTED_MARKER}\n")
-                } else {
-                    String::new()
-                };
-                assert_eq!(stderr.text(), marker, "{attended}, {signal:?}");
+                assert_eq!(end, RunEnd::Signal(signal), "{signal:?}");
+                assert_eq!(sent(&mut ops), [prompt()], "{signal:?}");
+                assert_eq!(stdout.text(), "partial\n", "{signal:?}");
+                assert_eq!(stderr.text(), "", "{signal:?}");
             }
-        }
-
-        #[tokio::test]
-        async fn sigint_during_an_approval_drops_the_question() {
-            let (tx, mut events) = queued([approval(None)]);
-            let (ops_tx, mut ops) = op_channel(4);
-            let (mut output, _, stderr) = output(OutputFormat::Text);
-            let mut fired = false;
-            let mut once = async || {
-                if fired {
-                    return std::future::pending().await;
-                }
-                tokio::task::yield_now().await;
-                fired = true;
-                tx.send(op_ended(OpEnd::Cancelled)).unwrap();
-                Shutdown::Interrupt
-            };
-
-            let end = run_op(
-                &mut events,
-                &ops_tx,
-                &mut output,
-                &mut once,
-                prompt(),
-                Some(&mut Undecided),
-            )
-            .await;
-
-            assert_eq!(end, RunEnd::Ended(OpEnd::Cancelled));
-            assert_eq!(sent(&mut ops), [prompt(), Op::Interrupt]);
-            assert_eq!(stderr.text(), format!("\n{INTERRUPTED_MARKER}\n"));
-        }
-
-        #[cfg(unix)]
-        #[tokio::test]
-        async fn sigterm_during_an_approval_stops_the_run() {
-            let (_tx, mut events) = queued([approval(None)]);
-            let (ops_tx, mut ops) = op_channel(4);
-            let (mut output, _, stderr) = output(OutputFormat::Text);
-            let mut signal = async || {
-                tokio::task::yield_now().await;
-                Shutdown::Terminate
-            };
-
-            let end = run_op(
-                &mut events,
-                &ops_tx,
-                &mut output,
-                &mut signal,
-                prompt(),
-                Some(&mut Undecided),
-            )
-            .await;
-
-            assert_eq!(end, RunEnd::Signal(Shutdown::Terminate));
-            assert_eq!(sent(&mut ops), [prompt()]);
-            assert_eq!(stderr.text(), "\n");
         }
     }
 

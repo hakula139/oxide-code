@@ -4,7 +4,7 @@ A slash command is an input line that starts with `/`, which the TUI runs itself
 
 ## Registry
 
-Each command implements `SlashCommand` in its own `slash/<name>.rs` file, or one file per pair such as `/login` and `/logout`, and `BUILT_INS` lists them in alphabetical order. `ox-core`'s `command` module holds the command table, with each name's aliases and the parsers for its typed forms, so the TUI and the `--no-tui` REPL resolve the same names and arguments.
+Each command implements `SlashCommand` in its own `slash/<name>.rs` file, or one file per pair such as `/login` and `/logout`, and `BUILT_INS` lists them in alphabetical order. `ox-core`'s `command` module holds the command table, with each name's aliases and the parsers for its typed forms, so the TUI resolves command names and arguments.
 
 ## Completion
 
@@ -28,10 +28,10 @@ The popup lists the matching commands in two columns, the name and the descripti
 6. **Background outcomes die with their session.** Each result carries the count of session switches when its command was typed, and the App drops a result from before the latest switch, so a slow `/diff` never prints into the next session's chat, even when its result was already queued at the switch. A switched-away command still runs to completion, which costs only the read it was making, since commands write nothing.
 7. **Swap the model and effort in the engine's `ModelSettings`.** `/model <id>`, `/effort <level>`, and both pickers emit the same `Op::SetModel`, whose `ConfigPick` names a model, an effort, or both, so the typed forms and the modals share one resolver. Each request carries the engine's current settings, so betas and `output_config` follow the swap, and `Engine::set_model` re-resolves the compaction threshold for the new model.
 8. **Slash commands never write user config files.** State is session-only, so a restart reverts to the configured values. Session commands should feel reversible, and any write that outlives the session requires an explicit user action.
-9. **Aliases resolve to canonical but display by surface.** `/clear` is canonical, while `/new` and `/reset` are aliases. The alias table lives in `command`, so the TUI registry and the bare REPL resolve the same aliases, and the popup shows only the alias the user typed.
+9. **Aliases resolve to canonical but display by surface.** `/clear` is canonical, while `/new` and `/reset` are aliases. The alias table lives in `command`, so the TUI registry resolves aliases, and the popup shows only the alias the user typed.
 10. **`/exit` quits, with `/quit` as its alias.** Claude Code, Codex, and pi all accept a typed quit command, so users reach for one before they learn the keys. It forwards `Op::Shutdown`, which the engine takes mid-turn, so it quits during a turn, while Ctrl+D quits only from an empty idle input and only on a second press, because typing the command is deliberate where a habitual EOF press is not.
 11. **A command suppresses its echo when its response stands alone.** `SlashCommand::echoes_input(args)` defaults to true. Modal-only forms, such as `/status`, `/config`, `/help`, and the bare pickers, override it to false because the modal is the response, and the typed `/foo` line would be orphaned in history once the modal closes. Bare `/unarchive` and `/delete` also override it so the error explaining the missing argument stands alone. Typed forms keep echoing, so the chat records the command above its confirmation. Bare `/init` echoes too, because it usually sends its prompt at once, and the line then heads the turn it starts.
-12. **Typed forms parse in core, so the bare REPL runs them too.** `command::typed_op` turns each typed form the REPL supports into the `Op` it runs. The TUI commands other than `/init`, which [Init](init.md) covers, run their typed forms through `command::typed_form`, the same table entry without the REPL's prompt title and error prefix, since the TUI adds both itself, and add only what needs the TUI, such as the pickers behind the bare forms. The REPL rejects any other command with a message naming the commands it runs.
+12. **Typed forms parse in core.** TUI commands other than `/init`, which [Init](init.md) covers, run their typed forms through `command::typed_form`. The TUI supplies prompt titles, error prefixes, and pickers for bare forms.
 
 ## Out of Scope
 
@@ -39,7 +39,7 @@ The popup lists the matching commands in two columns, the name and the descripti
 
 ## Sources
 
-- `crates/ox-core/src/command.rs`: the command table with each command's aliases and parser, `typed_op` and `typed_form`, and the model resolver.
+- `crates/ox-core/src/command.rs`: the command table with each command's aliases and parser, `typed_form`, and the model resolver.
 - `crates/ox-core/src/command/parser.rs`: `parse_slash`, `split_slash`, and `unescape_literal` for the `//` escape.
 - `crates/ox-core/src/session/saved.rs`: `find` and `delete`, which refuse the live session.
 - `crates/ox-tui/src/app/dispatch.rs`: `handle_submit_prompt`, `run_slash`, `apply_slash_outcome`, and the idle and echo gates.

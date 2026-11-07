@@ -1,6 +1,6 @@
 # Headless Mode
 
-`ox -p "<prompt>"` (`--print`) answers one prompt without the TUI and exits when the turn ends. Use it in scripts, CI jobs, and programs that drive `ox`.
+`ox -p "<prompt>"` (`--print`) answers one prompt without the TUI and exits when the turn ends. Use it in scripts, CI jobs, and programs that drive `ox`. An interactive run requires terminals on both stdin and stdout.
 
 ```bash
 ox -p "Summarize the TODOs in src/"                 # Print the reply as text
@@ -110,7 +110,7 @@ Each `stream-json` line is an object with a `type` and, for most types, a `data`
 
 - **`rate_limits_updated`** arrives with each response under a Claude subscription sign-in. Its `five_hour` and `seven_day` windows are each an object with `utilization`, the spent share from 0 to 1, and `resets_at`, the reset time in Unix seconds, or `null` when the response omits that window.
 - **`tasks_updated`** follows the `tool_call_end` of each successful `tasks` call. Its `data` is the task list in order, each task with its `content` and a `status` of `pending`, `in_progress`, or `completed`. An empty array means the list cleared, which happens once every task is completed or when the model sends an empty list.
-- **`session_compacted`** replaces the conversation with a summary when the context nears its window. Its `data` holds the `summary`, the `pre_count` of messages it replaced, `instructions` (`null` for automatic compactions), and the `trigger`, which is `mid_turn` between the turn's rounds and `auto` before the prompt of a continued or resumed session already past the auto-compaction threshold. After `mid_turn`, the turn goes on from the summary. A failed compaction ends the turn with `turn_failed`, after `prompt_unsent` when the prompt never went out. A headless prompt sends `/compact` to the model as text, so to compact after a failure, resume the session with `ox -r <id-prefix>` in the TUI or with `--no-tui` and run `/compact` there.
+- **`session_compacted`** replaces the conversation with a summary when the context nears its window. Its `data` holds the `summary`, the `pre_count` of messages it replaced, `instructions` (`null` for automatic compactions), and the `trigger`, which is `mid_turn` between the turn's rounds and `auto` before the prompt of a continued or resumed session already past the auto-compaction threshold. After `mid_turn`, the turn goes on from the summary. A failed compaction ends the turn with `turn_failed`, after `prompt_unsent` when the prompt never went out. A headless prompt sends `/compact` to the model as text, so to compact after a failure, resume the session with `ox -r <id-prefix>` in the TUI and run `/compact` there.
 - **`turn_rolled_back`** precedes the `turn_failed` of a refused request. The session drops the refused turn, or after a `mid_turn` compaction, only the work that followed the summary.
 - **`background_shells_updated`** arrives when a background shell starts, exits, or stops. Its `data` lists every open shell with its `id`, `command`, and `state`. The state's `type` is `running`, `exited` with the exit code in `data`, or `killed` with the signal number in `data`. A stopped shell leaves the list. When the run ends, every open shell stops without another event, so the last `background_shells_updated` can still list shells as running.
 
@@ -149,13 +149,3 @@ The run cannot ask, so the `cargo test` call ends with a `tool_call_end` whose `
 Within a minor version, JSON output preserves its `type` tags, field names, `stop_reason` values, and `view` shapes. Later versions may add event types and fields, so skip any you don't recognize.
 
 Display text can change in any release. This includes a tool call's `icon`, `label`, and `title`, the wording of `content`, `error`, and `message` strings, and everything written to stderr.
-
-## Bare REPL
-
-`ox --no-tui` reads prompts from stdin and keeps them in one session. It prints each reply to stdout in the `text` format, while its `>` prompt and all other output go to stderr. Use it when the TUI cannot run or to pipe a series of prompts into one session.
-
-- **Input**: Each line is a prompt, except while an approval waits for its answer, so pasting several lines starts one turn per line. A prompt argument, as in `ox --no-tui "Explain this repo"`, runs before the first line. Blank lines are skipped. Bytes that are not valid UTF-8 are replaced with U+FFFD. The end of input or `/exit` exits the program, as does **Ctrl+D** in a terminal. Lines after `/exit` are not read.
-- **Commands**: A subset of the slash commands runs, as listed in [When Commands Run](slash-commands.md#when-commands-run).
-- **Approvals**: In a terminal, a call that needs approval prints its command or diff, and the rule that made it ask when one did, then waits for a letter: `y` approves, `a` allows matching calls for the rest of the session when the call offers that, `n` denies, `f` denies with feedback for the model, and `x` aborts the turn. With piped input, no approval is requested, and those calls are denied as in a `-p` run.
-- **Interrupting**: In a terminal, **Ctrl+C** during a turn stops it and returns to the prompt, and at the prompt it discards the line, as in a shell. With piped input, **Ctrl+C** ends the run. If the program reading stdout closes it, the turn stops as **Ctrl+C** stops it, and the REPL reads no more lines.
-- **Exit status**: The end of input or `/exit` exits with `1` if a prompt failed, a command was rejected, output could not be written, or the session could not be saved, and with `0` otherwise. A closed stdout also exits with `1`. A signal that ends the run makes `ox` die by that signal, which a shell reports as the status in the [table](#exit-status).
