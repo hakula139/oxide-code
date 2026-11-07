@@ -495,8 +495,7 @@ impl StartedCalls {
     }
 }
 
-/// A progress header, one marked line per task, and a closing blank line, or nothing for a cleared
-/// list.
+/// A progress header, one marked line per task, and a blank line, or nothing for a cleared list.
 fn task_lines(tasks: &[Task]) -> String {
     let Some(progress) = Progress::of(tasks) else {
         return String::new();
