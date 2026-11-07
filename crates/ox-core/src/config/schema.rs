@@ -1,4 +1,4 @@
-//! The TOML schema every config file shares: the `[client]`, `[permission]`, and `[tui]` tables.
+//! The TOML schema shared by user config, drop-ins, and restricted project config.
 
 use std::fmt;
 use std::ops::RangeInclusive;
@@ -23,6 +23,7 @@ use crate::util::path::expand_absolute;
 pub(super) struct FileConfig {
     pub(super) client: ClientTable,
     pub(super) permission: PermissionTable,
+    pub(super) interaction: super::interaction::InteractionConfig,
     pub(super) tui: TuiTable,
 }
 

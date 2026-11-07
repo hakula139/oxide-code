@@ -7,14 +7,14 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use ox_core::protocol::Op;
+use ox_core::protocol::{Event, Op, PromptDeadline};
 use ox_core::tool::ask::{Question, QuestionAnswer};
 use ox_core::util::text::escape_hidden;
 
 use super::acceptance::Acceptance;
 use super::chrome::{above, wrap_hints};
 use super::line_editor::LineEditor;
-use super::{Modal, ModalAction, ModalKey};
+use super::{EngineUpdate, Modal, ModalAction, ModalKey, UpdateReply};
 use crate::action::Action;
 use crate::saturating_u16;
 use crate::theme::Theme;
@@ -30,6 +30,7 @@ pub(crate) struct QuestionModal {
     rows: usize,
     max_scroll: usize,
     focus_changed: bool,
+    deadline: Option<PromptDeadline>,
 }
 
 impl QuestionModal {
@@ -44,7 +45,13 @@ impl QuestionModal {
             rows: 0,
             max_scroll: 0,
             focus_changed: true,
+            deadline: None,
         }
+    }
+
+    pub(crate) fn with_deadline(mut self, deadline: Option<PromptDeadline>) -> Self {
+        self.deadline = deadline;
+        self
     }
 
     fn answer(&self, answer: QuestionAnswer) -> ModalAction {
@@ -100,7 +107,24 @@ impl QuestionModal {
         (lines, selected_row)
     }
 
-    fn footer_rows(width: u16, overflow: bool) -> Vec<String> {
+    fn footer_rows(&self, width: u16, overflow: bool) -> Vec<String> {
+        let width = usize::from(width).max(1);
+        let mut rows = self
+            .deadline
+            .into_iter()
+            .flat_map(|deadline| {
+                wrap_line(
+                    Line::from(format!(
+                        "After {}s: {}",
+                        deadline.timeout_seconds, deadline.action
+                    )),
+                    width,
+                    0,
+                    None,
+                )
+            })
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
         let mut hints = vec![
             "↑/↓ choose",
             "Tab type",
@@ -111,13 +135,23 @@ impl QuestionModal {
         if overflow {
             hints.push("PgUp/PgDn scroll");
         }
-        wrap_hints(&hints, usize::from(width).max(1))
+        rows.extend(wrap_hints(&hints, width));
+        rows
     }
 }
 
 impl Modal for QuestionModal {
+    fn on_engine(&mut self, update: EngineUpdate<'_>) -> UpdateReply {
+        match update {
+            EngineUpdate::Event(Event::InteractionClosed { id }) if *id == self.id => {
+                UpdateReply::Closed(None)
+            }
+            _ => UpdateReply::Unclaimed,
+        }
+    }
+
     fn height(&mut self, width: u16, max_height: u16) -> u16 {
-        let rows = self.body(width, None).0.len() + 2 + Self::footer_rows(width, false).len();
+        let rows = self.body(width, None).0.len() + 2 + self.footer_rows(width, false).len();
         saturating_u16(rows).min(max_height)
     }
 
@@ -127,9 +161,9 @@ impl Modal for QuestionModal {
         lines.push(Line::from(Span::styled("Your answer:", theme.text())));
         let editor_row = lines.len();
         lines.push(self.editor.line(area.width, theme));
-        let mut footer = Self::footer_rows(area.width, false);
+        let mut footer = self.footer_rows(area.width, false);
         if lines.len() + footer.len() > usize::from(area.height) {
-            footer = Self::footer_rows(area.width, true);
+            footer = self.footer_rows(area.width, true);
         }
         let body_area = above(area, saturating_u16(footer.len()));
         let footer_area = Rect {
@@ -251,6 +285,9 @@ impl Modal for QuestionModal {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
+    use ox_core::protocol::PromptTimeoutAction;
     use ox_core::tool::ask::QuestionOption;
 
     use super::*;
@@ -293,45 +330,77 @@ mod tests {
 
         #[test]
         fn a_short_narrow_view_keeps_wrapped_controls_visible_while_the_question_scrolls() {
-            let mut modal = modal();
-            modal.question.question = "Review the output before choosing a color. ".repeat(8);
-            modal.question.options = (0..12)
-                .map(|index| QuestionOption {
-                    label: format!("Choice {index}"),
-                    description: Some("Consider the generated output carefully. ".repeat(4)),
-                })
-                .collect();
-            modal.selected = 0;
-            let before = render_rows(&mut modal, 30, 12);
-            modal.acceptance.expire();
+            for timeout_seconds in [None, NonZeroU32::new(120)] {
+                let deadline = timeout_seconds.map(|timeout_seconds| PromptDeadline {
+                    timeout_seconds,
+                    action: PromptTimeoutAction::Recommended,
+                });
+                let mut modal = modal().with_deadline(deadline);
+                modal.question.question = "Review the output before choosing a color. ".repeat(8);
+                modal.question.options = (0..12)
+                    .map(|index| QuestionOption {
+                        label: format!("Choice {index}"),
+                        description: Some("Consider the generated output carefully. ".repeat(4)),
+                    })
+                    .collect();
+                let before = render_rows(&mut modal, 30, 12);
+                modal.acceptance.expire();
 
-            assert!(matches!(
-                modal.handle_key(&KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
-                ModalKey::Consumed
-            ));
-            let after = render_rows(&mut modal, 30, 12);
+                assert!(matches!(
+                    modal.handle_key(&KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
+                    ModalKey::Consumed
+                ));
+                let after_page = render_rows(&mut modal, 30, 12);
+                modal.acceptance.expire();
 
-            for rows in [&before, &after] {
-                for hint in [
-                    "↑/↓ choose",
-                    "Tab type",
-                    "Enter answer",
-                    "Ctrl+S skip",
-                    "Esc abort",
-                    "PgUp/PgDn scroll",
-                ] {
-                    assert!(
-                        rows.iter().any(|row| row.contains(hint)),
-                        "missing {hint}: {rows:?}"
-                    );
+                assert!(matches!(
+                    modal.handle_key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                    ModalKey::Consumed
+                ));
+                let after_tab = render_rows(&mut modal, 30, 12);
+
+                for rows in [&before, &after_page, &after_tab] {
+                    for hint in [
+                        "↑/↓ choose",
+                        "Tab type",
+                        "Enter answer",
+                        "Ctrl+S skip",
+                        "Esc abort",
+                        "PgUp/PgDn scroll",
+                    ] {
+                        assert!(
+                            rows.iter().any(|row| row.contains(hint)),
+                            "missing {hint}: {rows:?}"
+                        );
+                    }
+                    if let Some(deadline) = deadline {
+                        let policy =
+                            format!("After {}s: {}", deadline.timeout_seconds, deadline.action);
+                        let visible = rows
+                            .iter()
+                            .map(|row| row.trim())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        assert!(visible.contains(&policy), "missing {policy}: {rows:?}");
+                    }
                 }
+                let footer_start = if deadline.is_some() {
+                    "After 120s:"
+                } else {
+                    "↑/↓ choose"
+                };
+                let footer = before
+                    .iter()
+                    .position(|row| row.contains(footer_start))
+                    .unwrap();
+                assert_eq!(&before[footer..], &after_page[footer..]);
+                assert_eq!(&before[footer..], &after_tab[footer..]);
+                assert_ne!(&before[..footer], &after_page[..footer]);
+                assert!(
+                    after_tab.iter().any(|row| row.contains("Your answer:")),
+                    "{after_tab:?}"
+                );
             }
-            let footer = before
-                .iter()
-                .position(|row| row.contains("↑/↓ choose"))
-                .unwrap();
-            assert_eq!(&before[footer..], &after[footer..]);
-            assert_ne!(&before[..footer], &after[..footer]);
         }
     }
 

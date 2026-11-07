@@ -122,11 +122,11 @@ impl Modal for ConfirmDeleteSessionModal {
             EngineUpdate::Event(Event::SavedDeleted { id, result }) if *id == self.session_id => {
                 self.pending = false;
                 match result {
-                    Ok(()) => UpdateReply::Closed(ModalAction::SystemMessage(format!(
+                    Ok(()) => UpdateReply::Closed(Some(ModalAction::SystemMessage(format!(
                         "Deleted session {}: {}",
                         id_prefix(id),
                         self.display_title,
-                    ))),
+                    )))),
                     Err(error) => {
                         self.error = Some(saved_error_message(error, CLEAR_THEN_DELETE_HINT));
                         UpdateReply::Shown
@@ -431,7 +431,7 @@ mod tests {
             let action = report(&mut modal, 0xab, Ok(()));
 
             assert!(
-                matches!(&action, UpdateReply::Closed(ModalAction::SystemMessage(msg))
+                matches!(&action, UpdateReply::Closed(Some(ModalAction::SystemMessage(msg)))
                     if msg == "Deleted session abababab: Fix auth flow"),
                 "{action:?}",
             );

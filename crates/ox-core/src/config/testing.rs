@@ -52,6 +52,7 @@ pub(crate) fn test_config(url: impl AsRef<str>, auth: Auth, model: &str) -> Conf
         compaction: CompactionConfig::disabled(),
         permission,
         permission_auto: super::permission_auto::AutoPermissionConfig::default(),
+        interaction: super::interaction::InteractionConfig::default(),
         workspace,
         show_thinking: false,
         show_welcome: true,

@@ -10,14 +10,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use ox_core::permission::SessionGrant;
-use ox_core::protocol::{ApprovalDecision, Op};
+use ox_core::protocol::{ApprovalDecision, Event, Op, PromptDeadline};
 use ox_core::tool::view::{ApprovalBody, ApprovalPreview, Diff, DiffLine, DiffLineKind, DiffRow};
 use ox_core::util::text::is_hidden;
 
 use super::acceptance::Acceptance;
 use super::chrome::{HINT_SEPARATOR, KEY_UP_DOWN, wrap_hints};
 use super::line_editor::LineEditor;
-use super::{Modal, ModalAction, ModalKey};
+use super::{EngineUpdate, Modal, ModalAction, ModalKey, UpdateReply};
 use crate::action::Action;
 use crate::glyphs::{DIFF_SIGN_WIDTH, HUNK_GAP, diff_cap_row, diff_sign};
 use crate::keymap::{KeyChord, hint};
@@ -65,6 +65,7 @@ pub(crate) struct ApprovalModal {
     /// Reused across frames so a large preview is wrapped once per width and palette.
     wrapped: Option<Wrapped>,
     acceptance: Acceptance,
+    deadline: Option<PromptDeadline>,
 }
 
 /// Viewport geometry from the last render.
@@ -184,7 +185,13 @@ impl ApprovalModal {
             view: View::default(),
             wrapped: None,
             acceptance: Acceptance::default(),
+            deadline: None,
         }
+    }
+
+    pub(crate) fn with_deadline(mut self, deadline: Option<PromptDeadline>) -> Self {
+        self.deadline = deadline;
+        self
     }
 
     #[cfg(test)]
@@ -222,8 +229,15 @@ impl ApprovalModal {
             .reason
             .iter()
             .map(|reason| Line::from(reveal(reason, palette.reason, palette.marker, false)));
+        let deadline = self.deadline.map(|deadline| {
+            Line::from(format!(
+                "After {}s: {}",
+                deadline.timeout_seconds, deadline.action,
+            ))
+        });
         let heading = std::iter::once(title)
             .chain(reason)
+            .chain(deadline)
             .flat_map(|line| wrap_line(line, budget, CONTINUATION_INDENT, None))
             .collect();
         let body = self
@@ -368,6 +382,15 @@ impl ApprovalModal {
 }
 
 impl Modal for ApprovalModal {
+    fn on_engine(&mut self, update: EngineUpdate<'_>) -> UpdateReply {
+        match update {
+            EngineUpdate::Event(Event::InteractionClosed { id }) if *id == self.id => {
+                UpdateReply::Closed(None)
+            }
+            _ => UpdateReply::Unclaimed,
+        }
+    }
+
     fn height(&mut self, width: u16, max_height: u16) -> u16 {
         self.refresh_wrapped(width, None);
         let rows = self.wrapped().heading.len()

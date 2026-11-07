@@ -133,6 +133,7 @@ pub struct Engine {
     /// The configured policy plus the session allow rules granted since the live session began.
     policy: Policy,
     permission_auto: crate::config::permission_auto::AutoPermissionConfig,
+    interaction: crate::config::interaction::InteractionConfig,
     /// `None` means the agent loop runs without a per-turn round cap.
     max_tool_rounds: Option<u32>,
     /// Compaction settings resolved for the active model.
@@ -192,6 +193,7 @@ impl Engine {
             shells,
             policy: config.permission.clone(),
             permission_auto: config.permission_auto.clone(),
+            interaction: config.interaction,
             max_tool_rounds: config.max_tool_rounds,
             compaction: config.compaction,
             workspace,
@@ -424,6 +426,7 @@ impl Engine {
         let auto_compaction = self.auto_compaction();
         let mut dispatch_ctx = dispatch::DispatchContext {
             policy: &mut self.policy,
+            interaction: self.interaction,
             workspace: Arc::clone(&self.workspace),
             session: self.transcript.session().clone(),
             tracker: Arc::clone(&self.transcript.file_tracker),
@@ -2839,6 +2842,7 @@ mod tests {
                 Event::Error(_) => "error",
                 Event::ApprovalRequested { .. } => "approval_requested",
                 Event::QuestionAsked { .. } => "question_asked",
+                Event::InteractionClosed { .. } => "interaction_closed",
                 Event::SessionRulesUpdated(_) => "session_rules_updated",
                 Event::TasksUpdated(_) => "tasks_updated",
                 Event::BackgroundShellsUpdated(_) => "background_shells_updated",
