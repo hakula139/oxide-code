@@ -24,7 +24,7 @@
     };
 
     devkit = {
-      url = "github:hakula139/devkit/v1.0.0-rc.3";
+      url = "github:hakula139/devkit/88f619538cc3a79bf223e538504251264e02b4e9";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
@@ -47,8 +47,6 @@
       ...
     }:
     let
-      inherit (nixpkgs) lib;
-
       # git-hooks.nix has dropped x86_64-darwin, which Nixpkgs supports only through 26.05.
       systems = [
         "aarch64-darwin"
@@ -56,13 +54,7 @@
         "x86_64-linux"
       ];
 
-      eachSystem =
-        f:
-        let
-          bySystem = lib.genAttrs systems f;
-          outputs = builtins.attrNames bySystem.${builtins.head systems};
-        in
-        lib.genAttrs outputs (output: builtins.mapAttrs (_: attrs: attrs.${output}) bySystem);
+      eachSystem = devkit.lib.eachSystem systems;
 
       packageFor =
         pkgs:

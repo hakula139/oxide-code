@@ -53,37 +53,7 @@ jobs:
       actions: read
     steps:
       - name: Wait for CI on the tagged commit
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Pull request runs test a merge commit, so only push and dispatched runs count.
-          while true; do
-            verdict=$(
-              gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&per_page=100" \
-                --paginate \
-                --slurp |
-                jq -r '[.[].workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")]
-                  | if any(.[]; .conclusion == "success") then
-                      "passed \(map(select(.conclusion == "success"))[0].html_url)"
-                    elif any(.[]; .status != "completed") then "running"
-                    else "failed" end'
-            )
-            case "$verdict" in
-              passed*)
-                echo "CI passed on $GITHUB_SHA: ${verdict#passed }"
-                exit 0
-                ;;
-              running)
-                sleep 30
-                ;;
-              *)
-                echo "::error::No push or dispatched CI run passed on $GITHUB_SHA." \
-                  "Rerun its failed jobs, or run ci.yml on $GITHUB_REF_NAME, then rerun this job."
-                exit 1
-                ;;
-            esac
-          done
+        uses: hakula139/devkit/actions/tagged-ci@88f619538cc3a79bf223e538504251264e02b4e9
 
   build:
     name: Build (${{ matrix.target }})
@@ -244,28 +214,16 @@ jobs:
             release-assets/*.tar.gz
             release-assets/*.zip
 
-      - name: Install changelog parser
-        uses: taiki-e/install-action@parse-changelog
-
       - name: Publish release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          parse-changelog CHANGELOG.md "${GITHUB_REF_NAME#v}" > release-notes.md
-
-          options=(--verify-tag --title "$GITHUB_REF_NAME" --notes-file release-notes.md)
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
-            options+=(--prerelease)
-          fi
-
-          gh release create "$GITHUB_REF_NAME" \
-            release-assets/oxide-code-x86_64-unknown-linux-gnu.tar.gz \
-            release-assets/oxide-code-x86_64-unknown-linux-gnu.sha256 \
-            release-assets/oxide-code-aarch64-apple-darwin.tar.gz \
-            release-assets/oxide-code-aarch64-apple-darwin.sha256 \
-            release-assets/oxide-code-x86_64-pc-windows-msvc.zip \
-            release-assets/oxide-code-x86_64-pc-windows-msvc.sha256 \
-            "${options[@]}"
+        uses: hakula139/devkit/actions/publish-release@88f619538cc3a79bf223e538504251264e02b4e9
+        with:
+          assets: |
+            release-assets/oxide-code-x86_64-unknown-linux-gnu.tar.gz
+            release-assets/oxide-code-x86_64-unknown-linux-gnu.sha256
+            release-assets/oxide-code-aarch64-apple-darwin.tar.gz
+            release-assets/oxide-code-aarch64-apple-darwin.sha256
+            release-assets/oxide-code-x86_64-pc-windows-msvc.zip
+            release-assets/oxide-code-x86_64-pc-windows-msvc.sha256
 
   formula:
     name: Check Homebrew Formula

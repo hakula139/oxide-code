@@ -61,7 +61,7 @@ The shared devkit hook baseline provides formatting and lint tools directly from
 
 ## Config Style
 
-Prettier and Taplo leave long strings alone, and no formatter covers shell code, so wrap YAML, TOML, and shell files by hand:
+Prettier, Taplo, and shfmt format YAML, TOML, and shell files. Wrap comments and long strings by hand:
 
 - Wrap comments as [Writing](writing.md#comments) describes, and keep other lines within about 100 columns, counting the indent. Leave a line long when it holds an unbreakable token, such as a URL or path, or sits in a heredoc body or literal block whose line breaks are content.
 - Wrap a long string only where its value stays the same, and break it where [Rust](rust.md#strings) breaks a continued literal.
