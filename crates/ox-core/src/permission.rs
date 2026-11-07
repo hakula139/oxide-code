@@ -118,15 +118,12 @@ pub enum Tier {
 
 // ── Workspace ──
 
-/// Where tools run and relative path rules apply. Roots are the launch directory plus
-/// `permission.extra_roots`, resolved like path targets. There are none when the launch directory
-/// is `/`, `$HOME`, or an ancestor of it.
+/// The launch directory and configured roots that anchor path rules and inform classification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Workspace {
     cwd: PathBuf,
     roots: Vec<PathBuf>,
-    /// The directories anchored patterns apply below: the cwd, then each extra root while there are
-    /// roots.
+    /// The cwd followed by each distinct configured root, in configuration order.
     anchors: Vec<Anchor>,
 }
 
@@ -139,7 +136,7 @@ pub(crate) struct Anchor {
 }
 
 impl Anchor {
-    /// Resolves an absolute or `~/` extra root, excluding `/`, home, and home's ancestors.
+    /// Resolves an absolute or `~/` extra root.
     pub(crate) fn resolve(raw: &str) -> Result<Self> {
         let spelled =
             expand_absolute(raw).with_context(|| format!("invalid extra root {raw:?}"))?;
@@ -147,11 +144,6 @@ impl Anchor {
             Ok(root) => root,
             Err(unreachable) => bail!("invalid extra root {raw:?}: {unreachable}"),
         };
-        ensure!(
-            is_workspace(&resolved),
-            "invalid extra root {raw:?}: \
-             `/`, the home directory, and their ancestors cannot be workspace roots"
-        );
         Ok(Self {
             resolved,
             spelled: lexical_normalize(&spelled),
@@ -165,11 +157,7 @@ impl Workspace {
         let resolved = resolve(cwd).ok();
         Self {
             cwd: cwd.to_path_buf(),
-            roots: resolved
-                .clone()
-                .filter(|cwd| is_workspace(cwd))
-                .into_iter()
-                .collect(),
+            roots: resolved.clone().into_iter().collect(),
             anchors: vec![Anchor {
                 resolved: resolved.unwrap_or_else(|| cwd.to_path_buf()),
                 spelled: lexical_normalize(cwd),
@@ -186,15 +174,13 @@ impl Workspace {
         Ok(Self::with_roots(cwd, roots))
     }
 
-    /// The workspace launched in `cwd`, adding validated roots only when `cwd` permits roots.
+    /// The workspace launched in `cwd` with additional rule anchors.
     pub(crate) fn with_roots(cwd: &Path, extra_roots: Vec<Anchor>) -> Self {
         let mut workspace = Self::new(cwd);
-        if !workspace.roots.is_empty() {
-            for root in extra_roots {
-                if !workspace.roots.contains(&root.resolved) {
-                    workspace.roots.push(root.resolved.clone());
-                    workspace.anchors.push(root);
-                }
+        for root in extra_roots {
+            if !workspace.roots.contains(&root.resolved) {
+                workspace.roots.push(root.resolved.clone());
+                workspace.anchors.push(root);
             }
         }
         workspace
@@ -213,11 +199,6 @@ impl Workspace {
         &self.roots
     }
 
-    /// Returns whether the resolved `path` sits inside one of the roots.
-    fn contains(&self, path: &Path) -> bool {
-        self.roots.iter().any(|root| path.starts_with(root))
-    }
-
     /// Every spelling of `path` relative to an anchor directory in either of its spellings, with
     /// names compared by [`fold_name`].
     fn loose_rooted(&self, path: &Path, aliases: &mut DirectoryAliases) -> Vec<String> {
@@ -230,16 +211,6 @@ impl Workspace {
 }
 
 // ── Target ──
-
-/// Whether a path target sits where an edit needs no rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Zone {
-    /// Inside a [`Workspace`] root, so an edit allows without a rule unless an ask rule, such as a
-    /// built-in protected name, holds it.
-    Workspace,
-    /// Anywhere else, so an edit needs an allow rule.
-    Outside,
-}
 
 /// What a tool call accesses, matched against rule patterns, which [`crate::tool::Tool::prepare`]
 /// resolves from its input once so the gate checks and the run act on the same values.
@@ -259,10 +230,8 @@ impl Access {
     }
 
     /// Builds a path target for the location the tool will touch, resolving `path` against the
-    /// workspace's cwd with `resolve`. A path `resolve` cannot place keeps its joined spelling with
-    /// no rooted forms, so it never auto-allows. The tool follows native filesystem behavior. A
-    /// resolved path that is not valid UTF-8 never auto-allows either, since rules match it only by
-    /// its lossy spelling.
+    /// workspace's cwd with `resolve`. A path `resolve` cannot place keeps its joined spelling.
+    /// Non-UTF-8 paths retain their exact spelling for the tool and a lossy spelling for rules.
     pub(crate) fn for_path(path: impl AsRef<Path>, workspace: &Workspace) -> Self {
         Self::Path(PathResolver::new(workspace).resolve(path))
     }
@@ -280,8 +249,8 @@ impl Access {
 /// resolved path is not a substring of the input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PathTarget {
-    /// Where the call lands with every symlink followed. Allow rules, the zone, and the tool's run
-    /// use this spelling alone.
+    /// Where the call lands with every symlink followed. Allow rules and the tool's run use this
+    /// spelling alone.
     pub(crate) canonical: String,
     /// `canonical` as the file system names it, kept only when a name in it is not valid UTF-8,
     /// which `canonical` spells with replacement characters.
@@ -295,7 +264,6 @@ pub(crate) struct PathTarget {
     /// Either spelling relative to either spelling of each anchor directory, with names compared
     /// by [`fold_name`] so a case-variant prefix still counts. Only deny and ask rules match these.
     deny_rooted: Vec<String>,
-    pub(crate) zone: Zone,
 }
 
 impl PathTarget {
@@ -342,15 +310,9 @@ impl<'a> PathResolver<'a> {
             .collect();
         deny_rooted.sort();
         deny_rooted.dedup();
-        let in_root = resolved.as_deref().is_some_and(|r| workspace.contains(r));
         let canonical = resolved.unwrap_or(joined);
 
         let lossy = canonical.to_str().is_none();
-        let zone = if in_root && !lossy && !is_hard_linked(&canonical) {
-            Zone::Workspace
-        } else {
-            Zone::Outside
-        };
         PathTarget {
             canonical: canonical.to_string_lossy().into_owned(),
             exact: lossy.then_some(canonical),
@@ -358,7 +320,6 @@ impl<'a> PathResolver<'a> {
             rooted,
             requested: requested.to_string_lossy().into_owned(),
             deny_rooted,
-            zone,
         }
     }
 }
@@ -671,45 +632,6 @@ fn fold_name(name: &str) -> String {
         .replace_all(&folded, "")
         .trim_end_matches(['.', ' '])
         .to_owned()
-}
-
-/// Returns whether the resolved `dir` may be a workspace root, whose contents auto-allow edits.
-/// `/`, `$HOME`, and the ancestors of `$HOME` may not, since their insides span every dotfile.
-fn is_workspace(dir: &Path) -> bool {
-    let home = std::env::home_dir().map(|home| resolve(&home).unwrap_or(home));
-    dir.parent().is_some() && !home.is_some_and(|home| holds(dir, &home))
-}
-
-/// Returns whether `dir` is `home` or an ancestor of it, compared by identity as well as by
-/// spelling. An alias that `resolve` keeps, such as macOS's case-insensitive `/users/<name>` or the
-/// `/System/Volumes/Data` firmlink, reaches `home` through the same trailing names.
-fn holds(dir: &Path, home: &Path) -> bool {
-    home.starts_with(dir)
-        || home.ancestors().any(|ancestor| {
-            home.strip_prefix(ancestor)
-                .is_ok_and(|rest| same_file::is_same_file(dir.join(rest), home).unwrap_or(false))
-        })
-}
-
-/// Returns whether `path` is a regular file with more than one hard link, one of which may sit
-/// outside the workspace.
-fn is_hard_linked(path: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file() && meta.nlink() > 1)
-    }
-    // std's link count is unstable on Windows, and a zero access mode is enough to query a handle.
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
-            && std::fs::OpenOptions::new()
-                .access_mode(0)
-                .open(path)
-                .and_then(winapi_util::file::information)
-                .is_ok_and(|info| info.number_of_links() > 1)
-    }
 }
 
 // ── Decision ──
@@ -1187,7 +1109,6 @@ impl WalkFilter {
             relative: None,
             rooted: Vec::new(),
             deny_rooted,
-            zone: Zone::Outside,
         };
         self.rules.iter().any(|entry| {
             let discipline = MatchDiscipline::Deny(Prefixes::Walk(&entry.bases));

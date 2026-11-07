@@ -133,7 +133,7 @@ A `net` pattern is a host glob such as `*.example.com`, matched without regard t
 
 ## Workspace Roots
 
-Each `extra_roots` entry is an absolute or `~/` path, such as `"~/src/shared-lib"`, and user config and drop-ins add to one list. Symlinks resolve at startup, and a relative entry, `/`, your home directory, or a parent of it fails the config load. The roots anchor relative path rules and provide classifier context. They do not grant implicit edit permission.
+Each `extra_roots` entry is an absolute or `~/` path, such as `"~/src/shared-lib"`, and user config and drop-ins add to one list. Symlinks resolve at startup, and a relative entry fails the config load. The launch directory comes first, followed by distinct resolved roots in config order. The roots anchor relative path rules and provide classifier context. They do not grant implicit edit permission.
 
 ## Commands the Assistant Runs
 
