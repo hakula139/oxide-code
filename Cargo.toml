@@ -36,7 +36,9 @@ private_intra_doc_links = "allow"
 
 [workspace.dependencies]
 anyhow = "1"
-arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
+arboard = { version = "3.7", default-features = false, features = [
+  "wayland-data-control",
+] }
 base64 = "0.23"
 bytes = "1"
 caseless = "0.2"
@@ -69,11 +71,23 @@ ratatui = "0.30"
 ratatui-textarea = "0.9.3"
 regex = "1"
 regex-syntax = "0.8"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
-rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+reqwest = { version = "0.13", default-features = false, features = [
+  "json",
+  "rustls",
+  "stream",
+] }
+rusqlite = { version = "0.41", default-features = false, features = [
+  "bundled",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+  "aws-lc-rs",
+  "std",
+  "tls12",
+] }
 rustls-platform-verifier = "0.7"
-rustls-webpki = { version = "0.103", default-features = false, features = ["std"] }
+rustls-webpki = { version = "0.103", default-features = false, features = [
+  "std",
+] }
 same-file = "1"
 security-framework = "3"
 serde = { version = "1", features = ["derive"] }
