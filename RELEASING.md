@@ -33,7 +33,7 @@ Before 0.1.0, config, environment variable, and session format changes may freel
 
 ## Release Preparation
 
-Follow the [shared release procedure](https://github.com/hakula139/devkit/blob/v1/docs/releasing.md) for changelog curation, the release PR, tagging its exact merged commit after separate approval, and CI recovery. Use this repository's `cliff.toml` and `CHANGELOG.md`. Stable sections roll up changes since the previous stable tag, and prereleases compare against the previous tag. Keep compare-link references at the end of the changelog.
+Follow the [shared release procedure](https://github.com/hakula139/devkit/blob/v1/docs/releasing.md) for changelog curation, the release PR, tagging its exact merged commit after separate approval, and CI recovery. Draft `CHANGELOG.md` with the shared configuration.
 
 Security fixes describe the gap, affected releases, and published advisory as [SECURITY.md](SECURITY.md) promises. Add an advisory published later to every affected changelog section through a correction PR.
 

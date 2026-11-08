@@ -3,8 +3,6 @@
 /mutants.out*/
 /target/
 
-# Dependencies
-
 # Local environment
 .env.local
 .envrc.local

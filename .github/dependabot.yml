@@ -14,16 +14,6 @@ updates:
       include: scope
     labels:
       - dependencies
-  - package-ecosystem: npm
-    directory: /
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 0
-    commit-message:
-      prefix: chore
-      include: scope
-    labels:
-      - dependencies
   - package-ecosystem: github-actions
     # `/` covers the workflows, and the glob adds the composite actions they share.
     directories:

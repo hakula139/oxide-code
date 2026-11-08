@@ -47,15 +47,6 @@
       ...
     }:
     let
-      # git-hooks.nix has dropped x86_64-darwin, which Nixpkgs supports only through 26.05.
-      systems = [
-        "aarch64-darwin"
-        "aarch64-linux"
-        "x86_64-linux"
-      ];
-
-      eachSystem = devkit.lib.eachSystem systems;
-
       packageFor =
         pkgs:
         self.packages.${pkgs.stdenv.hostPlatform.system}.oxide-code
@@ -77,7 +68,7 @@
         imports = [ (import ./nix/home-manager.nix { inherit packageFor; }) ];
       };
     }
-    // eachSystem (
+    // devkit.lib.eachSystem devkit.lib.systems (
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};

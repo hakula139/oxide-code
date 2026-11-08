@@ -1,6 +1,5 @@
 {
   "config": {
-    "default": true,
     "code-block-style": { "style": "fenced" },
     "code-fence-style": { "style": "backtick" },
     "emphasis-style": { "style": "underscore" },
