@@ -53,7 +53,7 @@ jobs:
       actions: read
     steps:
       - name: Wait for CI on the tagged commit
-        uses: hakula139/devkit/.github/actions/tagged-ci@v1
+        uses: hakula139/devkit/.github/actions/tagged-ci@v2
 
   build:
     name: Build (${{ matrix.target }})
@@ -215,7 +215,7 @@ jobs:
             release-assets/*.zip
 
       - name: Publish release
-        uses: hakula139/devkit/.github/actions/publish-release@v1
+        uses: hakula139/devkit/.github/actions/publish-release@v2
         with:
           assets: |
             release-assets/oxide-code-x86_64-unknown-linux-gnu.tar.gz
