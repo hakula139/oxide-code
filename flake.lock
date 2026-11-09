@@ -1,5 +1,28 @@
 {
   "nodes": {
+    "devkit": {
+      "inputs": {
+        "git-hooks-nix": "git-hooks-nix",
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "nixpkgs-unstable": "nixpkgs-unstable"
+      },
+      "locked": {
+        "lastModified": 1794204530,
+        "narHash": "sha256-kcljoojFDwhCLZd3GTFwDA0jM+QcRqDfwBHxHIE/38o=",
+        "owner": "hakula139",
+        "repo": "devkit",
+        "rev": "1fb13ed3f76630638d442677abd25c6d20b1d954",
+        "type": "github"
+      },
+      "original": {
+        "owner": "hakula139",
+        "ref": "v2",
+        "repo": "devkit",
+        "type": "github"
+      }
+    },
     "flake-compat": {
       "flake": false,
       "locked": {
@@ -20,15 +43,16 @@
       "inputs": {
         "flake-compat": "flake-compat",
         "nixpkgs": [
+          "devkit",
           "nixpkgs"
         ]
       },
       "locked": {
-        "lastModified": 1793686154,
-        "narHash": "sha256-Zb/0L3soxrkfcrywpfp0J++0WFLB3tzh0Xtx9up+VNc=",
+        "lastModified": 1791909798,
+        "narHash": "sha256-VAhpCOmrun/KXimYfR8NM88bciKCui7CqHHhThSzgag=",
         "owner": "cachix",
         "repo": "git-hooks.nix",
-        "rev": "204b6977e00caac19e2313015a598543ca7be150",
+        "rev": "1ba1dbfe28738c9a71c266be6efa5b89e75491a9",
         "type": "github"
       },
       "original": {
@@ -74,9 +98,25 @@
         "type": "github"
       }
     },
+    "nixpkgs-unstable": {
+      "locked": {
+        "lastModified": 1793540411,
+        "narHash": "sha256-fiPJ88izTVucjeo2EQ3jk4aWmLg03I1D4vxnX2QjEgE=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "0bb2eedc20e4739f29e8045034f2828ad7054f8f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
-        "git-hooks-nix": "git-hooks-nix",
+        "devkit": "devkit",
         "home-manager": "home-manager",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay"

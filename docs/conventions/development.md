@@ -4,11 +4,11 @@ Conventions for the dev shell, pre-commit hooks, toolchain, Nix and config file 
 
 ## Dev Shell
 
-The Nix flake provides the pinned Rust toolchain, `cargo-deny`, `cargo-insta`, `cargo-llvm-cov`, `cargo-mutants`, `git-cliff`, Node.js, pnpm, and the `sqlite3` shell:
+The Nix flake provides the pinned Rust toolchain, `cargo-deny`, `cargo-insta`, `cargo-llvm-cov`, `cargo-mutants`, `git-cliff`, and the `sqlite3` shell:
 
 ```bash
-nix develop                                        # Dev shell with the toolchain, hooks, and Node tools
-nix flake check                                    # Run most hooks, the Home Manager module tests, and the test suite
+nix develop                                        # Dev shell with the toolchain and hooks
+nix flake check                                    # Run shared hooks, the Home Manager module tests, and the test suite
 nix build                                          # Build ox from source without running the tests
 ```
 
@@ -20,7 +20,7 @@ Entering the dev shell in this repository installs a [pre-commit](https://pre-co
 
 The hook runs the compile-free subset of the [verification](../../AGENTS.md#verification) checks on staged files: file hygiene, Nix formatting and lints, ShellCheck, `rustfmt`, Prettier and Taplo formatting, `markdownlint`, and `cspell`. Hooks that fix files in place fail the commit if they make changes, so stage the fixes and commit again. Checks that compile the workspace are excluded because their build cost would gate every commit.
 
-The Node-based hooks run tools pinned in `node_modules`, which pnpm installs before running them whenever it is missing or out of date with the lockfile. `nix flake check` leaves them out because its sandbox cannot install `node_modules`, and it leaves out `rustfmt` so that it never fetches the pinned toolchain. CI's Lint job runs the Node tools, and its Rust (Linux) job runs `cargo fmt --check`. Run `pnpm format`, `pnpm lint`, and `pnpm spellcheck` directly when changing documentation, comments, or config files.
+The shared devkit hook baseline provides formatting and lint tools directly from Nix, so the sandbox checks them without installing `node_modules`. Only `rustfmt` is a development-only hook, since fetching the pinned Rust toolchain is left to CI's Rust job. Run `prek run --all-files` in the dev shell to check the whole repository.
 
 ## Toolchain
 
@@ -61,7 +61,7 @@ The Node-based hooks run tools pinned in `node_modules`, which pnpm installs bef
 
 ## Config Style
 
-Prettier and Taplo leave long strings alone, and no formatter covers shell code, so wrap YAML, TOML, and shell files by hand:
+Prettier, Taplo, and shfmt format YAML, TOML, and shell files. Wrap comments and long strings by hand:
 
 - Wrap comments as [Writing](writing.md#comments) describes, and keep other lines within about 100 columns, counting the indent. Leave a line long when it holds an unbreakable token, such as a URL or path, or sits in a heredoc body or literal block whose line breaks are content.
 - Wrap a long string only where its value stays the same, and break it where [Rust](rust.md#strings) breaks a continued literal.
@@ -78,14 +78,14 @@ CI runs on pushes to `main`, pull requests, and manual dispatch. The release wor
 
 | Job                          | Checks                                                                                                                                                                                                                                |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Lint                         | `pnpm format`, `pnpm lint`, `pnpm spellcheck`, and `cargo deny check` in the flake's `lint` shell, which leaves out the pinned toolchain                                                                                              |
+| Lint                         | `cargo deny check` in the flake's `lint` shell, which leaves out the pinned toolchain                                                                                                                                                 |
 | Rust (Linux, macOS, Windows) | `cargo fmt --check` on Linux, then `cargo clippy --all-targets`, `cargo clippy`, `cargo doc --no-deps`, and the test suite under `cargo llvm-cov`, uploaded to Codecov, then on Linux a check that every snapshot baseline has a test |
 | MSRV                         | `cargo hack check --rust-version` against `rust-version`                                                                                                                                                                              |
 | Nix (Linux, macOS)           | `nix flake check`, which also runs the test suite in the build sandbox, then the package build with its `ox --version` check                                                                                                          |
 
 Branch protection requires only the CI Result job and Codecov's `codecov/patch` status. CI Result reads every attempt's jobs from the Actions API, keeps the latest attempt for each job name, and fails when any job of the CI workflow, including each matrix leg, concludes anything other than success or skipped. That catches a leg cancelled before a runner picks it up, which the `needs` results of a matrix job omit, and retains earlier failures when only the gate reruns. CI Result runs once the jobs in its `needs` finish and counts any unfinished job as a failure, so list each new job there.
 
-The Lint and Nix jobs pull from the `hakula` Cachix cache, and runs on `main` or by the maintainer push their builds to it. The cache only saves build time, so a failed Cachix setup, download, or push does not fail a job: a failed setup logs a warning and the job builds without the cache, a failed download makes Nix build that path from source, and a failed push at the end of the job shows Cachix's error annotation on a green job. Every other failed step still fails its job and CI Result. A download that stalls without failing still runs the job into its timeout, which [#715](https://github.com/hakula139/oxide-code/issues/715) tracks.
+The Lint and Nix jobs pull from the `hakula` Cachix cache and push their builds only on the default branch. The cache only saves build time, so a failed Cachix setup, download, or push does not fail a job: a failed setup logs a warning and the job builds without the cache, a failed download makes Nix build that path from source, and a failed push at the end of the job shows Cachix's error annotation on a green job. Every other failed step still fails its job and CI Result. A download that stalls without failing still runs the job into its timeout, which [#715](https://github.com/hakula139/oxide-code/issues/715) tracks.
 
 A push to a pull request cancels the CI it supersedes, while every push to `main` gets its own run, which a later push never cancels.
 
