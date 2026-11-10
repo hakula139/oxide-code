@@ -1,17 +1,15 @@
 # User Guide
 
-Documentation for using oxide-code (`ox`).
-
-| Document                             | Description                                                                                                               |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| [Installation](install.md)           | Requirements, prebuilt binary, Homebrew, Cargo, Nix, verify / update / uninstall                                          |
-| [Quickstart](quickstart.md)          | Credentials, first session, tool approval, instruction files                                                              |
-| [Authentication](authentication.md)  | Credential sources, browser sign-in, fixed credentials, LLM gateways                                                      |
-| [Terminal UI](terminal-ui.md)        | Input keys, queued prompts, interrupting and exiting, scrolling, selecting and copying                                    |
-| [Configuration](configuration.md)    | Layered config, models, compaction, TUI settings, themes, TLS, environment, logs                                          |
-| [Permissions](permissions.md)        | Permission modes, the approval prompt, pattern cookbook, built-in rules, workspace roots, the environment commands run in |
-| [Slash Commands](slash-commands.md)  | Built-in client-side commands and autocomplete                                                                            |
-| [Instruction Files](instructions.md) | AGENTS.md / CLAUDE.md setup and discovery rules                                                                           |
-| [Sessions](sessions.md)              | Storage, listing, resume, titles, deletion, archiving, security                                                           |
-| [Headless Mode](headless.md)         | One-shot `-p` runs, output formats, exit status, the JSON result and event schema                                         |
-| [Theming](theming.md)                | Built-in palettes, custom themes, slot overrides                                                                          |
+| Guide                                | Covers                                                                            |
+| ------------------------------------ | --------------------------------------------------------------------------------- |
+| [Installation](install.md)           | Requirements, install methods, update, and uninstall                              |
+| [Quickstart](quickstart.md)          | Credentials, a first session, and tool approval                                   |
+| [Authentication](authentication.md)  | Credential sources, browser sign-in, fixed credentials, and LLM gateways          |
+| [Terminal UI](terminal-ui.md)        | Input keys, prompt history, queued prompts, scrolling, and copying                |
+| [Configuration](configuration.md)    | Config layers, every config key and environment variable, and logs                |
+| [Permissions](permissions.md)        | Permission modes, the approval prompt, rule patterns, and the command environment |
+| [Slash Commands](slash-commands.md)  | Built-in commands, pickers, and compaction                                        |
+| [Instruction Files](instructions.md) | Where `AGENTS.md` and `CLAUDE.md` files load from                                 |
+| [Sessions](sessions.md)              | Storage, listing, resuming, archiving, and moving sessions                        |
+| [Headless Mode](headless.md)         | One-shot `-p` runs, output formats, exit status, and the JSON schema              |
+| [Theming](theming.md)                | Built-in themes, custom theme files, and slot overrides                           |

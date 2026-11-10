@@ -13,42 +13,36 @@ See [Installation](install.md) for the prebuilt binary, Cargo, Nix, and other pl
 
 ## Set Up Credentials
 
-The easiest way to authenticate is with an Anthropic API key:
+Use any of these:
 
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-```
+- **An Anthropic API key**: `export ANTHROPIC_API_KEY=sk-ant-...`
+- **A Claude account**: Run `ox`, then `/login` to sign in through your browser.
+- **An existing [Claude Code](https://code.claude.com/docs) login**: oxide-code uses it automatically.
 
-You can also sign in with a Claude account:
-
-- Run `ox`, then `/login` to sign in through your browser.
-- If [Claude Code](https://code.claude.com/docs) is installed and signed in, oxide-code uses that login automatically.
-
-[Authentication](authentication.md) lists all credential sources and the order in which they apply.
+[Authentication](authentication.md) lists every credential source and the order in which they apply.
 
 ## Start a Session
 
-Run `ox` to start an interactive terminal session, then type a task and press **Enter**:
+Run `ox`, type a task, and press **Enter**:
 
 ```text
 ❯ Read main.rs and explain the agent loop.
 ```
 
-In the chat:
+| Key                                    | Action                                                     |
+| -------------------------------------- | ---------------------------------------------------------- |
+| Mouse wheel, **PageUp** / **PageDown** | Scroll the chat, and **Ctrl+End** follows new output again |
+| **Ctrl+O**                             | Expand or collapse long tool output and finished thinking  |
+| **Tab** / **Shift+Tab**                | Step through the [permission modes](permissions.md#modes)  |
+| Drag                                   | Select chat text, and copy it to the clipboard on release  |
+| **Esc**                                | Stop a running turn                                        |
+| **Ctrl+C** twice, or **Ctrl+D** twice  | Exit, with **Ctrl+D** working only on an empty input       |
 
-- **Scroll**: Use the mouse wheel or **PageUp** / **PageDown**, and press **Ctrl+End** to follow new output again.
-- **Expand output**: Press **Ctrl+O** to show long tool output and finished thinking in full, and again to collapse them.
-- **Switch modes**: Press **Tab** or **Shift+Tab** to step through the [permission modes](permissions.md#modes).
-- **Select and copy**: Drag over chat text to select it, and release to copy it to the clipboard.
-- **Interrupt and exit**: Press **Esc** to stop a running turn, and **Ctrl+C** twice, or **Ctrl+D** twice with an empty input, to exit.
-
-[Terminal UI](terminal-ui.md) covers new lines and the other input keys, queued prompts, and copying over SSH.
+[Terminal UI](terminal-ui.md) covers new lines, the other input keys, queued prompts, and copying over SSH.
 
 ## Approve Tool Calls
 
-The default `auto` permission mode uses a separate model to approve tool calls or ask for your confirmation. Your configured deny and ask rules take precedence, while allow rules and session grants approve matching calls. If the classifier cannot decide or its request fails, the call asks. Internal operations confined to session state run without asking.
-
-The approval prompt takes these keys:
+In the default `auto` permission mode, a separate model approves routine tool calls and asks for your confirmation on the rest. The approval prompt takes these keys:
 
 | Key     | Effect                                                        |
 | ------- | ------------------------------------------------------------- |
@@ -58,17 +52,13 @@ The approval prompt takes these keys:
 | **F**   | Deny with a note the model reads                              |
 | **Esc** | Deny and end the turn                                         |
 
-When the prompt offers **A**, pressing it opens the pattern it will allow, such as `cargo test`, which you can edit before pressing **Enter**, for example to widen it to `cargo test *`. Session rules last until you exit or start another session, and `/status` lists them.
-
-See [Permissions](permissions.md) for the other modes, the rest of the prompt's behavior, and how to write patterns.
+**A** opens the pattern it will allow, such as `cargo test`, which you can edit before pressing **Enter**, for example to widen it to `cargo test *`. [Permissions](permissions.md) covers the other modes, your own rules, and the pattern syntax.
 
 ## Tasks and Background Commands
 
-- **Task list**: For multi-step work, the assistant maintains a task list that the TUI displays above the input. The list clears when all tasks are done and stays with the session through `/compact` and resume.
-- **Background shells**: For a dev server, watcher, or long build, the assistant can run a command in the background and read its output with `bash_output` while it continues working. `/status` lists open shells. They keep running if you interrupt a turn with **Esc** and end when you exit or start another session with `/clear`, `/archive`, or `/resume`. To stop one sooner, ask the assistant.
+- **Task list**: For multi-step work, the assistant keeps a task list that the TUI shows above the input. It clears once every task is done and stays with the session through `/compact` and resume.
+- **Background shells**: The assistant can run a dev server, watcher, or long build in the background and read its output with `bash_output` while it keeps working. `/status` lists open shells. They survive **Esc** and end when you exit or start another session with `/clear`, `/archive`, or `/resume`. To stop one sooner, ask the assistant.
 
 ## Customize Behavior
 
-Add an `AGENTS.md` file to your project root with project-specific instructions, such as coding conventions and commands to run after a change. An existing `CLAUDE.md` works too. Run `/init` to have the assistant draft one based on the codebase.
-
-See [Instruction Files](instructions.md) for where these files can live and how they combine.
+Add an `AGENTS.md` file to your project root with project-specific instructions, such as coding conventions and the commands to run after a change. An existing `CLAUDE.md` works too, and `/init` has the assistant draft one from the codebase. [Instruction Files](instructions.md) covers where these files can live and how they combine.
