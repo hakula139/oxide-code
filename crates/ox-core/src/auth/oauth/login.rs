@@ -208,8 +208,7 @@ pub(crate) enum Grant {
 
 // ── PKCE ──
 
-/// 32 bytes from the OS random source, base64url-encoded, as Claude Code makes its verifier and
-/// `state`.
+/// 32 OS-random bytes, base64url-encoded, as Claude Code makes its verifier and `state`.
 fn random_token() -> Result<String> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).context("failed to read the OS random source")?;

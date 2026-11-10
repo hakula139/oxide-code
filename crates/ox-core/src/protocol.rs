@@ -63,8 +63,7 @@ pub enum Op {
     AnswerQuestion { id: String, answer: QuestionAnswer },
     /// Swaps the model, the effort, or both for later turns.
     SetModel(ConfigPick),
-    /// Switches the permission mode. Mid-turn, the switch applies from the next tool call the gate
-    /// weighs.
+    /// Switches the permission mode. Mid-turn, it applies from the next tool call the gate checks.
     SetMode(Mode),
     /// Summarizes the transcript into a synthetic continuation, focused by `instructions`, and
     /// persists the compaction boundary, which [`Event::SessionCompacted`] reports.

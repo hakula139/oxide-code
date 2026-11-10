@@ -615,10 +615,10 @@ static DEFAULT_IGNORABLE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\p{Default_Ignorable_Code_Point}").expect("a Unicode property regex compiles")
 });
 
-/// One file name in the form deny and ask rules compare by: default-ignorable code
-/// points dropped, Unicode compatibility-caseless (D146: NFKD with full case folding), and trailing
-/// dots and spaces trimmed as Windows does. A ligature, long-s, or `.git.` spelling then compares
-/// equal to the ASCII name it opens as.
+/// One file name in the form deny and ask rules compare by: default-ignorable code points dropped,
+/// Unicode compatibility-caseless (D146: NFKD with full case folding), and trailing dots and spaces
+/// trimmed as Windows does. A ligature, long-s, or `.git.` spelling then compares equal to the
+/// ASCII name it opens as.
 fn fold_name(name: &str) -> String {
     let folded: String = name
         .chars()

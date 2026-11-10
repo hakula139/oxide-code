@@ -375,8 +375,7 @@ impl LiveTranscript {
 }
 
 /// Replays the prompt a session recorded, or builds a fresh one in `mode` with `tools` for a
-/// session without one. Also returns the warnings about instruction files a fresh build could not
-/// read.
+/// session without one. Also returns warnings for the instruction files a fresh build skipped.
 async fn session_prompt(
     context: Option<SessionContext>,
     model: &ModelSpec,

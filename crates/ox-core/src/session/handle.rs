@@ -109,8 +109,7 @@ pub(crate) struct RecordOutcome {
     pub(crate) report: WriteReport,
 }
 
-/// What [`SessionHandle::compact`] returns. `pre_count` is the message count the compaction
-/// replaced.
+/// What [`SessionHandle::compact`] returns. `pre_count` is the message count it replaced.
 #[derive(Debug)]
 pub(crate) struct CompactOutcome {
     pub(crate) pre_count: u32,

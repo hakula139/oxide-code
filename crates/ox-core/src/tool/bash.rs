@@ -570,8 +570,7 @@ impl PipeCapture {
         self.push(note.as_bytes());
     }
 
-    /// Starts the spill with the kept bytes, which hold everything the pipe sent while nothing was
-    /// dropped.
+    /// Starts the spill with the kept bytes, which hold all the pipe sent before the first drop.
     fn spill_kept(&mut self) {
         let (front, back) = self.tail.as_slices();
         self.spill.write(&self.head);

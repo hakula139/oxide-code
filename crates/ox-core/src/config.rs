@@ -1899,8 +1899,7 @@ mod tests {
 
         #[tokio::test]
         async fn malformed_custom_headers_fail_before_credentials_resolve() {
-            // No credential exists for the gateway, so reaching auth would fail with a different
-            // error.
+            // No credential exists for the gateway, so reaching auth would fail with another error.
             let dir = tempfile::tempdir().unwrap();
             let vars = env_vars(vec![
                 xdg(&dir),

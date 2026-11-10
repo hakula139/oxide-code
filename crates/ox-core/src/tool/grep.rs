@@ -465,8 +465,7 @@ impl<'a> Search<'a> {
     /// after the walk found it.
     ///
     /// The read refuses a symlink and never blocks on a fifo, and the opened file must be a regular
-    /// file within the size limit, so an entry swapped after the walk checked it is not read
-    /// through.
+    /// file within the size limit, so the read never follows an entry swapped after the walk.
     fn file(&mut self, path: &Path, on_line: impl FnMut(Line<'_>) -> bool) {
         let bytes = match read_regular_file(path, self.size_limit) {
             Ok(bytes) => bytes,

@@ -454,9 +454,7 @@ pub(super) async fn record_drained_prompts(
 
 // ── Stream Processing ──
 
-/// The request for the conversation's next round: `transcript` under its prompt, `settings`, and
-/// `tools`, attributed to `session_id`, sent with `auth`, and caching its tail for the round after
-/// it.
+/// The request for the conversation's next round, caching its tail for the round after it.
 pub(super) fn conversation_request<'a>(
     session_id: &'a str,
     auth: &'a Auth,
