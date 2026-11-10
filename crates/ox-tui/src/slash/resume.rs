@@ -537,8 +537,7 @@ impl ResumePicker {
             ProjectScope::Current => "current project",
             ProjectScope::Every => "all projects",
         };
-        // The scope follows the Esc hint, ahead of the other keys, so a medium-width footer keeps
-        // the scope.
+        // The scope follows the Esc hint, ahead of other keys, so a medium-width footer keeps it.
         let mut hints = Vec::new();
         for (action, hint) in ACTIONS.hints(self) {
             hints.push(hint);

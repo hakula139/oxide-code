@@ -217,7 +217,7 @@ impl App {
         self.dirty = true;
     }
 
-    /// Interrupts the running work, or when idle arms the exit window or quits inside it.
+    /// Interrupts the running work, or when idle, arms the exit window or quits inside it.
     fn handle_ctrl_c(&mut self) {
         if self.in_flight.is_none() {
             self.confirm_exit();

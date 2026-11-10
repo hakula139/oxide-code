@@ -6,8 +6,7 @@
 //!   (`/model`, `/effort`, `/theme`). Tab replaces the prefix with `/{cmd} {value} `.
 //!
 //! The selected row paints in bold `text` and the others dim, so contrast stands in for a prefix
-//! glyph or fill. Lists past [`MAX_VISIBLE_ROWS`] scroll with a centered cursor, as Claude Code's
-//! typeahead does.
+//! glyph or fill. Lists past [`MAX_VISIBLE_ROWS`] scroll with a centered cursor, as in Claude Code.
 
 use std::borrow::Cow;
 
