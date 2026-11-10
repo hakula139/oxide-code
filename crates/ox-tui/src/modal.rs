@@ -54,8 +54,8 @@ pub(crate) trait Modal: Send {
         UpdateReply::Unclaimed
     }
 
-    /// Receives a typed page that a picker's worker read, wherever the modal sits
-    /// on the stack. Returns the page when it answers another modal's request. Default returns it.
+    /// Receives a typed page that a picker's worker read, wherever the modal sits on the stack.
+    /// Returns the page when it answers another modal's request. Default returns it.
     fn on_page(&mut self, page: ModalPage) -> Option<ModalPage> {
         Some(page)
     }

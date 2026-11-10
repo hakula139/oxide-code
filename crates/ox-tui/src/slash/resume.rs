@@ -1,6 +1,5 @@
 //! `/resume` (alias `/continue`) opens a [`SearchableList`] session picker, and
-//! `/resume <id-prefix>` resumes directly. `ox -r` without a session opens the same picker at
-//! startup.
+//! `/resume <id-prefix>` resumes directly. A bare `ox -r` opens the same picker at startup.
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -539,7 +538,7 @@ impl ResumePicker {
             ProjectScope::Every => "all projects",
         };
         // The scope follows the Esc hint, ahead of the other keys, so a medium-width footer keeps
-        // it.
+        // the scope.
         let mut hints = Vec::new();
         for (action, hint) in ACTIONS.hints(self) {
             hints.push(hint);

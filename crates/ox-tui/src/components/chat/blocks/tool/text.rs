@@ -55,8 +55,7 @@ mod tests {
     mod render {
         use super::*;
 
-        /// Rows of `content` under `label` in the compact or expanded view, wide enough that no row
-        /// wraps.
+        /// Rows of `content` under `label`, compact or expanded, at a width where no row wraps.
         fn render_rows(content: &str, label: &str, expanded: bool) -> Vec<String> {
             let theme = Theme::default();
             let ctx = RenderCtx {

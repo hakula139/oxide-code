@@ -198,8 +198,7 @@ impl InputArea {
         let cursor_y = textarea_area.y + cursor_row - top;
 
         if let Some(token) = self.ghost_text() {
-            // Mirror `ratatui_textarea`'s built-in placeholder layout: the cursor sits at the
-            // insertion column, the dim hint starts one column right.
+            // Mirrors `ratatui_textarea`'s built-in placeholder layout.
             let ghost_x = raw_cursor_x.saturating_add(1);
             let width = textarea_area.right().saturating_sub(ghost_x);
             if width > 0 {
@@ -335,8 +334,7 @@ impl InputArea {
         self.popup.set_state(state.as_ref());
     }
 
-    /// The command's usage, as `/help` lists it, painted dim at the cursor until an argument
-    /// starts.
+    /// The command's usage, as `/help` lists it, shown dim at the cursor until an argument starts.
     fn ghost_text(&self) -> Option<&'static str> {
         let [single] = self.textarea.lines() else {
             return None;
@@ -854,8 +852,6 @@ mod tests {
 
         #[test]
         fn paints_ghost_text_after_cursor_in_arg_mode() {
-            // Mirrors the textarea's built-in placeholder layout: cursor at the insertion point,
-            // dim hint starts the column right of it.
             let mut input = test_input();
             type_text(&mut input, "/model ");
             input.refresh_popup();
