@@ -31,7 +31,10 @@ The attribution block follows the same split. A first-party request carries the 
 
 ## Retries
 
-`with_retry` classifies each failed attempt. A transport failure and a 408, 409, 429, or 5xx status retry with exponential backoff and jitter, up to five retries, while an `x-should-retry` header overrides the status rule. A server-requested `retry-after` longer than a minute fails at once so the user sees an exhausted quota promptly. A builder error and every other status are fatal. Failure to produce a credential is fatal unless a token refresh is transient enough that a later attempt may complete it.
+`with_retry` classifies each failed attempt:
+
+- **Retried.** A transport failure and a 408, 409, 429, or 5xx status retry with exponential backoff and jitter, up to five retries, and an `x-should-retry` header overrides the status rule.
+- **Fatal.** A builder error and every other status fail at once, as does a server-requested `retry-after` longer than a minute, so the user sees an exhausted quota promptly. Failing to produce a credential is fatal unless the token refresh failed transiently, so a later attempt may complete it.
 
 ## Design Decisions
 

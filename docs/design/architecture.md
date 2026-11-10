@@ -44,6 +44,6 @@ Layer placement follows responsibility. `git` applies the credential policy to e
 
 Background work returns through [`AppEvent`](../../crates/ox-tui/src/app_event.rs), keeping host probes, clipboard operations, and picker queries off the interaction path. State updates request a redraw, and the frame clock coalesces rendering.
 
-For example, [`prompt_history`](../../crates/ox-tui/src/prompt_history.rs) owns prompt search, preview, and recall into the composer. `session::store::prompt_history` supplies the saved-prompt query, while `modal::pages` runs page reads and delivers their results through `AppEvent`.
+[`prompt_history`](../../crates/ox-tui/src/prompt_history.rs), for one, owns prompt search, preview, and recall into the composer, while `session::store::prompt_history` supplies the saved-prompt query and `modal::pages` runs page reads and delivers their results through `AppEvent`.
 
 [Terminal UI](tui.md) covers component composition, rendering, and input handling. [Modals](modals.md) describes picker interaction and background paging.
