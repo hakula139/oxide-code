@@ -74,6 +74,7 @@
         pkgs = nixpkgs.legacyPackages.${system};
         dk = devkit.lib.mkLib pkgs;
 
+        rustVersion = (pkgs.lib.importTOML ./Cargo.toml).workspace.package.rust-version;
         rustBin = rust-overlay.lib.mkRustBin { } pkgs;
         rustToolchain = rustBin.fromRustupToolchainFile ./rust-toolchain.toml;
         rustDevToolchain = rustToolchain.override (prev: {
@@ -91,9 +92,7 @@
         preCommit = dk.preCommit {
           src = ./.;
           hooks = {
-            actionlint.enable = true;
             check-shebang-scripts-are-executable.enable = true;
-            check-yaml.enable = true;
 
             clippy = {
               enable = true;
@@ -106,12 +105,6 @@
               settings.denyWarnings = false;
             };
 
-            cspell.enable = true;
-            deadnix.enable = true;
-            dprint.enable = true;
-            editorconfig-checker.enable = true;
-            markdownlint-cli2.enable = true;
-            nixfmt.enable = true;
             nu-check.enable = true;
             prettier.enable = true;
 
@@ -125,8 +118,6 @@
 
             shellcheck.enable = true;
             shfmt.enable = true;
-            sort-file-contents.enable = true;
-            statix.enable = true;
             taplo.enable = true;
           };
         };
@@ -136,35 +127,45 @@
         # ------------------------------------------------------------------------------------------
         # Dev Shells
         # ------------------------------------------------------------------------------------------
-        devShells.default = pkgs.mkShell {
-          name = "oxide-code-dev";
+        devShells = {
+          default = pkgs.mkShell {
+            name = "oxide-code-dev";
 
-          packages = [
-            rustDevToolchain
-          ]
-          ++ (with pkgs; [
-            cargo-deny
-            cargo-insta
-            cargo-llvm-cov
-            cargo-mutants
-            git-cliff
-            sqlite
-          ]);
+            packages = [
+              rustDevToolchain
+            ]
+            ++ (with pkgs; [
+              cargo-deny
+              cargo-insta
+              cargo-llvm-cov
+              cargo-mutants
+              git-cliff
+              sqlite
+            ]);
 
-          inputsFrom = [ preCommit ];
-        };
+            inputsFrom = [ preCommit ];
+          };
 
-        # CI's Lint job runs in this shell, which leaves out the pinned toolchain so that every tool
-        # comes from the nixpkgs binary cache. `cargo deny` needs only `cargo metadata`, which
-        # nixpkgs' cargo serves for this workspace.
-        devShells.lint = pkgs.mkShell {
-          name = "oxide-code-lint";
+          # CI's Dependency Check and formula rendering run in this shell, which leaves out the
+          # pinned toolchain so that every tool comes from the nixpkgs binary cache. `cargo deny`
+          # needs only `cargo metadata`, which nixpkgs' cargo serves for this workspace.
+          lint = pkgs.mkShell {
+            name = "oxide-code-lint";
 
-          packages = with pkgs; [
-            cargo
-            cargo-deny
-            nushell
-          ];
+            packages = with pkgs; [
+              cargo
+              cargo-deny
+              nushell
+            ];
+          };
+
+          msrv = pkgs.mkShell {
+            name = "oxide-code-msrv";
+
+            packages = [
+              rustBin.stable.${pkgs.lib.versions.pad 3 rustVersion}.minimal
+            ];
+          };
         };
 
         # ------------------------------------------------------------------------------------------
@@ -194,15 +195,6 @@
             in
             assert (self.overlays.default callerPkgs pkgs).oxide-code.drvPath == oxide-code.drvPath;
             pkgs.emptyFile;
-
-          # Runs the test suite in the build sandbox, without the package's release build.
-          tests = oxide-code.overrideAttrs {
-            pname = "oxide-code-tests";
-            buildPhase = "true";
-            doCheck = true;
-            installPhase = "touch $out";
-            doInstallCheck = false;
-          };
         };
 
         # ------------------------------------------------------------------------------------------
