@@ -64,6 +64,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # The Nix job's clippy hook covers Linux.
       - name: Clippy
         if: ${{ !cancelled() && matrix.os != 'Linux' }}
         run: cargo clippy --locked --all-targets

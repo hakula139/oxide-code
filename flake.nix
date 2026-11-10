@@ -94,19 +94,27 @@
             actionlint.enable = true;
             check-shebang-scripts-are-executable.enable = true;
             check-yaml.enable = true;
+
             clippy = {
               enable = true;
               packageOverrides = {
                 cargo = rustDevToolchain;
                 clippy = rustDevToolchain;
               };
+              # `.cargo/config.toml` already denies warnings, and matching `cargo clippy`'s
+              # arguments lets the hook and a plain run share one build cache.
+              settings.denyWarnings = false;
             };
+
             cspell.enable = true;
             deadnix.enable = true;
             dprint.enable = true;
+            editorconfig-checker.enable = true;
             markdownlint-cli2.enable = true;
             nixfmt.enable = true;
+            nu-check.enable = true;
             prettier.enable = true;
+
             rustfmt = {
               enable = true;
               packageOverrides = {
@@ -114,6 +122,7 @@
                 rustfmt = rustDevToolchain;
               };
             };
+
             shellcheck.enable = true;
             shfmt.enable = true;
             sort-file-contents.enable = true;
