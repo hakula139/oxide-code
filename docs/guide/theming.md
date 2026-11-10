@@ -222,7 +222,7 @@ Each status-line segment uses one of the slots above, so to restyle a segment, o
 | `current-time`      | `dim`                        |
 
 - **`context-used`, `five-hour-limit`, and `weekly-limit`** use `text` until the share they show reaches 70%, then `warning`, and `error` from 90%.
-- **`permission-mode`** uses `muted` for `manual`, `accent` for `plan`, and `error` for `yolo`.
+- **`permission-mode`** uses `muted` for `auto` and `manual`, `accent` for `plan`, and `error` for `yolo`.
 - **`pull-request-checks` and `pull-request-review`** use `success` for passing checks or an approval, `warning` for pending checks or a required review, `error` for failing checks or requested changes, and `muted` for cancelled checks.
 
 ## Overrides

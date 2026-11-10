@@ -18,7 +18,7 @@ Type `/` to open the autocomplete popup. Use **Up / Down** to browse, **Tab** to
 | `/init [<file>]`                            | Propose edits to an existing `AGENTS.md` or `CLAUDE.md` as a diff to confirm. Without either, pick or name the one to create.                 |
 | `/login`                                    | Sign in to a Claude account in the browser and store the login for oxide-code.                                                                |
 | `/logout`                                   | Remove the oxide-code login. The Claude Code login stays in place.                                                                            |
-| `/mode [<mode>]`                            | Open the permission mode picker, or switch directly to `manual`, `plan`, or `yolo`.                                                           |
+| `/mode [<mode>]`                            | Open the permission mode picker, or switch directly to `auto`, `manual`, `plan`, or `yolo`.                                                   |
 | `/model [<id>]`                             | Open the model and effort picker, or switch directly by catalog ID, unique substring, or any other ID a gateway serves.                       |
 | `/rename [<title>]`                         | Open a single-line editor pre-filled with the current title, or set it directly.                                                              |
 | `/resume [<id-prefix>]` (alias `/continue`) | Open the session picker (search, scope and archived toggles, **Ctrl+X** to archive or unarchive, **Ctrl+D** to delete), or jump by ID prefix. |
