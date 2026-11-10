@@ -24,7 +24,7 @@
     };
 
     devkit = {
-      url = "github:hakula139/devkit/v2";
+      url = "github:hakula139/devkit/v3";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
@@ -94,12 +94,29 @@
             actionlint.enable = true;
             check-shebang-scripts-are-executable.enable = true;
             check-yaml.enable = true;
+            clippy = {
+              enable = true;
+              packageOverrides = {
+                cargo = rustDevToolchain;
+                clippy = rustDevToolchain;
+              };
+            };
+
             cspell.enable = true;
             deadnix.enable = true;
             dprint.enable = true;
             markdownlint-cli2.enable = true;
             nixfmt.enable = true;
             prettier.enable = true;
+
+            rustfmt = {
+              enable = true;
+              packageOverrides = {
+                cargo = rustDevToolchain;
+                rustfmt = rustDevToolchain;
+              };
+            };
+
             shellcheck.enable = true;
             shfmt.enable = true;
             sort-file-contents.enable = true;
@@ -107,14 +124,6 @@
             taplo.enable = true;
           };
 
-          # CI checks formatting without fetching the pinned toolchain in the Nix sandbox.
-          devHooks.rustfmt = {
-            enable = true;
-            packageOverrides = {
-              cargo = rustToolchain;
-              rustfmt = rustToolchain;
-            };
-          };
         };
 
       in
@@ -125,7 +134,6 @@
         devShells.default = pkgs.mkShell {
           name = "oxide-code-dev";
 
-          # The rustfmt hook puts the plain toolchain on PATH, so the dev toolchain must come first.
           packages = [
             rustDevToolchain
           ]
@@ -138,7 +146,7 @@
             sqlite
           ]);
 
-          inputsFrom = [ preCommit.shell ];
+          inputsFrom = [ preCommit ];
         };
 
         # CI's Lint job runs in this shell, which leaves out the pinned toolchain so that every tool
@@ -166,7 +174,7 @@
         # Checks
         # ------------------------------------------------------------------------------------------
         checks = {
-          pre-commit = preCommit.check;
+          package = oxide-code;
 
           home-manager = import ./nix/home-manager-tests.nix {
             inherit home-manager oxide-code pkgs;

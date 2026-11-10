@@ -27,7 +27,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Nix
-        uses: hakula139/devkit/.github/actions/setup-nix@v2
+        uses: hakula139/devkit/.github/actions/setup-nix@v3
         with:
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
@@ -64,12 +64,8 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Format
-        if: ${{ matrix.os == 'Linux' }}
-        run: cargo fmt --check
-
       - name: Clippy
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.os != 'Linux' }}
         run: cargo clippy --locked --all-targets
 
       - name: Clippy without test targets
@@ -146,32 +142,8 @@ jobs:
         run: cargo hack check --rust-version --workspace --all-targets --locked
 
   nix:
-    name: Nix (${{ matrix.os }})
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: Linux
-            runner: ubuntu-latest
-          - os: macOS
-            runner: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Set up Nix
-        uses: hakula139/devkit/.github/actions/setup-nix@v2
-        with:
-          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
-      - name: Run flake check
-        run: nix flake check --keep-going --print-build-logs
-
-      - name: Build package
-        if: ${{ !cancelled() }}
-        run: nix build --no-link --print-build-logs
+    uses: hakula139/devkit/.github/workflows/nix.yml@v3
+    secrets: inherit
 
   result:
     name: CI Result
@@ -184,4 +156,4 @@ jobs:
       actions: read
     steps:
       - name: Check results
-        uses: hakula139/devkit/.github/actions/ci-result@v2
+        uses: hakula139/devkit/.github/actions/ci-result@v3

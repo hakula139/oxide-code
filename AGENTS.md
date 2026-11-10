@@ -55,7 +55,7 @@ cargo clippy                                          # Lint without test target
 cargo doc --no-deps                                   # Check rustdoc lints
 cargo llvm-cov                                        # Run tests and check coverage
 cargo deny check                                      # Check dependencies when they change
-prek run --all-files                                  # Run the shared formatting and lint hooks
+nix develop -c run-hooks                                  # Run the shared formatting and lint hooks
 ```
 
 [Development](docs/conventions/development.md#ci) lists which CI job runs each check.
