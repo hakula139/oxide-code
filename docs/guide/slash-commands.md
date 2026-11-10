@@ -36,15 +36,12 @@ During a turn, only `/config`, `/diff`, `/exit`, `/help`, `/mode`, `/status`, an
 
 ## Pickers
 
-Bare `/effort`, `/mode`, `/model`, and `/theme` open pickers that take **Enter** to apply and **Esc** to cancel. In the `/mode` and `/theme` pickers, **Up / Down** or a number key moves to a row.
+Bare `/effort`, `/mode`, `/model`, and `/theme` open pickers that take **Enter** to apply and **Esc** to cancel. In the `/mode`, `/model`, and `/theme` pickers, **Up** / **Down** or a number key moves to a row. In the `/effort` and `/model` pickers, **Left** / **Right** or **h** / **l** steps the effort level.
 
 - **`/model <id>`** accepts a full ID or any unique substring, so `fable`, `opus`, `sonnet`, and `haiku` work as aliases. Switching models keeps the current effort, and [`effort`](configuration.md#effort-reasoning-effort) lists each model's default.
 - **`/effort`** fails on a model outside the supported catalog, since that model has no effort levels.
 - **`/mode`** lists the [permission modes](permissions.md#modes), which **Tab** and **Shift+Tab** also cycle through.
-
-### Theme
-
-The `/theme` picker previews each theme live as you move, and **Esc** reverts the preview. `/theme <name>` switches directly to a built-in theme: `mocha`, `macchiato`, `frappe`, `latte`, or `material`. To use a custom theme file, set it as `[tui.theme] base` in your config, as [Theming](theming.md#custom-theme-files) describes.
+- **`/theme`** previews each theme live as you move, and **Esc** reverts the preview. `/theme <name>` switches directly to a built-in theme: `mocha`, `macchiato`, `frappe`, `latte`, or `material`. To use a custom theme file, set it as `[tui.theme] base` in your config, as [Theming](theming.md#custom-theme-files) describes.
 
 ## Compaction
 

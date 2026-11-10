@@ -52,7 +52,7 @@ In the default `auto` permission mode, a separate model approves routine tool ca
 | **F**   | Deny with a note the model reads                              |
 | **Esc** | Deny and end the turn                                         |
 
-**A** opens the pattern it will allow, such as `cargo test`, which you can edit before pressing **Enter**, for example to widen it to `cargo test *`. [Permissions](permissions.md) covers the other modes, your own rules, and the pattern syntax.
+When offered, **A** opens the pattern it will allow, such as `cargo test`, which you can edit before pressing **Enter**, for example to widen it to `cargo test *`. [Permissions](permissions.md) covers the other modes, your own rules, and the pattern syntax.
 
 ## Tasks and Background Commands
 

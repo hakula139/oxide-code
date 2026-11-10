@@ -6,14 +6,14 @@ Every tool call passes a permission check before running. Deny rules block match
 
 ## Modes
 
-| Mode             | Calls no rule matches                                                                                  |
-| ---------------- | ------------------------------------------------------------------------------------------------------ |
-| `auto` (default) | A separate model allows the call or asks for approval, and the call asks when that model cannot answer |
-| `manual`         | Ask, including reads and edits inside the workspace                                                    |
-| `plan`           | Deny edit, exec, and net calls, and allow read-only calls                                              |
-| `yolo`           | Allow                                                                                                  |
+| Mode             | Calls no rule matches                                                    |
+| ---------------- | ------------------------------------------------------------------------ |
+| `auto` (default) | A separate model allows or asks, and the call asks when it cannot answer |
+| `manual`         | Ask, including reads and edits inside the workspace                      |
+| `plan`           | Deny edit, exec, and net calls, and allow read-only calls                |
+| `yolo`           | Allow                                                                    |
 
-In every mode, your deny and ask rules still apply. The `auto` classifier cannot override them, and it works as follows:
+`plan` denies edit, exec, and net calls before it checks ask and allow rules, so it denies them even when one of those rules matches. In every mode, your deny and ask rules still apply. The `auto` classifier cannot override them, and it works as follows:
 
 - **Input**: It sees your user-authored prompts from the session, the complete validated tool input, the resolved native path where applicable, and the working directory and workspace roots, but no assistant explanations or tool output.
 - **Compaction**: It keeps the active turn's prompts across compaction. After resuming a compacted session, it uses the visible user text and your new follow-up, and asks when that context is insufficient.
@@ -27,16 +27,16 @@ During a session, `/mode` opens the picker and `/mode <mode>` switches directly.
 
 When a call asks, the TUI opens an approval prompt that shows the whole diff or command along with the matching rule or the classifier's reason.
 
-| Key                                                              | Effect                                                                           |
-| ---------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| **Y**                                                            | Approve the call                                                                 |
-| **A**                                                            | Approve, and add a session rule that allows matching calls                       |
-| **N**                                                            | Deny the call                                                                    |
-| **F**                                                            | Deny, then type feedback and press **Enter** for the model to read as the result |
-| **Esc**                                                          | Deny and end the turn                                                            |
-| **Up** / **Down**, **PageUp** / **PageDown**, **Home** / **End** | Scroll a body longer than 16 rows, with a `rows a-b of n` line for the position  |
+| Key         | Effect                                                                           |
+| ----------- | -------------------------------------------------------------------------------- |
+| **Y**       | Approve the call                                                                 |
+| **A**       | Approve, and add a session rule that allows matching calls                       |
+| **N**       | Deny the call                                                                    |
+| **F**       | Deny, then type feedback and press **Enter** for the model to read as the result |
+| **Esc**     | Deny and end the turn                                                            |
+| Scroll keys | Scroll a body longer than 16 rows                                                |
 
-**Enter** alone does nothing, and the prompt ignores keys until you pause typing for 300 ms, so keystrokes or a paste meant for the input box cannot answer it. A denied call tells the model which rule or mode denied it.
+The scroll keys are **Up** / **Down**, **PageUp** / **PageDown**, and **Home** / **End**, and a `rows a-b of n` line gives the position. **Enter** alone does nothing, and the prompt ignores keys until you pause typing for 300 ms, so keystrokes or a paste meant for the input box cannot answer it. A denied call tells the model which rule or mode denied it.
 
 A headless run (`-p`) cannot ask, so it denies the call and tells the model the config change that would let it through, such as adding `"cargo test"` to the `exec` list under `[permission.allow]`, or otherwise the rule that made it ask.
 
@@ -100,15 +100,15 @@ Allow patterns match narrowly, as written, while deny and ask patterns match bro
 
 Each of `deny`, `ask`, and `allow` holds a pattern list per class. Inside `[permission]`, the dotted form `ask.exec = ["git push *"]` works too.
 
-| Class  | Tools                                                       |
-| ------ | ----------------------------------------------------------- |
-| `read` | `read`, `grep`, `glob`, `tasks`, `bash_output`, `bash_stop` |
-| `edit` | `edit`, `write`                                             |
-| `exec` | `bash`                                                      |
-| `net`  | None yet                                                    |
-| `mcp`  | None yet                                                    |
+| Class  | Tools                                                              |
+| ------ | ------------------------------------------------------------------ |
+| `read` | `read`, `grep`, `glob`, `tasks`, `bash_output`, `bash_stop`, `ask` |
+| `edit` | `edit`, `write`                                                    |
+| `exec` | `bash`                                                             |
+| `net`  | None yet                                                           |
+| `mcp`  | None yet                                                           |
 
-Deny wins over ask, and ask wins over allow and session rules, so `ask.exec = ["docker *"]` asks even when `allow.exec = ["docker ps"]` covers the call. The pattern `*` matches every call in its class. A path pattern never matches a `tasks`, `bash_output`, or `bash_stop` call, so only `deny.read = ["*"]` blocks them. Under that deny, `bash` can still start background shells, which then run unread until the session ends. An `allow.read` rule permits matching reads before the mode fallback.
+Deny wins over ask, and ask wins over allow and session rules, so `ask.exec = ["docker *"]` asks even when `allow.exec = ["docker ps"]` covers the call. The pattern `*` matches every call in its class. A path pattern never matches a `tasks`, `bash_output`, `bash_stop`, or `ask` call, so only `deny.read = ["*"]` blocks them. Under that deny, `bash` can still start background shells, which then run unread until the session ends. An `allow.read` rule permits matching reads before the mode fallback.
 
 ### `exec` Patterns
 
@@ -175,6 +175,6 @@ Each `extra_roots` entry is an absolute or `~/` path, such as `"~/src/shared-lib
 
 - **No terminal**: A `bash` call runs in a shell with no controlling terminal, so a command that prompts on `/dev/tty` fails at once. That covers `sudo`, `ssh` with password authentication, and `git push` over HTTPS without a credential helper.
 - **Editors**: `EDITOR`, `VISUAL`, and `GIT_EDITOR` are set to `true`, so an editor step keeps its default text. `git rebase --continue` keeps the prepared message, while `git commit` without `-m` stops with `Aborting commit due to empty commit message`.
-- **`CDPATH`** is unset, so directory changes do not depend on the caller's search path.
-- **`OX_SESSION_ID`** holds the session's ID, so a script can tell which session started it.
+- **`CDPATH`**: The variable is unset, so directory changes do not depend on the caller's search path.
+- **`OX_SESSION_ID`**: The variable holds the session's ID, so a script can tell which session started it.
 - **Credentials**: [Commands and Credentials](authentication.md#commands-and-credentials) covers the variables a command cannot see.

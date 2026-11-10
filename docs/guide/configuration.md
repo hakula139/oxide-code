@@ -89,7 +89,7 @@ Any other ID, such as a gateway alias, is sent verbatim without `effort`, `think
 
 #### `effort`: Reasoning Effort
 
-`effort` sets the `output_config.effort` request field to `"low"`, `"medium"`, `"high"`, `"xhigh"`, or `"max"`, all of which every supported model accepts. When it is unset, each model uses the API's default, and a `/model` swap carries the current effort over to the new model:
+`effort` sets the `output_config.effort` request field to `"low"`, `"medium"`, `"high"`, `"xhigh"`, or `"max"`, all of which every supported model accepts. When it is unset, each model uses the API's default:
 
 | Model      | Default  |
 | ---------- | -------- |
@@ -97,6 +97,8 @@ Any other ID, such as a gateway alias, is sent verbatim without `effort`, `think
 | Opus 5.5   | `medium` |
 | Sonnet 5.5 | `high`   |
 | Haiku 5.5  | `medium` |
+
+A `/model` swap carries the current effort over to the new model.
 
 Anthropic's [effort documentation](https://platform.claude.com/docs/en/build-with-claude/effort) recommends these levels for Haiku 5.5, and for Sonnet 5.5 on agentic work:
 
@@ -143,7 +145,7 @@ Auto-compaction is on by default for the supported models, and `auto_enabled = f
 
 The two thresholds are mutually exclusive. Either resolves to a token count clamped into the usable range, so values below `50000` tokens snap up to that floor and values above the model-derived safe trigger snap down. That ceiling shifts with `/model`, so a global threshold sized for a larger context window keeps working after a swap.
 
-For other model IDs, the default and percent-based triggers stay off, while an explicit token threshold still works, snapped to the `50000` floor.
+For other model IDs, the default and percent-based triggers stay off, while an explicit token threshold still works, with values below `50000` raised to it.
 
 [Compaction](slash-commands.md#compaction) covers when automatic compaction runs and what happens when it fails.
 

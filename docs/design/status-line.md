@@ -4,9 +4,9 @@ The status line is the TUI's top row, a user-ordered roster of built-in segments
 
 ## Segments
 
-`StatusLineSegment` in `config.rs` defines the roster, whose order `[tui] status_line = [...]` or the same comma-separated names in `OX_STATUS_LINE` set. Segment colors and the separator glyph come from the active theme.
+`StatusLineSegment` in `config.rs` defines the roster, and `[tui] status_line = [...]` or `OX_STATUS_LINE`, which takes the same comma-separated names, sets its order. Segment colors and the separator glyph come from the active theme.
 
-`StatusBar` keeps only its own state, the spinner, the clock minute, the git probe results, and the links it last drew, and delegates segment formatting to `ox_tui::components::status::line`. Each frame, `App` hands it a `StatusView` that borrows `LiveSessionInfo` for the session's values, such as the model, title, usage, and usage limits, and adds the run state, the queued prompt count, and the task list's progress, so every value the bar shows has one owner.
+`StatusBar` keeps only its own state (the spinner, the clock minute, the git probe results, and the links it last drew) and delegates segment formatting to `ox_tui::components::status::line`. Each frame, `App` hands it a `StatusView` that borrows `LiveSessionInfo` for the session's values, such as the model, title, usage, and usage limits, and adds the run state, the queued prompt count, and the task list's progress, so every value the bar shows has one owner.
 
 Segment render rules:
 

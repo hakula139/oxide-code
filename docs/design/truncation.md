@@ -8,20 +8,18 @@ The dispatcher caps every tool output at `MAX_OUTPUT_BYTES = 128 KiB`, including
 
 ## Spill Files
 
-- **Location**: spill files go in the `tool-results/` child of `store::artifact_dir`, the session's `$XDG_DATA_HOME/ox/artifacts/<session-id>/`. The engine passes the live handle's directory with each dispatch, so new spills land with the session in use after `/clear`, `/resume`, or a [lazy fork](persistence.md#lazy-fork). Tool results a fork copied still name the source session's spills.
-- **Creation**: The first write creates the directory and the file and refuses to replace an existing file, so a result that fits leaves nothing on disk. On Unix, the directory gets `0700` perms and the file gets `0600`.
-- **Size**: A file keeps at most `MAX_SPILL_BYTES`, equal to `MAX_TRACKED_FILE_SIZE` so `read` can open every spill, and beyond that limit the marker says `first 10 MiB of output saved to <path>`. If creating or writing the file fails, the result is still truncated, and the marker names the error in place of the path.
-- **Access and cleanup**: reads and edits of spill files follow the [permission rules and mode](../guide/permissions.md). `/delete` removes the session's directory along with its rows, and archiving keeps both.
+- **Location.** Spill files go in the `tool-results/` child of `store::artifact_dir`, the session's `$XDG_DATA_HOME/ox/artifacts/<session-id>/`. The engine passes the live handle's directory with each dispatch, so new spills land with the session in use after `/clear`, `/resume`, or a [lazy fork](persistence.md#lazy-fork). Tool results a fork copied still name the source session's spills.
+- **Creation.** The first write creates the directory and the file and refuses to replace an existing file, so a result that fits leaves nothing on disk. On Unix, the directory gets `0700` perms and the file gets `0600`.
+- **Size.** A file keeps at most `MAX_SPILL_BYTES`, equal to `MAX_TRACKED_FILE_SIZE` so `read` can open every spill, and beyond that limit the marker says `first 10 MiB of output saved to <path>`. If creating or writing the file fails, the result is still truncated, and the marker names the error in place of the path.
+- **Access and cleanup.** Reads and edits of spill files follow the [permission rules and mode](../guide/permissions.md). `/delete` removes the session's directory along with its rows, and archiving keeps both.
 
 ## Per-Tool View-Shape Caps
 
-| Tool                       | View boundary                                                                                                                                                                                                                           |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bash`                     | Bounded head-and-tail streaming capture, spilling oversized output. A [shared pipe](bash.md#design-decisions) preserves stdout and stderr arrival order. Each background-shell read drains the output captured since the previous read. |
-| `glob`                     | Newest matches with a total match count                                                                                                                                                                                                 |
-| `grep`                     | Bounded prefix for each output mode. Count mode continues reading for exact totals, while content and file-list modes stop when the view fills.                                                                                         |
-| `read`                     | Complete rows within a line and byte budget, refusing a row that cannot fit                                                                                                                                                             |
-| `edit` / `tasks` / `write` | Compact success messages                                                                                                                                                                                                                |
+- **`bash`.** A bounded head-and-tail streaming capture spills oversized output. A [shared pipe](bash.md#design-decisions) preserves stdout and stderr arrival order. Each background-shell read drains the output captured since the previous read.
+- **`glob`.** The view holds the newest matches with a total match count.
+- **`grep`.** Each output mode keeps a bounded prefix. Count mode continues reading for exact totals, while content and file-list modes stop when the view fills.
+- **`read`.** The view holds complete rows within a line and byte budget, refusing a row that cannot fit.
+- **`edit`, `tasks`, and `write`.** Each returns a compact success message.
 
 ## Design Decisions
 

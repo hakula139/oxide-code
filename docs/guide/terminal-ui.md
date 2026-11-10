@@ -11,7 +11,7 @@ Running `ox` opens the terminal UI, with the status line on the top row, then th
 | **Up** / **Down**                          | Move through a multi-line prompt, and scroll the chat once the cursor cannot move further |
 | **Ctrl+A** / **Ctrl+E**                    | Move to the start / end of the line                                                       |
 | **Alt+B** / **Alt+F**                      | Move back / forward one word                                                              |
-| **Backspace**                              | Delete the character before the cursor, a whole emoji or accented letter at once          |
+| **Backspace**                              | Delete the character before the cursor                                                    |
 | **Delete** / **Ctrl+D**                    | Delete the character after the cursor                                                     |
 | **Ctrl+W** / **Ctrl+K** / **Ctrl+U**       | Cut the word before the cursor / to the end of the line / to the start of the line        |
 | **Ctrl+Y**                                 | Paste the last cut text                                                                   |
@@ -20,6 +20,7 @@ Running `ox` opens the terminal UI, with the status line on the top row, then th
 | **Tab** / **Shift+Tab**                    | Step through the [permission modes](permissions.md#modes)                                 |
 
 - **Shift+Enter** needs a terminal that reports it, such as kitty, WezTerm, and Ghostty. Elsewhere it arrives as a plain Enter and sends the prompt. VS Code and Cursor support it once a keybinding sends ESC followed by Enter for Shift+Enter, as Claude Code's `/terminal-setup` installs.
+- **Backspace and Delete** remove a whole grapheme cluster, so an emoji or an accented letter goes in one press.
 - **Alt keys on macOS** work in Terminal.app, iTerm2, and VS Code only once the Option key is set to act as Meta in their settings.
 - **A paste** inserts its text, line breaks included, without sending it. **Ctrl+V** stays with the terminal's paste.
 - **Typing `/`** at the start of the input opens the command popup, where **Tab** completes the selection. [Slash Commands](slash-commands.md) lists the commands and the popup keys.
@@ -48,8 +49,8 @@ The input box stays open while the assistant works. A prompt you send during a t
 
 ## Interrupt and Exit
 
-- **Esc** or **Ctrl+C** stops the running turn or compaction. Queued prompts stay queued, and nothing runs until you send something. That prompt joins the back of the queue, and the next turn starts with the oldest one.
-- **Esc** with the input box empty moves the most recently queued prompt back into it for editing.
+- **Esc** or **Ctrl+C** stops the running turn or compaction. Queued prompts stay queued, and nothing runs until you send something. The next prompt you send joins the back of the queue, and a turn starts with the oldest queued prompt.
+- Once no turn runs, **Esc** with the input box empty moves the most recently queued prompt back into it for editing.
 - **Ctrl+C** twice within a second exits while the assistant is idle, even when the input box holds a draft. **Ctrl+D** twice exits from an empty input box. While chat text is selected, **Ctrl+C** copies it instead.
 
 ## Scroll and Expand

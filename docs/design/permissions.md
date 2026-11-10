@@ -1,6 +1,6 @@
 # Tool Permissions and Approval
 
-Every tool call passes through a permission gate. Rules place calls in one of three tiers, deny, ask, or allow, and the mode decides the calls the rules leave open, while `plan` also denies every `edit`, `exec`, and `net` call. [Permissions](../guide/permissions.md) covers the modes, rule syntax, and settings for users, and this page covers how the gate reaches each decision.
+Every tool call passes through a permission gate. Rules place calls in one of three tiers: deny, ask, or allow. The mode decides the calls the rules leave open, and `plan` also denies every `edit`, `exec`, and `net` call. [Permissions](../guide/permissions.md) covers the modes, rule syntax, and settings for users, and this page covers how the gate reaches each decision.
 
 Companion docs: [Modals](modals.md), [File Edits](file-edits.md).
 
@@ -107,16 +107,16 @@ Headless `-p` runs render engine events through `run_op`. `main` calls `Config::
 4. **Classification is a side query.** Reusing the existing client keeps authentication, gateway behavior, cancellation, and billing in their owning layers without introducing another provider framework.
 5. **Native path tools resolve once and act on the result.** This binds permission matching to the path the tool uses, and a no-follow open makes a symlink swapped into the final component fail. A swap in an intermediate directory needs `openat`-style traversal or an OS sandbox ([#133](https://github.com/hakula139/oxide-code/issues/133)). File integrity checks stay independent of approval.
 6. **Project files tighten only.** A checkout may add deny or ask rules while classifier settings and permission grants stay user-controlled.
-7. **Approvals stay in process.** Session grants disappear when the session changes and are never restored from persisted tool output.
+7. **Approvals stay in process.** Session grants disappear when the session changes and are never restored from persisted tool output. A persisted grant has no disk ground truth to revalidate on resume, unlike a `FileSnapshot` rehash, so restoring it would regress trust.
 8. **Gitignore-style paths.** Patterns work like `.gitignore` entries, so `.env` and `target` need no `**/` prefix and cover what is beneath them. Anchoring at every anchor directory applies a project rule to each workspace root, while `/` and `~/` keep exact absolute rules available.
 9. **Deny and ask rules are the enforced boundary for path tools.** Matching every spelling and alias of a path, at load and at the check, keeps a symlink from routing a path tool around a rule. The rules do not cover a symlink swapped into an intermediate directory after the check or files a `bash` command touches, so an untrusted model still needs an OS sandbox.
 10. **Approval decisions on the op channel.** Routing approvals through `ops` and the `ModalStack` reuses the turn loop's cancel, quit, and queue semantics, so approvals need no second channel or control-flow path.
 11. **Mode switches wait for the next gate, round boundary, or context render.** A switch mid-turn changes how the remaining calls are weighed without revisiting calls that already passed the gate, which would mean cancelling a running command or a pending approval. Applying it at a round boundary or before a context render as well means the model's next request names the mode the policy enforces, even when no call reaches the gate first. Confirming the switch on receipt keeps the status line honest about the mode the next call meets.
-12. **The keyboard cycle reaches `plan` before `yolo` and wraps at both ends.** Stepping forward from the default `auto` passes the stricter modes before the most permissive one, and the footer names the mode Tab selects next, so `yolo` is announced before a forward press reaches it. Shift+Tab steps backward through the same order, so either key undoes an overshoot, and wrapping keeps every mode reachable from any start.
+12. **The keyboard cycle reaches `plan` before `yolo` and wraps at both ends.** Stepping forward from the default `auto` passes the stricter modes before the most permissive one, and the footer names the mode Tab selects next, so `yolo` is announced before a forward press reaches it. Shift+Tab steps backward through the same order, so either key undoes an overshoot, and wrapping keeps every mode reachable from any start. That wrap lets one Shift+Tab press from `auto` reach `yolo` although the footer names only Tab's target, a cost the cycle accepts to keep an overshoot reversible from either end.
 
 ## Out of Scope
 
-- **An OS sandbox** ([#133](https://github.com/hakula139/oxide-code/issues/133)). It would extend the path rules to `bash` commands and intermediate-directory swaps.
+- **An OS sandbox** ([#133](https://github.com/hakula139/oxide-code/issues/133)). It would enforce a filesystem boundary that the rules cannot reach, covering files a `bash` command touches and intermediate-directory swaps.
 
 ## Sources
 

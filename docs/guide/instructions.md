@@ -19,7 +19,7 @@ The project root is the nearest directory at or above the working directory that
 4. `/repo/crates/core/`
 
 - **Each file loads once**, at the first location that resolves to it, so a `CLAUDE.md` symlink to `AGENTS.md` adds nothing. A location whose first file with content was already loaded loads nothing further.
-- **A project file must resolve to a regular `.md` file inside the project root**, since it comes from the checkout. A symlink to `AGENTS.md` or to `docs/ai.md` works. A file that fails either check is skipped with a notice, and oxide-code tries the next file at that location. When the project root is your home directory or one of its ancestors, oxide-code skips any project file it reaches through a symlink. User files can link anywhere.
+- **A project file stays in the project**, since it comes from the checkout, so it must resolve to a regular `.md` file inside the project root. A symlink to `AGENTS.md` or to `docs/ai.md` works. A file that fails any of these conditions is skipped with a notice, and oxide-code tries the next file at that location. When the project root is your home directory or one of its ancestors, oxide-code skips any project file it reaches through a symlink. User files can link anywhere.
 - **A file that cannot be read**, such as one without read permission or one that is not UTF-8 text, is skipped with a notice, and the next file is tried.
 - **`@path` imports** stay as written, since oxide-code does not expand them as Claude Code does.
 

@@ -4,7 +4,7 @@ Conventions for the dev shell, toolchain, Nix and config file style, debug info,
 
 ## Dev Shell
 
-The flake's dev shell provides the pinned Rust toolchain, `cargo-deny`, `cargo-insta`, `cargo-llvm-cov`, `cargo-mutants`, `git-cliff`, `sqlite3`, and the hook tools:
+The flake's dev shell provides the pinned Rust toolchain, `cargo-deny`, `cargo-insta`, `cargo-llvm-cov`, `cargo-mutants`, `git-cliff`, `sqlite3`, and the [hook tools](https://github.com/hakula139/devkit/blob/v3/docs/hooks.md):
 
 ```bash
 nix develop                # Enter the dev shell, which installs the hooks
@@ -13,7 +13,7 @@ nix flake check            # Build the package and run the Home Manager and over
 nix build                  # Build ox without running the tests
 ```
 
-The [devkit hooks](https://github.com/hakula139/devkit/blob/v3/docs/hooks.md) run on every commit, so run `nix develop -c true` once in each new checkout or worktree. A hook that fixes files fails the commit, so stage its fixes and commit again. A commit that touches Rust files runs Clippy over the whole workspace.
+A hook that fixes files fails the commit, so stage its fixes and commit again. A commit that touches Rust files runs Clippy over the whole workspace.
 
 With [direnv](https://direnv.net), run `direnv allow` once, and `.envrc` loads the dev shell, the gitignored `.envrc.local`, and `.env.local` whenever you enter the repository.
 
@@ -38,16 +38,16 @@ With [direnv](https://direnv.net), run `direnv allow` once, and `.envrc` loads t
 
 ## Config Style
 
-Prettier, Taplo, and shfmt format YAML, TOML, and shell files but leave line length to you:
+Prettier, Taplo, and shfmt format YAML, TOML, and shell files, while comments and long strings are wrapped by hand:
 
 - Wrap comments as [Writing](writing.md#comments) describes, and other lines at about 100 columns. A line holding an unbreakable token, such as a URL, or content in a heredoc or literal block stays long.
 - Wrap a long string only where its value stays the same, breaking it where [Rust](rust.md#strings) breaks a continued literal.
-- Split a long shell command at its pipelines and `&&` / `||` lists. If a part is still too long, keep the command and its subcommands on the first line and put each flag with its value on its own line, one level deeper. End each line but the last with `\` unless it ends with `|`, `&&`, or `||`. Workflows put such a command in a `run: |` block.
+- Split a long shell command at its pipelines and `&&` / `||` lists. If a part is still too long, keep at most what names the operation on the first line, such as the command, its subcommands, and a leading script, pattern, or message, and put each further flag with its value, or each group of related arguments, on its own line, one level deeper. End each line but the last with `\` unless it ends with `|`, `&&`, or `||`. Workflows put such a command in a `run: |` block.
 - Put a multiline command substitution's command on the next line and its closing `)` on its own line, aligned with the assignment.
 
 ## Debug Info
 
-Dev and test builds keep line tables for the workspace crates and no debug info for dependencies, which keeps `target/` small while panics and workspace backtrace frames keep their file and line. Set `CARGO_PROFILE_DEV_DEBUG=true` to rebuild with full debug info for a debugger.
+Dev and test builds keep line tables for the workspace crates and no debug info for dependencies, which keeps `target/` small while panics and workspace backtrace frames keep their file and line. Set `CARGO_PROFILE_DEV_DEBUG=true` to rebuild the workspace crates with full debug info for a debugger.
 
 ## CI
 
@@ -65,7 +65,7 @@ CI runs on pushes to `main`, pull requests, and manual dispatch. The release wor
 
 The Nix, Rust, and MSRV jobs come from devkit's [reusable workflows](https://github.com/hakula139/devkit/blob/v3/docs/ci.md), and the Rust Lint job runs the checks `rust.yml` leaves out.
 
-Branch protection requires CI Result and Codecov's `codecov/patch`. Add each new job to CI Result's `needs`, and give it a `timeout-minutes` several times its usual duration, since a hung test otherwise holds the runner for six hours. libtest names any test still running after 60 s, so a timed-out job's log shows which test hung.
+Branch protection requires CI Result and Codecov's `codecov/patch`. Add each new job to CI Result's `needs`, since the gate runs once those jobs finish and counts any job still unfinished as a failure, and give each new job a `timeout-minutes` several times its usual duration, since a hung test otherwise holds the runner for six hours. libtest names any test still running after 60 s, so a timed-out job's log shows which test hung.
 
 Every job but Windows and CI Result reads the `hakula` Cachix cache, and a Cachix failure never fails a job. A download that stalls without failing still runs the job into its timeout, which [#715](https://github.com/hakula139/oxide-code/issues/715) tracks.
 
@@ -73,4 +73,4 @@ Every job but Windows and CI Result reads the `hakula` Cachix cache, and a Cachi
 
 Fix the cause of a failing hook, lint, test, or CI job. Skips, `--exclude` flags, ignore and allowlist entries, `continue-on-error`, `|| true`, retries, and special cases for one path or commit only hide the failure. Restructure a test that cannot run in some environment, such as Windows, as [Hermetic Tests](testing.md#hermetic-tests) describes.
 
-Keep an ignore entry or `continue-on-error` only when it is the design, such as a license the project accepts, an advisory with no fix, or the Cachix setup, and give the reason in the PR that adds it.
+Keep an ignore or allowlist entry only when it is the design, such as a license the project accepts, an advisory with no fix, or a generated file that a formatter must skip. Keep `continue-on-error` only on a step whose failure cannot change what a build or check finds, such as the Cachix setup. Give the reason in the PR that adds either.

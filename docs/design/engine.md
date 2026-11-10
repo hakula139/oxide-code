@@ -1,6 +1,6 @@
 # Engine
 
-`Engine` owns the live session and runs one operation at a time. Every frontend, the TUI and a headless run, sends `Op` values on one channel and renders the `Event` values that come back, so behavior added in the engine reaches both without frontend-specific code. This page defines the operation and event contract. [Terminal UI](tui.md), [Headless Mode](../guide/headless.md), and [Cancellation](cancellation.md) describe how each frontend consumes it.
+`Engine` owns the live session and runs one operation at a time. Every frontend (the TUI and a headless run) sends `Op` values on one channel and renders the `Event` values that come back, so behavior added in the engine reaches both without frontend-specific code. This page defines the operation and event contract. [Terminal UI](tui.md), [Headless Mode](../guide/headless.md), and [Cancellation](cancellation.md) describe how each frontend consumes it.
 
 ## Operations
 
@@ -20,7 +20,7 @@ Events report progress, then end an operation. `Event` carries streamed text and
 
 Each op the engine takes while idle ends with one `OpEnded { id, end }`, the last event the op emits while it runs, unless a shutdown stops the engine first. Background work the op started, such as the AI title or a background shell, may report afterward. An op the engine takes during another operation, such as `Queue` or `Interrupt`, acts on that operation and has no end of its own, and neither has an idle-only op the engine drops.
 
-- **Failures.** `end` is an `OpEnd` of `Completed`, `Cancelled`, or `Failed`, and a failure reports its cause first, through `TurnFailed`, `RenameFailed`, a failed result such as `ArchiveUpdated`, or the `ConfigChanged` notice for an `/effort` pick the model has no level for. A turn the model refused reports `TurnRolledBack` before its `TurnFailed`, and a turn that sign-in or automatic compaction stopped before the prompt was recorded reports `PromptUnsent`.
+- **Operation ends.** `end` is an `OpEnd` of `Completed`, `Cancelled`, or `Failed`, and a failure reports its cause first, through `TurnFailed`, `RenameFailed`, a failed result such as `ArchiveUpdated`, or the `ConfigChanged` notice for an `/effort` pick the model has no level for. A turn the model refused reports `TurnRolledBack` before its `TurnFailed`, and a turn that sign-in or automatic compaction stopped before the prompt was recorded reports `PromptUnsent`.
 - **Non-fatal reports.** `Error` reports a failure that leaves the operation running, such as a failed session write. `Notice` warns about a condition the session works around, such as a drifted file, and `Retrying` is a dim notice for a request the client sends again.
 - **Frontends.** The headless driver renders until the `OpEnded` that carries the ID its submission returned, and its output keeps the documented event names, reporting a completed turn's end as `turn_complete`. The TUI holds input from the start of an operation until its `OpEnded`, then runs the teardown that submits the queued prompt, except where [**One operation in flight, ended by its own `OpEnded`**](cancellation.md#design-decisions) holds the queue.
 

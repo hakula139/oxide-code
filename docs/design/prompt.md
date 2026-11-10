@@ -30,7 +30,7 @@ Before each prompt, the engine loads the user context again and compares it with
 
 - **Mode switches.** A switch through `/mode`, Tab, or Shift+Tab applies before the next user context render, gated call, or round boundary, whichever comes first. At each round boundary, the engine also compares the mode with what the model has seen and appends any reminder to the round's tool results, which the request folds into the last result, so a switch during a turn reaches the model with its next request, ahead of any prompt queued with it, and `seen` names the mode the model was last told.
 - **Resume.** A resumed session whose recorded context predates the mode, or that resumes in another mode, names the current one on its first prompt.
-- **Compaction.** Compaction renders a fresh user context for the summarized transcript and counts it as seen, since no earlier request started with that transcript.
+- **Compaction.** The engine renders a fresh user context for the summarized transcript and counts it as seen, since no earlier request started with that transcript.
 
 ## Tool Descriptions
 

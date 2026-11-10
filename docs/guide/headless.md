@@ -15,7 +15,7 @@ ox -c -p "Run the tests again"                      # Continue the latest sessio
 - **Usage errors**: A run with neither a prompt nor piped stdin fails with status `2`, as does a prompt that is exactly a slash command's name. Pass `--` before such a word to send it.
 - **Sessions**: Each run starts and saves a new session, unless `-c` continues the latest one or `-r` names one by ID prefix or [export](sessions.md#moving-a-session-between-machines) path. Resume a run's session later with `ox -r <id-prefix>`, in the TUI or with another `-p`. A run that continues a session another `ox` process wrote to in the meantime continues in a [fork](sessions.md#several-processes-on-one-session) of it.
 - **Questions**: The `ask` tool returns an aborted result at once, without reading stdin.
-- **Approvals**: Calls that need approval are denied, and the denial tells the model what [Approval Prompt](permissions.md#approval-prompt) describes. Add `allow` patterns for the calls your script needs, as [Rules](permissions.md#rules) describes. Pass `--mode plan` to keep a run read-only, or `--mode yolo` to run every tool call that no deny or ask rule of yours holds, inside a sandbox or container for untrusted work, as [Modes](permissions.md#modes) explains. In `manual`, a `bash` command that uses shell syntax `ox` cannot analyze is denied, and its denial names the construct and asks the model to rewrite it as plain commands.
+- **Approvals**: Calls that need approval are denied, and the denial tells the model what [Approval Prompt](permissions.md#approval-prompt) describes. Add `allow` patterns for the calls your script needs, as [Rules](permissions.md#rules) describes. Pass `--mode plan` to keep a run read-only, or `--mode yolo` to allow every call your deny and ask rules leave open. Since `yolo` runs whatever a rule misses, run untrusted work in a sandbox or container, as [SECURITY.md](../../SECURITY.md#trust-model) explains. In `manual`, a `bash` command that uses shell syntax `ox` cannot analyze is denied, and its denial names the construct and asks the model to rewrite it as plain commands.
 
 ## Output Formats
 
@@ -125,7 +125,7 @@ The `view` in `tool_call_end` is the structured result, an object with its own `
 | -------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `text`         | `content`, the result text                                                                                          |
 | `read_excerpt` | The file `path`, its numbered `lines` (`number`, `text`), and `total_lines`                                         |
-| `diff`         | The `hunks` in file order, `locations`, the line each replacement applied at, and `omitted_lines`                   |
+| `diff`         | The `hunks` in file order, `locations` (the line each replacement applied at), and `omitted_lines`                  |
 | `grep_matches` | Per-file `groups` (`path`, `lines` with `number`, `text`, and `is_match`), and whether the matches were `truncated` |
 | `glob_files`   | The `pattern`, the matched `files`, and their `total` count                                                         |
 | `tasks`        | The `tasks` the call sent, each with its `content` and `status`                                                     |

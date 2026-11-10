@@ -64,7 +64,7 @@ The workflow then renders the Homebrew formula from the release sidecars, runs `
 
 ## Recovery
 
-Follow the shared release procedure for notes corrections and CI retries. Let an in-flight release finish before rebuilding assets, and rebuild the original commit for the same tag. A source change requires a new version and release PR.
+Follow the shared release procedure for notes corrections and CI retries. Let an in-flight release finish before rebuilding assets, and rebuild the original commit for the same tag. A source change requires a new version and release PR. A release workflow rerun refreshes the open formula PR or opens one with the rebuilt checksums.
 
 ## Stable Gates for 0.1.0
 

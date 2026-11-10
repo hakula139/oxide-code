@@ -6,7 +6,7 @@ This file holds the rules for every change and links the conventions for each ar
 
 ## Project Layout
 
-The [module map](docs/design/architecture.md) covers each crate's modules.
+The tree lists only the top-level entries whose names leave their purpose unclear. The [module map](docs/design/architecture.md) covers each crate's modules.
 
 ```text
 .

@@ -8,11 +8,11 @@ Three needs drove the abstraction: `/theme` swaps palettes as the user arrows th
 
 A modal is `Send`, since the App lives on tokio, but not `Sync`, since modals own mutable state and are never shared across threads. It declares its `height` for layout, paints itself into a `Rect`, and routes one `KeyEvent` to one of five outcomes:
 
-- **Consumed**: stay open, with the key handled internally.
-- **Cancelled**: close and dispatch the modal's `on_cancel` action, if any.
-- **Submitted**: close and dispatch an `Action`, which is an op for the engine, a TUI-only change, or a no-op when the modal already applied its effect locally.
-- **Emit**: forward an action without closing, as `/theme`'s live preview does on each cursor move, and as `/resume`'s archive toggle and the confirm modal's delete do.
-- **Push**: nest a child modal above the current one, which returns focus to the parent when it pops.
+- **Consumed.** The modal stays open, having handled the key internally.
+- **Cancelled.** The modal closes and dispatches its `on_cancel` action, if any.
+- **Submitted.** The modal closes and dispatches an `Action`, which is an op for the engine, a TUI-only change, or a no-op when the modal already applied its effect locally.
+- **Emit.** The modal forwards an action without closing, as `/theme`'s live preview does on each cursor move, and as `/resume`'s archive toggle and the confirm modal's delete do.
+- **Push.** The modal nests a child modal above itself, and focus returns to the parent when the child pops.
 
 `Submitted` and `Emit` carry a `ModalAction`: `Dispatch(Action)`, which follows the `App::dispatch_action` path of a keyboard action, or `SystemMessage(String)`, which prints a confirmation into the chat after the pop.
 
@@ -40,15 +40,15 @@ The stack routes keys before any component sees them. A modal whose `captures_es
 
 ## Modals
 
-- **`/model + /effort` picker**: sets the model and the effort in one `Op::SetModel` whose `ConfigPick` carries only the changed axes.
-- **`/effort` slider**: a Speed ↔ Intelligence scale of the five levels, colored by the five `effort_*` theme slots.
-- **`/mode`, `/theme`, and `/init` pickers**: list pickers over the permission modes, the built-in themes, and the instruction files `/init` can create.
-- **`/rename` editor**: a `LineEditor` prefilled with the title, which submits through `command::rename`, the typed form's parser.
-- **`/resume` picker**: a `SearchableList` of saved sessions, which [Resume](resume.md) covers.
-- **Prompt history picker**: retained ordinary user prompts with an escaped, scrollable multiline preview. Enter recalls exact text as an undoable composer edit, while cancellation leaves the editor untouched.
-- **Confirm-delete modal**: a Y / N gate for deleting a saved session, pushed by `/delete <id-prefix>` and by the `/resume` picker. A failure stays inline until a retry replaces it or the modal closes, so a stray key cannot wipe the diagnostic.
-- **Approval modal**: the gate for a tool call that needs approval, showing the command or the diff it would apply. [Permissions](permissions.md) covers its choices and guard.
-- **`/status`, `/config`, and `/help` overviews**: `KvOverview` tables of the session, the resolved config with each value's source, and the registered commands.
+- **`/model + /effort` picker.** It sets the model and the effort in one `Op::SetModel` whose `ConfigPick` carries only the changed axes.
+- **`/effort` slider.** It is a Speed ↔ Intelligence scale of the five levels, colored by the five `effort_*` theme slots.
+- **`/mode`, `/theme`, and `/init` pickers.** They list the permission modes, the built-in themes, and the instruction files `/init` can create.
+- **`/rename` editor.** It is a `LineEditor` prefilled with the title, which submits through `command::rename`, the typed form's parser.
+- **`/resume` picker.** It is a `SearchableList` of saved sessions, which [Resume](resume.md) covers.
+- **Prompt history picker.** It lists retained ordinary user prompts with an escaped, scrollable multiline preview. Enter recalls exact text as an undoable composer edit, while cancellation leaves the editor untouched.
+- **Confirm-delete modal.** It is a Y / N gate for deleting a saved session, pushed by `/delete <id-prefix>` and by the `/resume` picker. A failure stays inline until a retry replaces it or the modal closes, so a stray key cannot wipe the diagnostic.
+- **Approval modal.** It gates a tool call that needs approval, showing the command or the diff it would apply. [Permissions](permissions.md) covers its choices and guard.
+- **`/status`, `/config`, and `/help` overviews.** They are `KvOverview` tables of the session, the resolved config with each value's source, and the registered commands.
 
 ## Design Decisions
 

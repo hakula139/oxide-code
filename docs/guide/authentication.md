@@ -39,14 +39,14 @@ type = "bearer"
 file = "~/.secrets/gateway-token"
 ```
 
-| `type`      | Sends                                                                     |
-| ----------- | ------------------------------------------------------------------------- |
-| `"bearer"`  | A gateway token as `Authorization: Bearer`                                |
-| `"api-key"` | An API key as `x-api-key`                                                 |
-| `"oauth"`   | A fixed OAuth token with the OAuth request shape, never refreshed         |
-| `"login"`   | Takes no other keys and selects the remaining environment and login chain |
+| `type`      | Sends                                                             |
+| ----------- | ----------------------------------------------------------------- |
+| `"bearer"`  | A gateway token as `Authorization: Bearer`                        |
+| `"api-key"` | An API key as `x-api-key`                                         |
+| `"oauth"`   | A fixed OAuth token with the OAuth request shape, never refreshed |
+| `"login"`   | The credential from sources 4 to 6 in the table above             |
 
-Every type but `"login"` takes exactly one of `file` or `value`:
+`"login"` takes no other keys, and every other type takes exactly one of `file` or `value`:
 
 - **`file`** is a path that is absolute or starts with `~/`. `ox` reads only the winning file, once at startup, trimming trailing line endings, so restart `ox` after rotating it. `ox config check` validates the declaration without opening the file.
 - **`value`** sits on disk in plaintext, so keep that user config private, conventionally mode `0600`. `ox` does not change its permissions.
@@ -69,9 +69,9 @@ X-Route: blue'
 export NODE_EXTRA_CA_CERTS=~/.config/ox/corp-cachain.pem
 ```
 
-Where a variable has a config key, set in user configuration only, the variable overrides it:
+Each variable overrides the user-only config key in parentheses, where it has one:
 
-- **`ANTHROPIC_BASE_URL`** sets [`client.base_url`](configuration.md#base_url-endpoint).
+- **`ANTHROPIC_BASE_URL`** ([`client.base_url`](configuration.md#base_url-endpoint)) sets the API endpoint.
 - **`ANTHROPIC_AUTH_TOKEN`** authenticates with `Authorization: Bearer` and otherwise keeps the API-key request shape, without the OAuth beta.
 - **`ANTHROPIC_CUSTOM_HEADERS`** (`client.headers`, a map of header names to string values) takes one `Name: value` per line and skips blank lines. The headers go on every API request after the built-in ones, so they can replace defaults such as `User-Agent`. Naming a header oxide-code owns is an error: `anthropic-beta`, `anthropic-version`, `content-type`, `x-claude-code-session-id`, and the active credential's header (`x-api-key` for an API key, `Authorization` otherwise). The other credential header stays free, so a gateway can take its own `Authorization` alongside an API key. A line without a colon, an invalid name or value, or a reserved or repeated name stops startup with an error that gives the line number and never prints the value. `/config` lists the header names only.
 - **`NODE_EXTRA_CA_CERTS`** works like [`extra_ca_certs`](configuration.md#extra_ca_certs-corporate-trust-anchors), which gives its precedence. Shells often export it for npm, so like Node, oxide-code logs a warning and skips the bundle when it cannot read it.

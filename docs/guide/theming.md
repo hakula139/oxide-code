@@ -41,7 +41,7 @@ base = "~/.config/ox/themes/dark-extra.toml"
 ```
 
 - **Paths**: A leading `~/` expands to your home directory, and nothing else expands, so `$HOME`, `${XDG_CONFIG_HOME}`, and `%USERPROFILE%` fail to read. A relative path resolves against the directory you launched `ox` from.
-- **Project config** may only name a built-in theme, since a path there would have `ox` read a file the repository chooses.
+- **Project config**: A project's config may only name a built-in theme, since a path there would have `ox` read a file the repository chooses.
 - **Limits**: A value that is neither a built-in name nor a readable regular file of at most 64 KiB stops `ox` at startup with an error.
 
 ## Slot Value Formats
@@ -243,7 +243,7 @@ A bare string patches `fg` on a foreground slot and `bg` on a background-only sl
 
 An omitted modifier keeps the base value, `true` sets it, and `false` clears it. So `accent = { bold = false }` removes bold from the base accent without changing its color, and `accent = { italic = true }` adds italic while keeping the base bold. An empty patch (`accent = {}`) warns and falls back to the base, since it is almost always a typo.
 
-Overrides also apply to every built-in that [`/theme`](slash-commands.md#theme) previews or switches to, so they last for the whole session.
+Overrides also apply to every built-in that [`/theme`](slash-commands.md#pickers) previews or switches to, so they last for the whole session.
 
 Overrides from every [config layer](configuration.md#layers) merge by slot name, so a project can patch `error` while your user config patches `accent`. When two layers patch the same slot with inline tables, their fields combine and the later layer wins each field. Otherwise the later layer's patch replaces the earlier one.
 
