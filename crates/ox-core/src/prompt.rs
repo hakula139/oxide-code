@@ -898,7 +898,7 @@ mod tests {
                     &[
                         "In `plan`, every edit and command is denied",
                         "reads each command of a chain",
-                        "needs approval in `manual`, so prefer plain commands",
+                        "so the mode decides it. Prefer plain commands",
                     ],
                 ),
                 (

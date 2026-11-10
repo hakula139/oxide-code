@@ -75,8 +75,9 @@ body:
       label: Permission mode
       description: >-
         The mode when the problem occurred.
-        The status line shows `Mode: plan` or `Mode: yolo`, and nothing in `manual`.
+        The status line shows the active mode.
       options:
+        - auto
         - manual
         - plan
         - yolo
