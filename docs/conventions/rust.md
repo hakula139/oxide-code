@@ -1,13 +1,13 @@
 # Rust
 
-Conventions for Rust code under `crates/`. Tooling enforces some style rules, so this page lists those checks first, followed by the conventions reviewers need to check.
+Conventions for Rust code under `crates/`, starting with what tooling enforces.
 
 ## Enforced by Tooling
 
-- The root `Cargo.toml` configures `[workspace.lints]` for every crate. `clippy.toml` allows `unwrap()` in tests. `.cargo/config.toml` sets `build.warnings = "deny"`, so builds, tests, Clippy, and `cargo doc` on the pinned toolchain fail on a warning, including rustdoc's broken or redundant links, bare URLs, invalid HTML tags, malformed code blocks, and broken or unused footnotes. The MSRV job's older cargo ignores the setting, and the Nix build leaves out `.cargo/`. A denied warning also stops the crates that depend on its crate from compiling, so set `CARGO_BUILD_WARNINGS=warn` to see every error at once. The root manifest allows `private_intra_doc_links`, since `.cargo/config.toml` also makes rustdoc document the private items those links reach.
-- These lints require every suppression to use `#[expect(lint, reason = "...")]`, every module with children to use a `foo.rs` file beside its `foo/` directory rather than a `mod.rs`, and every raw string to use as few `#` delimiters as possible (`pedantic`'s `needless_raw_string_hashes`). They also reject `unwrap()` outside tests and untyped `let _ =` statements, so discard a value with `_ = expr`.
-- `cargo fmt` uses stable rustfmt, which does not wrap comments or group imports.
-- [Development](development.md#pre-commit-hooks) lists the pre-commit hooks.
+- `[workspace.lints]` in the root `Cargo.toml` sets every crate's lints, and `clippy.toml` allows `unwrap()` in tests.
+- `.cargo/config.toml` denies warnings, so a warning fails builds, tests, Clippy, and `cargo doc`, including rustdoc's link and markup warnings. A denied warning also stops dependent crates from compiling, so set `CARGO_BUILD_WARNINGS=warn` to see every error at once. The MSRV job's older cargo and the Nix build, which leaves out `.cargo/`, don't apply the setting.
+- The lints require `#[expect(lint, reason = "...")]` for every suppression, a `foo.rs` beside `foo/` in place of `mod.rs`, and the fewest `#` delimiters on a raw string. They reject `unwrap()` outside tests and untyped `let _ =`, so discard a value with `_ = expr`.
+- Stable rustfmt neither wraps comments nor groups imports.
 
 ## Lint Suppression
 

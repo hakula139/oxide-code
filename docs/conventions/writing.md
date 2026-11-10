@@ -10,7 +10,7 @@ Conventions for comments, docstrings, documentation, commit and PR text, and str
 - When editing, delete comments that repeat the code and correct any that have become misleading. Before deleting a comment that records a constraint, check whether the constraint still applies.
 - Delete commented-out code because version control preserves it.
 - Write `//` comments as prose. A docstring may use a Markdown list for parallel options or a sequence.
-- Wrap comment and docstring prose at 100 columns, including indentation and comment markers. Fill each paragraph naturally, allowing sentences to share a line, and separate paragraphs with a blank comment line. Break early when it improves readability, such as to keep a code span or link together. Reword a paragraph whose last line would contain one short word. Preserve intentional layout in code examples, lists, tables, and diagrams. Apply the same rule to shell, Nix, YAML, and TOML comments, and to prose literals continued by hand.
+- Wrap comment and docstring prose at 100 columns, counting indentation and comment markers, in every language and in prose literals continued by hand. Fill each paragraph, separate paragraphs with a blank comment line, and break early to keep a code span or link together. Reword a paragraph whose last line would hold one short word.
 
 ## Docstrings
 
@@ -61,14 +61,14 @@ These rules apply to errors, warnings, notices, and other strings shown to users
 
 - Keep `README.md` focused on users: explain the value, supported features, scope, and usage.
 - Use `docs/` to describe current behavior and its rationale. Track planned work, deferred follow-ups, and open design questions in GitHub issues, and link to the relevant issue from the docs.
-- Keep every command shown in the docs minimal. When a command would need extra flags or environment variables, move the setting into the tool's config, rely on its default, or add a project script, then document the short form.
-- Organize each page around the questions its readers bring. Keep each paragraph focused on one idea, and verify every claim against the code before citing it.
+- Keep every command shown in the docs minimal, moving extra flags or environment variables into the tool's config or a project script.
+- Organize each page around its readers' questions, with one idea per paragraph, and verify every claim against the code.
 - Add a row to the configuration guide's [Reference](../guide/configuration.md#reference) for each new config key and each new environment variable that configures `ox`. The `config::tests::reference` tests catch a missing key or `ANTHROPIC_`, `CLAUDE_`, or `OX_` variable, but not a variable with another prefix.
 - Cite Claude Code, [Codex](https://github.com/openai/codex), [pi](https://github.com/badlogic/pi-mono), and [oh-my-pi](https://github.com/can1357/oh-my-pi) as reference implementations in new research and design notes. Existing notes may retain their opencode citations.
 
 ### Design Docs
 
-- A design doc explains how a feature's mechanism works at module level and why it works that way, for the maintainer who changes it next. Leave per-function walkthroughs to the code. Leave a set the code enumerates, such as accepted options, builtin names, or enum variants, to the constant or type that holds it, whose rustdoc says what the set is for without restating its members. A set users rely on, such as the commands `manual` runs without asking, belongs in the user guide. Link the guide for user-facing behavior, such as commands, keys, and config keys, and keep the design doc to what that behavior means for the mechanism.
+- A design doc explains how a feature's mechanism works at module level and why, for the maintainer who changes it next. Leave per-function walkthroughs to the code, and a set the code enumerates, such as enum variants, to the type that holds it. Link the user guide for user-facing behavior, including any set users rely on, and keep the design doc to what that behavior means for the mechanism.
 
 - Open a feature's design doc with a sentence saying what the feature does, then describe its mechanism in sections named for their topics, followed by the sections below in this order.
 
@@ -86,5 +86,5 @@ These rules apply to errors, warnings, notices, and other strings shown to users
 
 ### Research Notes
 
-- `docs/research/` holds API references and surveys that inform open design questions. Each survey links the `design` issues it informs. The PR that settles one of them moves any comparison its decision still depends on into that decision's reason and trims the survey's part on it, and the PR that closes the last one deletes the survey, since nobody re-verifies a survey whose questions are closed while its claims drift as the reference implementations change.
+- `docs/research/` holds API references and surveys that inform open design questions, and each survey links the `design` issues it informs. The PR that settles one moves any comparison its decision still depends on into that decision's reason and trims the survey. The PR that closes the last one deletes the survey, since nobody re-verifies a closed survey while the reference implementations drift.
 - Follow each survey's opening paragraph with a `Verified <date> against <versions>.` line naming the reference implementations and versions its last full re-read covered. A claim you add or edit afterward in any research note carries its own date and version. Delete a claim if a newer test contradicts it or you can no longer verify it.

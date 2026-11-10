@@ -35,11 +35,9 @@ These rules apply to unit-test modules (`mod tests`). The end-to-end tests in `c
 
 ## Hermetic Tests
 
-Every test must run and pass wherever the suite runs: on each supported OS and in CI. Never skip, `#[ignore]`, retry, or `cfg`-gate a test to get it past its environment. Restructure tests that depend on their environment until they pass everywhere. For example, move the dependency behind a trait fake, as `util::tls` does for the Security framework, or pin what the test reads. Use a platform `cfg` gate only for a test of code that exists only on that platform.
+Every test must pass wherever the suite runs: on each supported OS and in CI. Never skip, `#[ignore]`, retry, or `cfg`-gate a test to get it past its environment. The [live tests](#live-tests) are the one exception, since they send paid requests. Move the dependency behind a trait fake, as `util::tls` does for the Security framework, or pin what the test reads. A platform `cfg` gate is only for code that exists on that platform alone.
 
-Run the suite as a non-root user, an environment requirement like having `git` installed. Root ignores the access denials and read-only files that `util::fs::testing::deny_read_access`, `deny_subdir_creation`, and `make_read_only` set up, so the tests built on them fail.
-
-The [live tests](#live-tests) are the sole exception because they send paid requests to a real endpoint.
+Run the suite as a non-root user, since root ignores the access denials and read-only files that `util::fs::testing` sets up.
 
 ## Time
 
@@ -57,29 +55,25 @@ The [live tests](#live-tests) are the sole exception because they send paid requ
 
 ## Snapshots
 
-`insta` snapshot tests compare TUI renders, the session store's SQL dump and export, and headless output against baselines in the module's `snapshots/` directory. When output changes, the test fails and writes a `.snap.new` file beside the baseline. Review and accept the difference with `cargo insta review`, then commit the updated `.snap`.
+`insta` snapshot tests compare TUI renders, the session store's SQL dump and export, and headless output against baselines in the module's `snapshots/` directory. When output changes, review it with `cargo insta review` and commit the updated `.snap`.
 
-A baseline's file name consists of the test's `module_path!()`, which starts with the crate name, such as `ox_core`, `ox_tui`, or `ox`, followed by the snapshot name, with `__` replacing each `::`, as in `ox__driver__headless__tests__drive__stderr.snap`. An unnamed assertion takes the test's name, where insta strips a leading `test_` and appends `-2`, `-3`, and so on to each further unnamed snapshot in the same test. A `snapshot_suffix` setting appends `@<suffix>`. An explicit name drops the function prefix just as a test name does, so `drive_stderr` becomes `stderr` inside `mod drive`. Moving a test to another module renames every baseline it writes, while renaming a test renames only its unnamed ones. Rename each `.snap` file to match, and delete baselines left behind by removed tests. `cargo insta test --unreferenced=reject` fails whenever any baseline is left without a test, and CI's Rust Lint Check (Linux) job runs that command.
+- A baseline's file name follows the test's module path, so moving a test renames every baseline it writes, and renaming it renames its unnamed ones. Rename each `.snap` to match, and delete baselines that removed tests leave behind. `cargo insta test --unreferenced=reject` and CI's Linux Rust Lint job fail on a baseline no test asserts.
+- An explicit snapshot name drops the function prefix just as a test name does, so `drive_stderr` becomes `stderr` inside `mod drive`.
+- A baseline's file name follows the test's module path, so moving a test renames every baseline it writes, and renaming it renames its unnamed ones. Rename each `.snap` to match, and delete baselines that removed tests leave behind. `cargo insta test --unreferenced=reject` and CI's Linux Rust job fail on a baseline no test asserts.
 
 The session fixtures in `crates/ox-core/src/session/fixtures/` are frozen release output, with a SQL dump and an export per stable release starting at `v0.1.0`. Never edit them. A changed `session_format::resumes_from_every_release_fixture@<tag>` snapshot means an older release's sessions now resume differently, so accept it only as [Compatibility](../design/persistence.md#compatibility) allows.
 
 ## Coverage
 
-CI uploads `cargo llvm-cov` results to Codecov. Its PR comment reports patch coverage, the share of changed PR lines that tests run. Overall coverage can be high while patch coverage stays low if a PR adds untested glue.
+CI uploads `cargo llvm-cov` results to Codecov, and the required `codecov/patch` status checks the share of changed lines that tests run.
 
-- Cover changed lines with tests that check behavior. Run `cargo llvm-cov --show-missing-lines` locally to list uncovered lines.
+- Cover changed lines with tests that check behavior. `cargo llvm-cov --show-missing-lines` lists uncovered lines.
 - Leave a line uncovered only when it is untestable wiring, such as an event-loop entry point or a panic hook. Explain why in the PR's Test plan.
 - Check a shape in a test helper with `assert!(matches!(..))`, which leaves no panic arm for coverage to flag.
 
 ## Mutation Testing
 
-Coverage shows whether a line ran. Mutation testing shows whether a mutation of that line would be caught. A full run is slow, so run it out of band before large-scope changes ship:
-
-```bash
-cargo mutants
-```
-
-It mutates every workspace crate, and `.cargo/mutants.toml` sets `test_workspace`, so each mutant faces every crate's tests. A surviving mutant usually means an assertion is too loose, so tighten it. If a mutant is genuinely equivalent, exclude it in that file with an `exclude_re` pattern and a comment explaining the equivalence.
+Mutation testing shows whether the tests would catch a changed line. A full run is slow, so run `cargo mutants` out of band before a large change ships. Each mutant faces every crate's tests. Tighten the assertion a surviving mutant slips past, and exclude a genuinely equivalent mutant in `.cargo/mutants.toml` with an `exclude_re` pattern and a comment explaining the equivalence.
 
 ## Live Tests
 
@@ -89,9 +83,14 @@ It mutates every workspace crate, and `.cargo/mutants.toml` sets `test_workspace
 OX_LIVE=1 cargo live
 ```
 
-Each test runs `ox` with a scratch directory as its home and for its config, sessions, and logs. `ox` loads no global instructions, config file, or stored login there, so the endpoint and credentials come only from the [environment variables](../guide/configuration.md#environment-variables), and one credential variable must be set. The harness also drops inherited `OX_*` settings other than `OX_EXTRA_CA_CERTS`, so they cannot change what the tests observe. `OX_LIVE_MODEL` picks the model, `claude-haiku-5-5` by default, and `OX_LIVE_THINKING_MODEL` picks the one for the thinking test, `claude-opus-5-5` by default.
+Each test runs `ox` with a scratch home, so the endpoint and credentials come only from the [environment variables](../guide/configuration.md#environment-variables), and one credential variable must be set. The harness drops inherited `OX_*` settings other than `OX_EXTRA_CA_CERTS`.
 
-After each run, a test fails when the value of `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN`, or an `ANTHROPIC_CUSTOM_HEADERS` value of 8 or more characters, appears in the run's output, in any file under the scratch directory, or in the `ox export` of the session it saved, which also holds the database values a file scan can miss when SQLite splits them across pages. The failure names the variable without printing the value.
+| Variable                 | Picks                           | Default            |
+| ------------------------ | ------------------------------- | ------------------ |
+| `OX_LIVE_MODEL`          | The model for every test        | `claude-haiku-5-5` |
+| `OX_LIVE_THINKING_MODEL` | The model for the thinking test | `claude-opus-5-5`  |
+
+A test fails when a credential value, or an `ANTHROPIC_CUSTOM_HEADERS` value of 8 or more characters, appears in the run's output, a file under the scratch home, or the saved session's `ox export`. The failure names the variable without printing the value.
 
 Run the suite once against the Anthropic API, where the billing header carries a live `cch` hash, and once through each Anthropic-compatible gateway you support.
 

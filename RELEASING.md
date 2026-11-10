@@ -2,9 +2,7 @@
 
 Pushing a tag that matches `v[0-9]+.*` starts `.github/workflows/release.yml`, which waits for a passing CI run on the tagged commit, builds and checks every target, and publishes a GitHub Release with the tag's `CHANGELOG.md` section as its notes. A tag with a prerelease suffix, such as `v0.1.0-rc.1`, publishes a prerelease.
 
-Before publication, the workflow pushes the flake's x86_64 Linux and Apple Silicon macOS packages to the `hakula` Cachix cache and pins each as `oxide-code-<tag>-<system>` to retain its closure.
-
-To restore a published tag's cache pin, run `gh workflow run nix-cache.yml -f tag=vX.Y.Z`.
+Before publication, devkit's `nix-cache.yml` pushes the flake's x86_64 Linux and Apple Silicon macOS packages to the `hakula` Cachix cache and pins each as `oxide-code-<tag>-<system>` to retain its closure. [Recover a release](https://github.com/hakula139/devkit/blob/v3/docs/releasing.md#recover-a-release) shows how to restore a deleted pin.
 
 ## Versioning
 
@@ -62,11 +60,11 @@ Watch the [Release workflow](https://github.com/hakula139/oxide-code/actions/wor
 - Every [target](#targets) archive and its `.sha256` sidecar are attached, and `gh attestation verify <archive> --repo hakula139/oxide-code` passes for one of them.
 - `nix run github:hakula139/oxide-code/vX.Y.Z -- --version` prints the version on one host.
 
-The workflow then renders the formula from the release sidecars, installs it through a local tap on `macos-latest` and `ubuntu-latest`, and runs `brew test` there before it opens a `chore(release): refresh Homebrew formula for vX.Y.Z` PR. The same check runs on pull requests that touch the formula, its rendering script, or the release workflows. Merging that PR once its checks pass is the final release step. The formula follows the latest release, or the newest prerelease until the first stable release, so other tags skip this job. If the job fails, fix the cause and rerun it, since a rerun rebuilds the branch and reuses an open PR.
+The workflow then renders the Homebrew formula from the release sidecars, runs `brew test` on macOS and Linux, and opens a `chore(release): refresh Homebrew formula for vX.Y.Z` PR. Merging that PR once its checks pass is the final release step. The formula follows the latest release, or the newest prerelease until the first stable release, so other tags skip this job. If the job fails, fix the cause and rerun it, which reuses an open PR.
 
 ## Recovery
 
-Follow the shared release procedure for notes corrections and CI retries. Let an in-flight release finish before rebuilding assets. Rebuild the original commit when rebuilding the same tag. A source change requires a new version and release PR. A release workflow rerun refreshes the open formula PR or opens one with the rebuilt checksums.
+Follow the shared release procedure for notes corrections and CI retries. Let an in-flight release finish before rebuilding assets, and rebuild the original commit for the same tag. A source change requires a new version and release PR.
 
 ## Stable Gates for 0.1.0
 
@@ -90,5 +88,5 @@ The `v0.1.0` release PR also switches the install snippets to `releases/latest/d
 
 The build matrix in `release.yml` lists the targets. Each release attaches one archive per target with a `.sha256` sidecar and a build provenance attestation, and release asset names belong to the [stability surface](#stability-surface).
 
-- The platform floors in `docs/guide/install.md` bind the build. The Linux job fails when the binary needs a newer glibc than the guide promises, reading the floor from the phrase `Linux with glibc <version> or later`, so keep that wording when editing it. If a runner image update trips the check, either pin the Linux build to the previous image or raise the floor in the guide. The macOS job fails when the binary's minimum macOS version differs from the guide's `**macOS**: <version> or later` floor, so keep that wording too. Raising that floor also means changing `MACOSX_DEPLOYMENT_TARGET` in `release.yml` and the formula's `depends_on macos:` in `scripts/oxide-code-formula.rb`.
+- The release jobs read the platform floors from `docs/guide/install.md`, so keep its `Linux with glibc <version> or later` and `**macOS**: <version> or later` wording. The Linux job fails when the binary needs a newer glibc, which a runner image update can cause, so pin the previous image or raise the floor. The macOS job fails when the binary's minimum macOS differs from the floor, and raising it also changes `MACOSX_DEPLOYMENT_TARGET` in `release.yml` and `depends_on macos:` in `scripts/oxide-code-formula.rb`.
 - Add a target by extending the matrix. Each target needs a runner that executes its binary, since every build job checks its archive there.

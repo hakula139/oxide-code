@@ -2,23 +2,23 @@
 
 oxide-code is a terminal-based AI coding assistant written in Rust, inspired by [Claude Code](https://code.claude.com/docs). Its binary, `ox`, talks to LLM APIs to help developers with software engineering tasks from the terminal.
 
-This file holds the rules for every change and points to the conventions for each area. `README.md` covers features and scope for users, [`docs/`](docs/) holds the user guides, conventions, design specs, and research notes, and open GitHub issues track planned work.
+This file holds the rules for every change and links the conventions for each area. Open GitHub issues track planned work.
 
 ## Project Layout
 
-The tree lists only the top-level entries whose names leave their purpose unclear.
+The [module map](docs/design/architecture.md) covers each crate's modules.
 
 ```text
 .
-├── about.toml                              # Release dependency license selection
-├── crates/ox/                              # The `ox` binary crate with the CLI and headless frontend, mapped in docs/design/architecture.md
-├── crates/ox-core/                         # The `ox-core` library crate with the agent core, mapped in docs/design/architecture.md
-├── crates/ox-tui/                          # The `ox-tui` library crate with the terminal UI, mapped in docs/design/architecture.md
-├── docs/                                   # User guides, conventions, design specs, and research notes
-├── Formula/                                # Homebrew formula, served from this repo as a tap
-├── licenses/                               # Third-party notice templates and bundled asset licenses
-├── nix/                                    # Nix package and Home Manager module with its tests
-└── scripts/                                # Homebrew formula renderer and Ruby template
+├── about.toml             # Release dependency license selection
+├── crates/ox/             # The `ox` binary with the CLI and headless frontend
+├── crates/ox-core/        # The agent core library
+├── crates/ox-tui/         # The terminal UI library
+├── docs/                  # User guides, conventions, design specs, and research notes
+├── Formula/               # Homebrew formula, served from this repo as a tap
+├── licenses/              # Third-party notice templates and bundled asset licenses
+├── nix/                   # Nix package and Home Manager module with its tests
+└── scripts/               # Homebrew formula renderer and Ruby template
 ```
 
 ## Read Before You Edit
@@ -34,9 +34,9 @@ The tree lists only the top-level entries whose names leave their purpose unclea
 
 ## Rules for Every Change
 
-- Run the pre-commit hooks on every commit. In each new checkout or worktree, run `nix develop -c true` once to generate the hook config. Never bypass the hooks with `--no-verify` or `PRE_COMMIT_ALLOW_NO_CONFIG`.
+- Run the pre-commit hooks on every commit. In each new checkout or worktree, run `nix develop -c true` once to install the hooks. Never bypass the hooks with `--no-verify` or `PRE_COMMIT_ALLOW_NO_CONFIG`.
 - Run the [verification](#verification) block before review.
-- Add new words to `.cspell/words.txt` in alphabetical order. `cspell` scans Rust sources too, so a new word in a doc comment fails the same way as one in `README.md`.
+- Add new words, including those in Rust sources, to `.cspell/words.txt` in alphabetical order.
 - Update whatever the change makes stale: the `README.md` Features and Scope sections, the trust model in `SECURITY.md`, the user guides, design docs and the module map, research surveys whose open questions it settles, open issues it resolves or invalidates, and the Home Manager module in `nix/home-manager.nix` when `ox` reads a new file from the user config directory.
 - Design each change to hold up long term. Survey the reference implementations that [Writing](docs/conventions/writing.md#documentation) lists, reason from first principles toward a design better than any of them, and land any refactor the design needs first. Fix a problem in the layer that owns it, so when `ox` misbehaves in some environment, fix `ox` and leave the environment alone. Never ship a stopgap labeled temporary.
 - Settle design choices, including the plan for a new subsystem, without waiting for the maintainer's approval. Record each uncertain choice, with the option taken, in the main worktree's gitignored `.agents/plans/questions.md`, raise them together in the next reply to the maintainer, and delete each entry once the maintainer answers it.
@@ -48,15 +48,15 @@ The tree lists only the top-level entries whose names leave their purpose unclea
 Run after implementation and before review:
 
 ```bash
-nix develop -c run-hooks                              # Run the hooks, including rustfmt and Clippy with all targets
-cargo build                                           # Build
-cargo clippy                                          # Lint without test targets or their fixtures
-cargo doc --no-deps                                   # Check rustdoc lints
-cargo llvm-cov                                        # Run tests and check coverage
-cargo deny check                                      # Check dependencies when they change
+nix develop -c run-hooks   # Run the hooks, including rustfmt and Clippy with all targets
+cargo build                # Build
+cargo clippy               # Lint without test targets or their fixtures
+cargo doc --no-deps        # Check rustdoc lints
+cargo llvm-cov             # Run tests and check coverage
+cargo deny check           # Check dependencies when they change
 ```
 
-[Development](docs/conventions/development.md#ci) lists which CI job runs each check.
+[CI](docs/conventions/development.md#ci) lists the job that runs each check.
 
 ## Code Review
 
