@@ -13,7 +13,7 @@ Conventions for commits, branches, pull requests, and issues.
 ## Pull Requests
 
 - Merge into `main` only with squash merges. The squash commit uses the PR title, which becomes the PR's draft [changelog](../../RELEASING.md#release-preparation) entry, so write the title for users.
-- Fill in `.github/pull_request_template.md`. Start the Summary with prose describing the problem and resulting behavior, then cover each part of the change in a bullet with a bold label. In the Test plan, list the checks actually run and note any verification limits.
+- Fill in the PR template, which [`hakula139/.github`](https://github.com/hakula139/.github) supplies. Start the Summary with prose describing the problem and resulting behavior, then cover each part of the change in a bullet with a bold label. In the Test plan, list the checks actually run and note any verification limits.
 - Add `Closes #N` for each resolved issue.
 - Do not request a review from the PR author because GitHub rejects the request.
 - Maintainers with triage access assign the PR to `hakula139`, set its milestone to the linked issue's milestone or the planned delivery batch when no issue is linked, and add one type label plus the `area:` labels for the areas it changes:
