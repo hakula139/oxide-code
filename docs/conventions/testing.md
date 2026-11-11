@@ -57,7 +57,7 @@ Run the suite as a non-root user, since root ignores the access denials and read
 
 `insta` snapshot tests compare TUI renders, the session store's SQL dump and export, and headless output against baselines in the module's `snapshots/` directory. When output changes, review it with `cargo insta review` and commit the updated `.snap`.
 
-- A baseline's file name follows the test's module path, so moving a test renames every baseline it writes, and renaming it renames its unnamed ones. Rename each `.snap` to match, and delete baselines that removed tests leave behind. `cargo insta test --unreferenced=reject` and CI's Linux Rust Lint job fail on a baseline no test asserts.
+- A baseline's file name follows the test's module path, so moving a test renames every baseline it writes, and renaming it renames its unnamed ones. Rename each `.snap` to match, and delete baselines that removed tests leave behind. `cargo insta test --unreferenced=reject` and CI's Rust Lint Check (Linux) job fail on a baseline no test asserts.
 - An explicit snapshot name drops the function prefix just as a test name does, so `drive_stderr` becomes `stderr` inside `mod drive`.
 
 The session fixtures in `crates/ox-core/src/session/fixtures/` are frozen release output, with a SQL dump and an export per stable release starting at `v0.1.0`. Never edit them. A changed `session_format::resumes_from_every_release_fixture@<tag>` snapshot means an older release's sessions now resume differently, so accept it only as [Compatibility](../design/persistence.md#compatibility) allows.
