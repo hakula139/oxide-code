@@ -97,7 +97,7 @@ The flake's Home Manager module installs `ox` and writes its configuration from 
 inputs.oxide-code = {
   url = "github:hakula139/oxide-code";
   inputs = {
-    git-hooks-nix.follows = "git-hooks-nix";
+    devkit.inputs.git-hooks-nix.follows = "git-hooks-nix";
     home-manager.follows = "home-manager";
     rust-overlay.follows = "rust-overlay";
   };
