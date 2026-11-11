@@ -9,7 +9,7 @@ The Nix flake provides the pinned Rust toolchain, `cargo-deny`, `cargo-insta`, `
 ```bash
 nix develop                                        # Dev shell with the toolchain and hooks
 nix develop -c run-hooks                           # Run shared formatting and lint hooks
-nix flake check                                    # Run package, Home Manager, overlay, and test checks
+nix flake check                                    # Run package, Home Manager, and overlay checks
 nix build                                          # Build ox from source without running the tests
 ```
 
@@ -23,10 +23,10 @@ The hooks check file hygiene, Nix, shell, Rust, web-format, TOML, Markdown, and 
 
 ## Toolchain
 
-- `rust-toolchain.toml` pins the exact Rust release used by the dev shell, CI's Rust and MSRV jobs, and release builds. The dev shell reads the pin through rust-overlay, while jobs outside Nix install it with `rustup toolchain install`.
-- The Nix package and its `tests` check build with the Rust release of the flake's pinned nixpkgs. Overlay and Home Manager consumers reuse that package output.
+- `rust-toolchain.toml` pins the exact Rust release used by the dev shell, the hooks, CI's Rust, Rust Lint, and Windows jobs, and release builds. The dev shell reads the pin through rust-overlay, while the Windows job and release builds install it with `rustup toolchain install`.
+- The Nix package builds with the Rust release of the flake's pinned nixpkgs. Overlay and Home Manager consumers reuse that package output.
 - Renovate bumps the pin in its automerged flake-inputs group. If a new release adds lint failures, fix them in that PR so it can merge.
-- `rust-version` in the root `Cargo.toml` sets the minimum supported Rust version for `cargo install` and Nix users. The MSRV job checks it, the Nix jobs fail when it passes the Rust release of the flake's nixpkgs, and [Versioning](../../RELEASING.md#versioning) explains how to bump it.
+- `rust-version` in the root `Cargo.toml` sets the minimum supported Rust version for `cargo install` and Nix users. The MSRV job builds the workspace with that release in the flake's `msrv` dev shell, the Nix jobs fail when it passes the Rust release of the flake's nixpkgs, and [Versioning](../../RELEASING.md#versioning) explains how to bump it.
 
 ## Nix Style
 
@@ -75,16 +75,20 @@ Dev and test builds include line tables for the workspace crates and no debug in
 
 CI runs on pushes to `main`, pull requests, and manual dispatch. The release workflow publishes a tag only after a push or dispatched CI run on the tagged commit passes, and calls CI itself for a dry run from another ref:
 
-| Job                          | Checks                                                                                                                                                                                                                       |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Lint                         | `cargo deny check` in the flake's `lint` shell, which leaves out the pinned toolchain                                                                                                                                        |
-| Rust (Linux, macOS, Windows) | `cargo clippy --all-targets` on macOS and Windows, then `cargo clippy`, `cargo doc --no-deps`, and the test suite under `cargo llvm-cov`, uploaded to Codecov, then on Linux a check that every snapshot baseline has a test |
-| MSRV                         | `cargo hack check --rust-version` against `rust-version`                                                                                                                                                                     |
-| Nix (Linux, macOS)           | Package build and version check, Home Manager, overlay, and sandbox tests, plus all hooks on Linux (including Rust formatting and Clippy) and dev-shell hook tools on macOS                                                  |
+| Job                      | Checks                                                                                                                                                             |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Nix (Linux, macOS)       | Package build and version check, Home Manager and overlay checks, plus all hooks on Linux (including Rust formatting and Clippy) and dev-shell hook tools on macOS |
+| Rust (Linux, macOS)      | `cargo clippy --all-targets` on macOS, the test suite under `cargo llvm-cov`, uploaded to Codecov, and the doc tests                                               |
+| MSRV                     | `cargo check --all-targets` in the flake's `msrv` shell                                                                                                            |
+| Rust Lint (Linux, macOS) | `cargo clippy` without test targets and `cargo doc --no-deps`, then on Linux a check that every snapshot baseline has a test                                       |
+| Windows                  | `cargo clippy --all-targets`, `cargo clippy`, `cargo doc --no-deps`, and the test suite under `cargo llvm-cov`, uploaded to Codecov                                |
+| Dependency               | `cargo deny check` in the flake's `lint` shell, which leaves out the pinned toolchain                                                                              |
+
+The Nix, Rust, and MSRV jobs come from devkit's [reusable workflows](https://github.com/hakula139/devkit/blob/v3/docs/ci.md), and the Rust Lint job runs the checks `rust.yml` leaves out.
 
 Branch protection requires only the CI Result job and Codecov's `codecov/patch` status. CI Result reads every attempt's jobs from the Actions API, keeps the latest attempt for each job name, and fails when any job of the CI workflow, including each matrix leg, concludes anything other than success or skipped. That catches a leg cancelled before a runner picks it up, which the `needs` results of a matrix job omit, and retains earlier failures when only the gate reruns. CI Result runs once the jobs in its `needs` finish and counts any unfinished job as a failure, so list each new job there.
 
-The Lint and Nix jobs pull from the `hakula` Cachix cache and push their builds only on the default branch. The cache only saves build time, so a failed Cachix setup, download, or push does not fail a job: a failed setup logs a warning and the job builds without the cache, a failed download makes Nix build that path from source, and a failed push at the end of the job shows Cachix's error annotation on a green job. Every other failed step still fails its job and CI Result. A download that stalls without failing still runs the job into its timeout, which [#715](https://github.com/hakula139/oxide-code/issues/715) tracks.
+Every job but Windows and CI Result pulls from the `hakula` Cachix cache and pushes its builds only on the default branch. The cache only saves build time, so a failed Cachix setup, download, or push does not fail a job: a failed setup logs a warning and the job builds without the cache, a failed download makes Nix build that path from source, and a failed push at the end of the job shows Cachix's error annotation on a green job. Every other failed step still fails its job and CI Result. A download that stalls without failing still runs the job into its timeout, which [#715](https://github.com/hakula139/oxide-code/issues/715) tracks.
 
 A push to a pull request cancels the CI it supersedes, while every push to `main` gets its own run, which a later push never cancels.
 
@@ -94,6 +98,6 @@ No job runs a plain `cargo build`, so run it locally for a quick compile check. 
 
 ## Failing Checks
 
-Fix the cause of a failing hook, lint, test, or CI job. Skipped tests, `--skip` or `--exclude` flags, ignore and allowlist entries, `continue-on-error`, `|| true`, retries, and special cases for one path or commit only hide the failure. A test that cannot run in some environment, such as the Nix build sandbox, must be restructured until it can, as [Hermetic Tests](testing.md#hermetic-tests) describes.
+Fix the cause of a failing hook, lint, test, or CI job. Skipped tests, `--skip` or `--exclude` flags, ignore and allowlist entries, `continue-on-error`, `|| true`, retries, and special cases for one path or commit only hide the failure. A test that cannot run in some environment, such as Windows, must be restructured until it can, as [Hermetic Tests](testing.md#hermetic-tests) describes.
 
 Keep an ignore or allowlist entry only when it is the design, such as a license the project accepts, an advisory with no fix, or a generated file that a formatter must skip. Keep a `continue-on-error` only on a step whose failure cannot change what a build or check finds, such as the Cachix setup. Give the reason in the PR that adds either.

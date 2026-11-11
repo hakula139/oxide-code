@@ -18,10 +18,30 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  nix:
+    uses: hakula139/devkit/.github/workflows/nix.yml@v3
+    secrets:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+  rust:
+    permissions:
+      contents: read
+      id-token: write
+    uses: hakula139/devkit/.github/workflows/rust.yml@v3
+    with:
+      msrv: true
+    secrets:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
   lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    name: Rust Lint Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os == 'macOS' && 'macos-latest' || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [Linux, macOS]
+
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -31,24 +51,33 @@ jobs:
         with:
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      - name: Check dependencies
-        if: ${{ !cancelled() }}
-        run: nix develop .#lint -c cargo deny --locked check
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cmd-format: nix develop -c {0}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-  rust:
-    name: Rust (${{ matrix.os }})
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: Linux
-            runner: ubuntu-latest
-          - os: macOS
-            runner: macos-latest
-          - os: Windows
-            runner: windows-latest
+      # Dev-dependencies turn on ox-core's `testing` feature, so only a build without test targets
+      # catches code that compiles only with it.
+      - name: Run clippy without test targets
+        run: nix develop -c cargo clippy --locked
+
+      - name: Run rustdoc
+        if: ${{ !cancelled() }}
+        run: nix develop -c cargo doc --locked --no-deps
+
+      - name: Check for unreferenced snapshots
+        if: ${{ !cancelled() && matrix.os == 'Linux' }}
+        run: nix develop -c cargo insta test --unreferenced=reject
+
+  windows:
+    name: Windows Check
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -64,98 +93,56 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # The Nix job's clippy hook covers Linux.
-      - name: Clippy
-        if: ${{ !cancelled() && matrix.os != 'Linux' }}
+      - name: Run clippy
         run: cargo clippy --locked --all-targets
 
-      - name: Clippy without test targets
+      - name: Run clippy without test targets
         if: ${{ !cancelled() }}
         run: cargo clippy --locked
 
-      - name: Rustdoc
+      - name: Run rustdoc
         if: ${{ !cancelled() }}
         run: cargo doc --locked --no-deps
 
-      - name: Test with coverage
-        id: coverage
+      - name: Run tests
+        id: tests
         if: ${{ !cancelled() }}
-        env:
-          # insta appends the path of each snapshot a test asserts to this file, which
-          # `cargo insta test --unreferenced` also reads.
-          INSTA_SNAPSHOT_REFERENCES_FILE: ${{ runner.temp }}/snapshot-references
         run: cargo llvm-cov --locked --lcov --output-path lcov.info
 
-      - name: Check for unreferenced snapshots
-        if: ${{ !cancelled() && matrix.os == 'Linux' && steps.coverage.outcome == 'success' }}
-        shell: bash
-        env:
-          REFERENCES: ${{ runner.temp }}/snapshot-references
-        run: |
-          if [[ ! -s "$REFERENCES" ]]; then
-            echo "::error::insta recorded no snapshot references, so this check cannot run"
-            exit 1
-          fi
-
-          unreferenced=$(
-            git ls-files -z '*.snap' |
-              xargs -0 realpath |
-              sort |
-              comm -23 - <(sort -u "$REFERENCES")
-          )
-
-          if [[ -n "$unreferenced" ]]; then
-            while read -r file; do
-              echo "::error::No test asserts $file"
-            done <<<"$unreferenced"
-            exit 1
-          fi
-
       - name: Upload to Codecov
-        if: ${{ !cancelled() && steps.coverage.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
         uses: codecov/codecov-action@v7
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
-          disable_search: true
-          fail_ci_if_error: true
+          use_oidc: true
 
-  msrv:
-    name: MSRV
+  dependencies:
+    name: Dependency Check
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
+
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Set up Rust
-        run: rustup toolchain install
-
-      - name: Install cargo-hack
-        uses: taiki-e/install-action@cargo-hack
-
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
+      - name: Set up Nix
+        uses: hakula139/devkit/.github/actions/setup-nix@v3
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      - name: Check
-        run: cargo hack check --rust-version --workspace --all-targets --locked
-
-  nix:
-    uses: hakula139/devkit/.github/workflows/nix.yml@v3
-    secrets:
-      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Check dependencies
+        run: nix develop .#lint -c cargo deny --locked check
 
   result:
     name: CI Result
     # A skipped job counts as a passing required check, so the gate must run after failures too.
     if: ${{ !cancelled() }}
-    needs: [lint, rust, msrv, nix]
+    needs: [nix, rust, lint, windows, dependencies]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       actions: read
+
     steps:
       - name: Check results
         uses: hakula139/devkit/.github/actions/ci-result@v3

@@ -1,6 +1,6 @@
 codecov:
   notify:
-    # One upload per leg of the Rust matrix in ci.yml.
+    # One upload each from rust.yml's Linux and macOS legs and the Windows Check job.
     after_n_builds: 3
 
 coverage:

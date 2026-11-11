@@ -373,8 +373,8 @@ impl webpki::ExtendedKeyUsageValidator for LeafServerAuth {
 #[cfg(target_os = "macos")]
 const CF_EPOCH_UNIX_SECS: u64 = 978_307_200;
 
-/// The Security framework services behind [`ExtraCaVerifier`]. Tests fake them because the Nix
-/// build sandbox blocks trustd, which they rely on.
+/// The Security framework services behind [`ExtraCaVerifier`]. Tests fake them so they never
+/// depend on the host's trustd or trust settings.
 #[cfg(target_os = "macos")]
 trait AppleTrust: fmt::Debug + Send + Sync {
     /// Returns the DER encodings of Apple's built-in roots.
