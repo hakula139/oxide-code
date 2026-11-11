@@ -135,7 +135,6 @@ jobs:
 
   result:
     name: CI Result
-    # A skipped job counts as a passing required check, so the gate must run after failures too.
     if: ${{ !cancelled() }}
     needs: [nix, rust, lint, windows, dependencies]
     runs-on: ubuntu-latest
