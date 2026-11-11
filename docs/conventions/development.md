@@ -65,7 +65,7 @@ CI runs on pushes to `main`, pull requests, and manual dispatch. The release wor
 
 The Nix, Rust, and MSRV jobs come from devkit's [reusable workflows](https://github.com/hakula139/devkit/blob/v3/docs/ci.md), and the Rust Lint job runs the checks `rust.yml` leaves out.
 
-Branch protection requires CI Result and Codecov's `codecov/patch`. Add each new job to CI Result's `needs`, since the gate runs once those jobs finish and counts any job still unfinished as a failure, and give each new job a `timeout-minutes` several times its usual duration, since a hung test otherwise holds the runner for six hours. libtest names any test still running after 60 s, so a timed-out job's log shows which test hung.
+Branch protection requires CI Result and Codecov's `codecov/patch`. Add each new job to CI Result's `needs`, since the gate runs once those jobs finish and skips any job still running, and give each new job a `timeout-minutes` several times its usual duration, since a hung test otherwise holds the runner for six hours. libtest names any test still running after 60 s, so a timed-out job's log shows which test hung.
 
 Every job but Windows and CI Result reads the `hakula` Cachix cache, and a Cachix failure never fails a job. A download that stalls without failing still runs the job into its timeout, which [#715](https://github.com/hakula139/oxide-code/issues/715) tracks.
 
