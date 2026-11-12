@@ -48,14 +48,12 @@ The tree lists only the top-level entries whose names leave their purpose unclea
 Run after implementation and before review:
 
 ```bash
-cargo fmt --check                                     # Check formatting
+nix develop -c run-hooks                              # Run the hooks, including rustfmt and Clippy with all targets
 cargo build                                           # Build
-cargo clippy --all-targets                            # Lint (pedantic, zero warnings)
 cargo clippy                                          # Lint without test targets or their fixtures
 cargo doc --no-deps                                   # Check rustdoc lints
 cargo llvm-cov                                        # Run tests and check coverage
 cargo deny check                                      # Check dependencies when they change
-prek run --all-files                                  # Run the shared formatting and lint hooks
 ```
 
 [Development](docs/conventions/development.md#ci) lists which CI job runs each check.

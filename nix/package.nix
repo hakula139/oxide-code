@@ -1,7 +1,6 @@
 {
   lib,
   cargo-about,
-  git,
   rustPlatform,
   stdenv,
   versionCheckHook,
@@ -19,8 +18,6 @@ rustPlatform.buildRustPackage {
       ../LICENSE
       ../about.toml
       ../crates
-      # The config tests check that the guide's reference lists every key and variable.
-      ../docs/guide/configuration.md
       ../licenses
     ];
   };
@@ -39,16 +36,8 @@ rustPlatform.buildRustPackage {
       --offline
   '';
 
-  # The flake's `tests` check runs the suite, so builds of the package skip it.
+  # CI's Rust jobs run the test suite, so builds of the package skip it.
   doCheck = false;
-
-  # Tests build much faster without the release profile's LTO and single codegen unit.
-  checkType = "debug";
-
-  # Tests bind loopback ports, which the darwin sandbox denies by default.
-  __darwinAllowLocalNetworking = true;
-
-  nativeCheckInputs = [ git ];
 
   postInstall = ''
     install -Dm644 -t "$out/share/doc/oxide-code" LICENSE THIRD-PARTY-NOTICES

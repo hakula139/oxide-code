@@ -24,7 +24,7 @@
     };
 
     devkit = {
-      url = "github:hakula139/devkit/v2";
+      url = "github:hakula139/devkit/v3";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
@@ -74,6 +74,7 @@
         pkgs = nixpkgs.legacyPackages.${system};
         dk = devkit.lib.mkLib pkgs;
 
+        rustVersion = (pkgs.lib.importTOML ./Cargo.toml).workspace.package.rust-version;
         rustBin = rust-overlay.lib.mkRustBin { } pkgs;
         rustToolchain = rustBin.fromRustupToolchainFile ./rust-toolchain.toml;
         rustDevToolchain = rustToolchain.override (prev: {
@@ -91,29 +92,33 @@
         preCommit = dk.preCommit {
           src = ./.;
           hooks = {
-            actionlint.enable = true;
             check-shebang-scripts-are-executable.enable = true;
-            check-yaml.enable = true;
-            cspell.enable = true;
-            deadnix.enable = true;
-            dprint.enable = true;
-            markdownlint-cli2.enable = true;
-            nixfmt.enable = true;
+
+            clippy = {
+              enable = true;
+              packageOverrides = {
+                cargo = rustDevToolchain;
+                clippy = rustDevToolchain;
+              };
+              # `.cargo/config.toml` already denies warnings, and matching `cargo clippy`'s
+              # arguments lets the hook and a plain run share one build cache.
+              settings.denyWarnings = false;
+            };
+
+            nu-check.enable = true;
             prettier.enable = true;
+
+            rustfmt = {
+              enable = true;
+              packageOverrides = {
+                cargo = rustDevToolchain;
+                rustfmt = rustDevToolchain;
+              };
+            };
+
             shellcheck.enable = true;
             shfmt.enable = true;
-            sort-file-contents.enable = true;
-            statix.enable = true;
             taplo.enable = true;
-          };
-
-          # CI checks formatting without fetching the pinned toolchain in the Nix sandbox.
-          devHooks.rustfmt = {
-            enable = true;
-            packageOverrides = {
-              cargo = rustToolchain;
-              rustfmt = rustToolchain;
-            };
           };
         };
 
@@ -122,36 +127,45 @@
         # ------------------------------------------------------------------------------------------
         # Dev Shells
         # ------------------------------------------------------------------------------------------
-        devShells.default = pkgs.mkShell {
-          name = "oxide-code-dev";
+        devShells = {
+          default = pkgs.mkShell {
+            name = "oxide-code-dev";
 
-          # The rustfmt hook puts the plain toolchain on PATH, so the dev toolchain must come first.
-          packages = [
-            rustDevToolchain
-          ]
-          ++ (with pkgs; [
-            cargo-deny
-            cargo-insta
-            cargo-llvm-cov
-            cargo-mutants
-            git-cliff
-            sqlite
-          ]);
+            packages = [
+              rustDevToolchain
+            ]
+            ++ (with pkgs; [
+              cargo-deny
+              cargo-insta
+              cargo-llvm-cov
+              cargo-mutants
+              git-cliff
+              sqlite
+            ]);
 
-          inputsFrom = [ preCommit.shell ];
-        };
+            inputsFrom = [ preCommit ];
+          };
 
-        # CI's Lint job runs in this shell, which leaves out the pinned toolchain so that every tool
-        # comes from the nixpkgs binary cache. `cargo deny` needs only `cargo metadata`, which
-        # nixpkgs' cargo serves for this workspace.
-        devShells.lint = pkgs.mkShell {
-          name = "oxide-code-lint";
+          # CI's Dependency Check and formula rendering run in this shell, which leaves out the
+          # pinned toolchain so that every tool comes from the nixpkgs binary cache. `cargo deny`
+          # needs only `cargo metadata`, which nixpkgs' cargo serves for this workspace.
+          lint = pkgs.mkShell {
+            name = "oxide-code-lint";
 
-          packages = with pkgs; [
-            cargo
-            cargo-deny
-            nushell
-          ];
+            packages = with pkgs; [
+              cargo
+              cargo-deny
+              nushell
+            ];
+          };
+
+          msrv = pkgs.mkShell {
+            name = "oxide-code-msrv";
+
+            packages = [
+              rustBin.stable.${pkgs.lib.versions.pad 3 rustVersion}.minimal
+            ];
+          };
         };
 
         # ------------------------------------------------------------------------------------------
@@ -166,7 +180,7 @@
         # Checks
         # ------------------------------------------------------------------------------------------
         checks = {
-          pre-commit = preCommit.check;
+          package = oxide-code;
 
           home-manager = import ./nix/home-manager-tests.nix {
             inherit home-manager oxide-code pkgs;
@@ -181,15 +195,6 @@
             in
             assert (self.overlays.default callerPkgs pkgs).oxide-code.drvPath == oxide-code.drvPath;
             pkgs.emptyFile;
-
-          # Runs the test suite in the build sandbox, without the package's release build.
-          tests = oxide-code.overrideAttrs {
-            pname = "oxide-code-tests";
-            buildPhase = "true";
-            doCheck = true;
-            installPhase = "touch $out";
-            doInstallCheck = false;
-          };
         };
 
         # ------------------------------------------------------------------------------------------
