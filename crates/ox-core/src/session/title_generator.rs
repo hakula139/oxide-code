@@ -26,8 +26,7 @@ const HAIKU_MODEL: &str = "claude-haiku-5-5";
 /// ahead of the 3-7 word JSON envelope.
 const MAX_TOKENS: u32 = 1_024;
 
-/// Chars of the first prompt a title request sends, omission marker included, so a long paste stays
-/// cheap.
+/// First-prompt chars a title request sends, omission marker included, so a long paste stays cheap.
 const MAX_PROMPT_CHARS: usize = 2_000;
 
 /// Chars kept from the start of a long first prompt, where a request usually leads, while the rest

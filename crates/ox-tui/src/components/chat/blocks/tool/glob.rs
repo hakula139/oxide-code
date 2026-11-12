@@ -65,8 +65,7 @@ mod tests {
     mod render {
         use super::*;
 
-        /// Rows of `files` from a `pattern` search that found `total`, in the compact or expanded
-        /// view.
+        /// Rows of `files` from a `pattern` search that found `total`, compact or expanded.
         fn render_rows(
             pattern: &str,
             files: &[String],

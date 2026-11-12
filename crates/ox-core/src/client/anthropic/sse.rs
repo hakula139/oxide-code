@@ -158,8 +158,7 @@ struct FrameDecoder {
     buf: Vec<u8>,
     /// Bytes already searched without finding a frame boundary.
     scanned: usize,
-    /// Whether the previous byte was a CR, which makes an immediately following LF part of its line
-    /// ending.
+    /// Whether the previous byte was a CR, so an LF right after it joins its line ending.
     after_cr: bool,
     /// Longest unterminated frame to buffer before failing.
     max_frame_bytes: usize,

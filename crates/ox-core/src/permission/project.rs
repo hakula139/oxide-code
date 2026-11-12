@@ -19,9 +19,8 @@ pub(crate) enum ProjectFileError {
 }
 
 /// Canonicalizes `path`, which must sit below `root` as spelled, and returns it when a checkout at
-/// `root` may supply it. It must resolve inside `root`, and when `root` is `/`, `$HOME`, or an
-/// ancestor of `$HOME`, where "inside" spans every dotfile, no component below `root` may be a
-/// symlink.
+/// `root` may supply it. It must resolve inside `root`, and no component below `root` may be a
+/// symlink when `root` is `/`, `$HOME`, or above it, where "inside" spans every dotfile.
 pub(crate) fn resolve_project_file(path: &Path, root: &Path) -> Result<PathBuf, ProjectFileError> {
     let resolved = std::fs::canonicalize(path)?;
     let canonical_root = std::fs::canonicalize(root)?;

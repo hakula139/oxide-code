@@ -52,8 +52,7 @@ pub(crate) async fn record_write_call(
     }
 }
 
-/// A fresh session on a store that was never set up, so its first write that saves a message
-/// fails.
+/// A fresh session on a store that was never set up, so its first message write fails.
 pub(crate) fn unsaved() -> SessionHandle {
     super::start(&SessionStore::unopened(TEST_PROJECT), "m", None)
 }

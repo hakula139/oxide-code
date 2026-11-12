@@ -94,8 +94,7 @@ pub(super) async fn submit(handle: &mut EngineHandle, text: &str) -> Vec<Event> 
     turn_events(&mut handle.events).await
 }
 
-/// The first text block of each message in `request`, empty for a message that opens with another
-/// block.
+/// The first text block of each message in `request`, empty for one that opens with another block.
 pub(super) fn texts(request: &serde_json::Value) -> Vec<&str> {
     request["messages"]
         .as_array()

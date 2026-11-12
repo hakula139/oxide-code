@@ -39,9 +39,9 @@ pub(super) struct MarkdownRenderer<'t, I> {
     /// Whether the last line still collects inline spans, so `finish_line` wraps it exactly once.
     line_open: bool,
 
-    /// Block-prefix stack. Each entry holds the spans prepended to every line inside that block
-    /// (blockquote `│ `, list-item continuation indent, etc.). Wrapping uses the concatenation
-    /// as the continuation prefix so deep nesting stays visually aligned.
+    /// Block-prefix stack. Each entry holds the spans prepended to every line inside that block,
+    /// such as a blockquote's `│ `. Wrapping uses the concatenation as the continuation prefix, so
+    /// deep nesting stays aligned.
     indent_stack: Vec<Vec<Span<'static>>>,
     /// One entry per nested list: `Some(n)` for ordered (next marker = `n. `) and `None` for
     /// unordered (`- `).

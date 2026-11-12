@@ -53,8 +53,7 @@ pub(crate) fn write(
 }
 
 /// The `--list` table of `sessions`, with a `Project` column when `scope` spans every project and a
-/// `... more` footer when `more` is set. A `term_width` of `None` skips title truncation for piped
-/// output.
+/// `... more` footer when `more` is set. A `None` `term_width` leaves piped titles whole.
 fn render(
     sessions: &[SessionInfo],
     more: bool,

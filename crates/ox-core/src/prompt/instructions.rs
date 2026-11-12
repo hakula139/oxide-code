@@ -190,8 +190,7 @@ fn load_files(slots: Vec<Slot>) -> (Vec<InstructionFile>, Vec<String>) {
     (files, warnings)
 }
 
-/// Returns whether a lookup failed since the path names no file, as when a parent is a regular
-/// file.
+/// Returns whether a lookup failed since the path names no file, as when a parent is a file.
 fn is_absent(e: &io::Error) -> bool {
     matches!(
         e.kind(),

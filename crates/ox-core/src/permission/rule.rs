@@ -113,9 +113,9 @@ impl Rule {
 
     /// The narrowest rule that allows the call in `class` with `target`: the one simple command a
     /// command runs as its named words, or the path the tool resolved, under `./` inside cwd.
-    /// `None` when no pattern names the call alone, as for a command that runs several or has a word
-    /// that expands, or when a character of it would not paint as itself, so the user always sees
-    /// the exact rule they grant.
+    /// `None` when no pattern names the call alone, as for a command that runs several or has a
+    /// word that expands, or when a character of it would not paint as itself, so the user always
+    /// sees the exact rule they grant.
     pub(super) fn for_call(class: PermissionClass, target: &Access) -> Option<Self> {
         let pattern = match target {
             Access::Command(command) => match command.segments() {

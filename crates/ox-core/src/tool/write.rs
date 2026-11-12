@@ -771,8 +771,7 @@ mod tests {
 
         #[tokio::test]
         async fn fails_when_parent_creation_is_denied() {
-            // The missing target passes the stat, so the denial on its ancestor fails
-            // `create_dir_all`.
+            // The missing target passes the stat, so `create_dir_all` fails on its denied ancestor.
             let dir = canonical_tempdir();
             let locked = dir.path().join("locked");
             fs::create_dir(&locked).unwrap();

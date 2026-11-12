@@ -217,8 +217,7 @@ impl App {
         self.dirty = true;
     }
 
-    /// Arms the exit window, or quits inside it, when idle, and interrupts the running work when
-    /// busy.
+    /// Interrupts the running work, or when idle, arms the exit window or quits inside it.
     fn handle_ctrl_c(&mut self) {
         if self.in_flight.is_none() {
             self.confirm_exit();
@@ -1336,8 +1335,7 @@ mod tests {
 
         #[test]
         fn system_message_action_pushes_into_chat() {
-            // Destructive-action modals report success in chat so the user can confirm the action
-            // ran.
+            // Destructive-action modals report success in chat, which confirms the action ran.
             let (mut app, _rx, _event_tx) = test_app(None);
             let entries_before = app.chat.entry_count();
             let body = "Deleted session abc12345: Fix auth flow".to_owned();

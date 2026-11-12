@@ -16,8 +16,7 @@ pub(crate) const CTRL_D: KeyChord = KeyChord::ctrl('d');
 /// Ctrl+End, which returns the chat to the newest output.
 pub(crate) const CTRL_END: KeyChord = KeyChord::ctrl_code(KeyCode::End);
 
-/// Returns whether `event` holds no modifier but Shift, which terminals report on uppercase
-/// letters.
+/// Returns whether `event` holds no modifier but Shift, which terminals report on capitals.
 pub(crate) fn is_unmodified(event: &KeyEvent) -> bool {
     (event.modifiers - KeyModifiers::SHIFT).is_empty()
 }

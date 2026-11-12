@@ -5,9 +5,8 @@
 //! - **Arg**: typing `/cmd <prefix>`. Rows are arg completions from the command's curated roster
 //!   (`/model`, `/effort`, `/theme`). Tab replaces the prefix with `/{cmd} {value} `.
 //!
-//! Selected row paints in `text` + BOLD. Other rows dim so contrast stands in for a prefix glyph or
-//! fill. Lists past [`MAX_VISIBLE_ROWS`] scroll with a centered cursor (Claude Code typeahead
-//! style).
+//! The selected row paints in bold `text` and the others dim, so contrast stands in for a prefix
+//! glyph or fill. Lists past [`MAX_VISIBLE_ROWS`] scroll with a centered cursor, as in Claude Code.
 
 use std::borrow::Cow;
 

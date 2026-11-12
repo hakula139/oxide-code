@@ -69,8 +69,7 @@ impl RenderCtx<'_> {
         if self.expanded { usize::MAX } else { compact }
     }
 
-    /// `text` as one body row shows it: cut to [`MAX_ROW_BYTES`] in the compact view, or whole when
-    /// expanded.
+    /// `text` as one body row shows it: cut to [`MAX_ROW_BYTES`] when compact, else whole.
     pub(super) fn cap_row(&self, text: &str) -> String {
         if self.expanded {
             text.to_owned()
@@ -127,7 +126,7 @@ impl BlockRows {
     }
 }
 
-/// Render contract for one chat block (assistant prose, tool call, error marker, etc.).
+/// Render contract for one chat block.
 ///
 /// A block's state is fixed once the chat pushes it. `render` and `render_rows` must be pure
 /// functions of that state and the [`RenderCtx`], since the chat caches their rows until the width,

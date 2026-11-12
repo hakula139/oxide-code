@@ -31,8 +31,7 @@ use {
 
 // ── Trust ──
 
-/// The roots an HTTP client verifies servers against. Tests substitute roots that read no system
-/// store.
+/// The roots an HTTP client verifies servers against. Test roots read no system store.
 pub trait Trust: Send + Sync {
     /// Configures `builder` to verify servers against these roots, possibly replacing its TLS
     /// options. Set TLS options before calling this method only when they may be replaced.
@@ -159,8 +158,7 @@ struct ExtraCaVerifier {
 
 #[cfg(target_os = "macos")]
 impl ExtraCaVerifier {
-    /// Exempts the bundle CAs other than Apple's built-in roots, or none when those roots cannot be
-    /// read.
+    /// Exempts the bundle CAs other than Apple's built-in roots, or none when those are unreadable.
     fn new(
         bundle: Vec<CertificateDer<'static>>,
         provider: &Arc<CryptoProvider>,
@@ -659,8 +657,7 @@ mod tests {
         }
     }
 
-    /// An owned copy of a [`BasicEvaluation`], with the leaf leading the chain and the anchors in
-    /// DER.
+    /// An owned copy of a [`BasicEvaluation`], with the leaf leading the chain and anchors as DER.
     #[cfg(target_os = "macos")]
     #[derive(Debug, Clone, PartialEq)]
     struct RecordedEvaluation {

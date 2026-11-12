@@ -185,8 +185,7 @@ impl Wire for Client {
 
 // ── HTTP Client ──
 
-/// Builds the HTTP client with shared request headers and TLS trust. Each request adds its own
-/// credential.
+/// Builds the HTTP client with shared headers and TLS trust. Each request adds its own credential.
 fn build_http(gateway: &GatewayCompat, trust: &dyn Trust) -> Result<reqwest::Client> {
     let mut headers = HeaderMap::new();
     headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));

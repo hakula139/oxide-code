@@ -26,8 +26,7 @@ pub(crate) fn body_details(body: &str) -> Option<String> {
     condense(text)
 }
 
-/// `HTTP 502 Bad Gateway`, or `HTTP 522` for a code without a standard reason phrase, such as a
-/// CDN's.
+/// `HTTP 502 Bad Gateway`, or `HTTP 522` for a code without a standard reason, such as a CDN's.
 pub(crate) fn http_status(status: StatusCode) -> String {
     match status.canonical_reason() {
         Some(reason) => format!("HTTP {} {reason}", status.as_u16()),

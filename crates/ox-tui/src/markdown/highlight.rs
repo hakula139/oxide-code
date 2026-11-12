@@ -14,8 +14,6 @@ use tracing::debug;
 
 use crate::theme::Theme;
 
-// Loaded once on first highlight (a few hundred ms of grammar parsing) and reused for the rest of
-// the process. Keeping it lazy avoids paying that cost when no fenced block is rendered.
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 
 /// Highlighter state after the complete lines of the last highlighted block, so a fenced block that
