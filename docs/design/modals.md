@@ -1,28 +1,31 @@
 # Modal UI
 
-A modal is an overlay that takes keyboard focus, owns its render, emits a typed result, and dismisses, opened by a slash command, by a tool call that needs approval, or at startup by `ox --resume`. It draws in the band between the chat scroll and the input area, the rows the slash popup uses. Chat blocks are persistent transcript artifacts, while modals are ephemeral.
+A modal is an overlay that takes keyboard focus, owns its render, emits a typed result, and dismisses. A slash command, a tool call that needs approval, or `ox --resume` at startup opens one, and it draws in the band between the chat scroll and the input area, the rows the slash popup uses. Chat blocks persist in the transcript, while modals are ephemeral.
 
-Three needs drove the abstraction: `/theme` swaps palettes as the user arrows through choices and snaps back on Esc, the combined `/model + /effort` picker and the confirm-delete modal nested in `/resume` need several steps, and a tool call that needs approval emits `Event::ApprovalRequested` and blocks until the App pushes an `ApprovalModal` and routes the decision back as `Op::Resolve`.
+Three needs drove the abstraction: `/theme` swaps palettes as the user arrows through choices and snaps back on Esc, the combined `/model + /effort` picker and the confirm-delete modal nested in `/resume` take several steps, and a tool call that needs approval emits `Event::ApprovalRequested` and blocks until the App pushes an `ApprovalModal` and routes the decision back as `Op::Resolve`.
 
 ## Trait Shape
 
 A modal is `Send`, since the App lives on tokio, but not `Sync`, since modals own mutable state and are never shared across threads. It declares its `height` for layout, paints itself into a `Rect`, and routes one `KeyEvent` to one of five outcomes:
 
-- **Consumed**: Stay open, key handled internally.
-- **Cancelled**: Close and dispatch the modal's `on_cancel` action, if any.
-- **Submitted**: Close and dispatch an `Action`, which is an op for the engine, a TUI-only change, or a no-op when the modal already applied its effect locally.
-- **Emit**: Forward an action without closing, as `/theme`'s live preview does on each cursor move, and as `/resume`'s archive toggle and the confirm modal's delete do while the modal stays open.
-- **Push**: Nest a child modal above the current one, which returns focus to the parent when it pops.
+- **Consumed.** The modal stays open, having handled the key internally.
+- **Cancelled.** The modal closes and dispatches its `on_cancel` action, if any.
+- **Submitted.** The modal closes and dispatches an `Action`, which is an op for the engine, a TUI-only change, or a no-op when the modal already applied its effect locally.
+- **Emit.** The modal forwards an action without closing, as `/theme`'s live preview does on each cursor move, and as `/resume`'s archive toggle and the confirm modal's delete do.
+- **Push.** The modal nests a child modal above itself, and focus returns to the parent when the child pops.
 
-`Submitted` and `Emit` carry a `ModalAction`: `Dispatch(Action)`, which follows the same `App::dispatch_action` path as a keyboard action, or `SystemMessage(String)`, which prints a confirmation into the chat after the pop.
+`Submitted` and `Emit` carry a `ModalAction`: `Dispatch(Action)`, which follows the `App::dispatch_action` path of a keyboard action, or `SystemMessage(String)`, which prints a confirmation into the chat after the pop.
 
-`Modal::on_cancel` fires whenever a modal leaves the stack without submitting, whether by the stack-level Esc / Ctrl+C, a `Cancelled` outcome, or `ModalStack::clear`. It returns an optional `ModalAction` that the App dispatches as the modal leaves, and a modal without one closes silently. `ApprovalModal` emits an abort decision so the blocked turn always gets an answer, the `ox --resume` picker emits `Op::Shutdown` because dismissing it quits `ox`, and the `/theme` picker emits `Action::RevertThemePreview` to restore the theme it previewed over.
+## Hooks
 
-`Modal::on_engine` tells every open modal about each op `dispatch_op` admits (`EngineUpdate::Admitted`) and each event the engine reports (`EngineUpdate::Event`), so a modal that sent an op learns whether it left and how it ended. Prompts go through the prompt queue and never reach modals. Its `UpdateReply` says whether the modal shows the update, closes on it with a replacement action, or leaves it for the App to report. The App skips its own report of an archive or delete result that a modal shows, and applies the actions of the modals an admitted op closes only after it sends that op.
+- **`on_cancel`.** Fires whenever a modal leaves the stack without submitting, by the stack-level Esc / Ctrl+C, a `Cancelled` outcome, or `ModalStack::clear`, and returns an optional `ModalAction` the App dispatches as the modal leaves. `ApprovalModal` emits an abort decision so the blocked turn always gets an answer, the `ox --resume` picker emits `Op::Shutdown` because dismissing it quits `ox`, and the `/theme` picker emits `Action::RevertThemePreview` to restore the theme it previewed over.
+- **`on_engine`.** Tells every open modal about each op `dispatch_op` admits (`EngineUpdate::Admitted`) and each event the engine reports (`EngineUpdate::Event`), so a modal that sent an op learns whether it left and how it ended. Prompts go through the prompt queue and never reach modals. The `UpdateReply` says whether the modal shows the update, closes on it with a replacement action, or leaves it for the App to report. The App skips its own report of an archive or delete result a modal shows, and applies the actions of the modals an admitted op closes only after it sends that op.
+- **`on_page`.** Session and prompt pages reach the stack through the closed `ModalPage` app event, and `ModalStack::deliver_page` offers each result from the top until the picker awaiting its request takes it, so a picker keeps loading under a confirm dialog. Shared typed `Pages` workers return the walk with each bounded page. While one page runs, query or scope changes keep only the latest desired walk, which starts once the old result returns, and globally unique request IDs discard completions for closed pickers.
+- **`tick` and `next_tick`.** The frame tick calls `tick` on the top modal, and `next_tick` tells the loop when its time-driven state, such as an expiring notice, next changes, so an idle modal does not keep the loop awake.
 
-The stack routes keys before any component sees them. A modal whose `captures_esc` returns true takes Esc itself, while Ctrl+C still cancels. The stack drops every key held with a modifier other than Shift unless `binds_modified_key` claims it, so a picker's `j` or Enter never fires as Alt+J or Ctrl+Enter. Bracketed pastes reach `handle_paste`, which text fields implement, and a paste never answers a confirm or approval prompt. The frame tick calls `tick` on the top modal, and `next_tick` tells the loop when its time-driven state, such as an expiring notice, next changes, so an idle modal does not keep the loop awake.
+## Key Routing
 
-Session and prompt pages reach the stack through the closed `ModalPage` app event. `ModalStack::deliver_page` offers each result through `Modal::on_page` from the top until the picker awaiting its request takes it, so a picker keeps loading under a confirm dialog. Shared typed `Pages` workers return the walk with each bounded page. While one page runs, query or scope replacements retain only the latest desired walk, which starts after the old result returns. Globally unique request IDs discard completions for closed pickers.
+The stack routes keys before any component sees them. A modal whose `captures_esc` returns true takes Esc itself, while Ctrl+C still cancels. The stack drops every key held with a modifier other than Shift unless `binds_modified_key` claims it, so a picker's `j` or Enter never fires as Alt+J or Ctrl+Enter. Bracketed pastes reach `handle_paste`, which text fields implement, and a paste never answers a confirm or approval prompt.
 
 ## Shared Primitives
 
@@ -37,15 +40,15 @@ Session and prompt pages reach the stack through the closed `ModalPage` app even
 
 ## Modals
 
-- **`/model + /effort` picker**: sets the model and the effort in one `Op::SetModel` whose `ConfigPick` carries only the changed axes.
-- **`/effort` slider**: a Speed ↔ Intelligence scale of the five levels, colored by the five `effort_*` theme slots.
-- **`/mode`, `/theme`, and `/init` pickers**: list pickers over the permission modes, the built-in themes, and the instruction files `/init` can create.
-- **`/rename` editor**: a `LineEditor` prefilled with the title, which submits through `command::rename`, the typed form's parser.
-- **`/resume` picker**: a `SearchableList` of saved sessions, which [Resume](resume.md) covers.
-- **Prompt history picker**: retained ordinary user prompts with an escaped, scrollable multiline preview. Enter recalls exact text as an undoable composer edit, while cancellation leaves the editor untouched.
-- **Confirm-delete modal**: a Y / N gate for deleting a saved session, pushed by `/delete <id-prefix>` and by the `/resume` picker. A failure stays inline until a retry replaces it or the modal closes, so a stray key cannot wipe the diagnostic.
-- **Approval modal**: the gate for a tool call that needs approval, showing the command or the diff it would apply. [Permissions](permissions.md) covers its choices and guard.
-- **`/status`, `/config`, and `/help` overviews**: `KvOverview` tables of the session, the resolved config with each value's source, and the registered commands.
+- **`/model + /effort` picker.** It sets the model and the effort in one `Op::SetModel` whose `ConfigPick` carries only the changed axes.
+- **`/effort` slider.** It is a Speed ↔ Intelligence scale of the five levels, colored by the five `effort_*` theme slots.
+- **`/mode`, `/theme`, and `/init` pickers.** They list the permission modes, the built-in themes, and the instruction files `/init` can create.
+- **`/rename` editor.** It is a `LineEditor` prefilled with the title, which submits through `command::rename`, the typed form's parser.
+- **`/resume` picker.** It is a `SearchableList` of saved sessions, which [Resume](resume.md) covers.
+- **Prompt history picker.** It lists retained ordinary user prompts with an escaped, scrollable multiline preview. Enter recalls exact text as an undoable composer edit, while cancellation leaves the editor untouched.
+- **Confirm-delete modal.** It is a Y / N gate for deleting a saved session, pushed by `/delete <id-prefix>` and by the `/resume` picker. A failure stays inline until a retry replaces it or the modal closes, so a stray key cannot wipe the diagnostic.
+- **Approval modal.** It gates a tool call that needs approval, showing the command or the diff it would apply. [Permissions](permissions.md) covers its choices and guard.
+- **`/status`, `/config`, and `/help` overviews.** They are `KvOverview` tables of the session, the resolved config with each value's source, and the registered commands.
 
 ## Design Decisions
 
@@ -59,7 +62,7 @@ Session and prompt pages reach the stack through the closed `ModalPage` app even
 8. **Read-only overviews share `KvOverview`.** `/status`, `/config`, and `/help` share one shape of a title, sectioned rows, and a footer, so the layout, keys, and dismissal live in one place, and a new overview supplies only its sections.
 9. **Read-only modals don't bind Enter.** Enter commits in a picker, so binding it to dismiss an overview would give one gesture two meanings across modal types. Esc / Ctrl+C dismiss an overview at the stack layer.
 10. **Nested modals use `ModalKey::Push`.** A push outcome keeps `handle_key` returning one value and avoids threading a stack borrow through every modal.
-11. **Modals learn the fate of their ops through one hook.** The engine owns saved-session writes, so `ModalStack` passes every admitted op and every engine event to every modal on the stack through `Modal::on_engine`, and a new modal that sends an op needs only a match arm in that hook. The App does not filter updates per modal, because each modal matches the session ID it acted on and ignores the rest. A covered `/resume` picker updates its rows from the same result that closes the confirm-delete modal above it, without rereading the store when it regains focus. When no modal claims a result, as after the user dismissed the confirm-delete modal mid-delete, the App reports it in the chat. `Admitted` follows `dispatch_op`'s busy check and delivery reservation, so an op the App drops never reaches a modal, and a confirm modal whose delete was dropped still takes Y again.
+11. **Modals learn the fate of their ops through one hook.** The engine owns saved-session writes, so `ModalStack` passes every admitted op and every engine event to every modal on the stack through `Modal::on_engine`, and a new modal that sends an op needs only a match arm in that hook. The App does not filter updates per modal, since each modal matches the session ID it acted on and ignores the rest. A covered `/resume` picker updates its rows from the same result that closes the confirm-delete modal above it, without rereading the store when it regains focus. When no modal claims a result, as after the user dismissed the confirm-delete modal mid-delete, the App reports it in the chat. `Admitted` follows `dispatch_op`'s busy check and delivery reservation, so an op the App drops never reaches a modal, and a confirm modal whose delete was dropped still takes Y again.
 12. **The input box stays outside the stack.** A modal that needs text opens its own `LineEditor`, so a modal never shares the prompt's buffer and closing one never disturbs a draft.
 
 ## Out of Scope

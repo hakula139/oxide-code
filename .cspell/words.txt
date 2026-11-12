@@ -18,7 +18,6 @@ deque
 desync
 devkit
 direnv
-disambiguable
 doas
 dotenv
 eloop
@@ -48,7 +47,6 @@ insta
 irwxu
 keepalives
 killpg
-konsole
 macchiato
 misparse
 mkfifo

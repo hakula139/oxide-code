@@ -6,10 +6,10 @@ The `tasks` tool lets the model maintain a task list for multi-step work. The en
 
 Each call sends the full list in order, replacing the session's previous list.
 
-- **Validation.** Each task's content is collapsed onto one line. If a task has blank content, an unknown status, or a second `in_progress` status, the call is rejected with an error explaining how to fix it. Rejected calls leave the list unchanged.
-- **Clearing.** The list clears when all tasks are completed or when the model sends an empty list. This removes a finished list once the work is done.
-- **Result.** The chat block lists the tasks sent in the call, so the step that finished the list remains visible after the list clears.
-- **Permission.** The tool belongs to the `read` class because it changes nothing in the workspace. It therefore runs without approval in every mode, including `plan`. A path-scoped `read` rule never matches it, while a class-wide `read` deny blocks it.
+- **Validation.** Each task's content is collapsed onto one line. A task with blank content, an unknown status, or a second `in_progress` status rejects the call with an error explaining the fix, and a rejected call leaves the list unchanged.
+- **Clearing.** The list clears when every task is completed or when the model sends an empty list.
+- **Result.** The chat block lists the tasks sent in the call, so the step that finished the list stays visible after the list clears.
+- **Permission.** The tool belongs to the `read` class because it changes nothing in the workspace, so it runs without approval in every mode, `plan` included. A path-scoped `read` rule never matches it, while a class-wide `read` deny blocks it.
 
 ## Engine Flow
 
@@ -26,19 +26,19 @@ The engine emits `TasksUpdated` after each successful call and adopts the last l
 
 ## Persistence
 
-The list has no dedicated entry type. When resuming, the loader uses the last successful `tasks` call on the resolved chain. If there is no such call, it uses the `tasks` field from the last `compact` entry. If that field is also missing, the list starts empty. Restoring it from the transcript keeps each branch's list independent in a forked session.
+The list has no dedicated entry type. On resume, the loader takes the last successful `tasks` call on the resolved chain, or else the `tasks` field of the last `compact` entry, or else starts empty. Restoring it from the transcript keeps each branch's list independent in a forked session.
 
 ## Compaction
 
-Manual and automatic compaction both pass the engine's list to `Engine::replace_with_summary`. The `compact` entry records the list because the summary replaces the calls that built it. The synthetic summary message carries a `<system-reminder>` block after the summary, listing each task and its status and asking the model to keep the list current. Since the engine retains the list, the panel and status line stay unchanged across the boundary.
+Manual and automatic compaction both pass the engine's list to `Engine::replace_with_summary`, and the `compact` entry records it because the summary replaces the calls that built it. The synthetic summary message carries a `<system-reminder>` block after the summary that lists each task and its status and asks the model to keep the list current. The engine keeps the list, so the panel and status line stay unchanged across the boundary.
 
 ## Design Decisions
 
 1. **Replace the whole list.** Claude Code's `TodoWrite` and Codex's `update_plan` both take the complete list on every call. The model restates every status, so calls cannot leave stale items behind and tasks need no IDs. oh-my-pi's `todo` edits phases through operations, which works well for long plans but requires a larger schema.
-2. **Reject a second task in progress.** Claude Code and Codex ask the model in the tool prompt to keep one task in progress, but do not enforce it. oh-my-pi demotes extra tasks to pending. Rejecting the call tells the model which rule it broke and preserves the list it sent. A silent repair could mark the wrong task as active.
+2. **Reject a second task in progress.** Claude Code and Codex ask the model in the tool prompt to keep one task in progress but do not enforce it, and oh-my-pi demotes extra tasks to pending. Rejecting the call tells the model which rule it broke and preserves the list it sent, while a silent repair could mark the wrong task as active.
 3. **Clear a finished list.** Claude Code's `TodoWrite` also drops the list once every task is completed, so the panel shows only the work that remains. Its description also asks the model to remove tasks that no longer apply and send an empty list when the user changes course, since otherwise a stale list would stay on screen.
 4. **Use the transcript as the source of truth.** The call's input already records the list, so a dedicated entry would duplicate it and could disagree with the resolved branch. Claude Code's `extractTodosFromTranscript` restores the list from the last `TodoWrite` call, while oh-my-pi rehydrates it from the branch's tool results.
-5. **Remind the model once at the boundary.** Compaction is the only point where the calls that built the list leave the model's context. A single reminder in the summary message restores it, avoiding periodic nudges like those Claude Code adds. Those nudges resend the list on turns when the model can already see it.
+5. **Remind the model once at the boundary.** Compaction is the only point where the calls that built the list leave the model's context, so a single reminder in the summary message restores it. Claude Code's periodic nudges resend the list on turns when the model can already see it.
 6. **Count hidden tasks like every other overflow.** The panel's last row uses the `... +N` wording of the chat's overflow footers and the queued-prompt preview, so every cut-off list in the TUI reads the same. The window can hide tasks on both sides of it, which the count does not tell apart, while the chat's block for the latest `tasks` call lists every task in the expanded view.
 
 ## Sources

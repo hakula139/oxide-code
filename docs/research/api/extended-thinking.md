@@ -1,10 +1,10 @@
 # Extended Thinking
 
-Research notes on how Claude Code handles extended thinking, content block types, and signature verification. Based on [Claude Code](https://github.com/hakula139/claude-code).
+Research notes on how [Claude Code](https://github.com/hakula139/claude-code) handles extended thinking, content block types, and signature verification.
 
 ## Content Block Types
 
-The Anthropic Messages API streams multiple content block types beyond `text` and `tool_use`. Claude Code handles all of them:
+The Anthropic Messages API streams these content block types, all of which Claude Code handles:
 
 | Block type          | Delta type                           | Description                                                |
 | ------------------- | ------------------------------------ | ---------------------------------------------------------- |
@@ -17,7 +17,7 @@ The Anthropic Messages API streams multiple content block types beyond `text` an
 
 ### Server Tool Use
 
-Server tool use blocks stream identically to client `tool_use`: `input_json_delta` events accumulate the JSON input. The difference is execution, since the API runs server tools itself and returns each result in the reply as a block such as `web_search_tool_result` or `advisor_tool_result`, which names its call in `tool_use_id` and arrives whole in one `content_block_start`. Claude Code currently handles the `advisor` tool (internal). In the 2.1.87 source, its streaming handler keeps any block type it does not model whole, and `ensureToolResultPairing` strips a `server_tool_use` whose result is missing from the same assistant message.
+Server tool use blocks stream like client `tool_use`, with `input_json_delta` events accumulating the JSON input, but the API runs server tools itself and returns each result in the reply as a block such as `web_search_tool_result` or `advisor_tool_result`, which names its call in `tool_use_id` and arrives whole in one `content_block_start`. Claude Code currently handles the `advisor` tool (internal). In the 2.1.87 source, its streaming handler keeps any block type it does not model whole, and `ensureToolResultPairing` strips a `server_tool_use` whose result is missing from the same assistant message.
 
 Anthropic's [server tools guide](https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools), checked on 2026-10-18, pairs a call with its result by `tool_use_id` alone, so the two can land in different replies. A result usually follows its call in the same reply, but two cases leave the call waiting for the next reply to open with its result: a `pause_turn` stop, which the client continues by sending the paused reply back as-is, and a server call made alongside client tool calls, which the API runs once their `tool_result` blocks arrive. Once later content closes the turn, a call still without its result fails with a 400 such as `` `web_fetch` tool use with id ... was found without a corresponding `web_fetch_tool_result` block ``. A continuation must declare the waiting call's tool, and the [web search tool guide](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool) says a replayed result whose `encrypted_content` is missing or modified fails with a 400.
 
@@ -49,7 +49,7 @@ On supported models, interleaved thinking, where thinking blocks appear between 
 | `"omitted"`    | Thinking blocks still ship but `thinking: ""` is empty.      |
 | `"updates"`    | Only progress notes stream as text (all but Haiku 5.5, beta) |
 
-Every supported model defaults to `"omitted"`. As a result, any UI that renders streaming reasoning, including oxide-code's `show_thinking` TUI mode, sees a long pause followed by the final answer unless it opts in:
+Every supported model defaults to `"omitted"`, so a UI that renders streaming reasoning, such as oxide-code's `show_thinking` mode, sees a long pause and then the final answer unless it opts in:
 
 ```json
 {
@@ -57,7 +57,7 @@ Every supported model defaults to `"omitted"`. As a result, any UI that renders 
 }
 ```
 
-Claude Fable 5.1, Opus 5.5, and Sonnet 5.5 return the notes the model writes between tool calls as progress-update thinking blocks. These blocks are empty under `"omitted"`. Each note appears in its own thinking block immediately before the tool call it introduces. On Opus 5.5 and Sonnet 5.5, a response that stops early (`max_tokens`, context window, stop sequence) can end with a note whose text is exactly `This part of the response was interrupted before it finished.` To continue, pass that turn back unchanged with a new user message.
+Claude Fable 5.1, Opus 5.5, and Sonnet 5.5 return the notes the model writes between tool calls as progress-update thinking blocks, which are empty under `"omitted"`. Each note sits in its own thinking block just before the tool call it introduces. On Opus 5.5 and Sonnet 5.5, a response that stops early (`max_tokens`, context window, stop sequence) can end with a note whose text is exactly `This part of the response was interrupted before it finished.` To continue, pass that turn back unchanged with a new user message.
 
 A gateway returned summarized Haiku 5.5 reasoning to requests that left `display` unset (observed 2026-10-20 with oxide-code 0.1.0-alpha.5), so a client that wants no reasoning text has to send the field. [Client](../../design/client.md#thinking-display) covers how oxide-code picks the mode.
 
@@ -74,20 +74,20 @@ A gateway returned summarized Haiku 5.5 reasoning to requests that left `display
 
 ### Redacted Thinking
 
-`redacted_thinking` blocks arrive as a single `content_block_start` with no deltas. They have no visible content and must be preserved verbatim for round-tripping.
+`redacted_thinking` blocks arrive as a single `content_block_start` with no deltas. They have no visible content and must be kept verbatim for round-tripping.
 
 ### Round-Tripping
 
-**Critical**: Thinking and redacted_thinking blocks must be included in the conversation history sent back to the API. Stripping them causes the API to reject subsequent requests or produce degraded responses.
+The conversation history sent back to the API must include `thinking` and `redacted_thinking` blocks, since stripping them makes the API reject later requests or degrade its responses.
 
-Claude Code preserves these blocks through normalization in `normalizeMessagesForAPI()`, which runs a multi-pass pipeline before each API request:
+Claude Code keeps these blocks through `normalizeMessagesForAPI()`, a multi-pass pipeline that runs before each API request:
 
 1. `filterOrphanedThinkingOnlyMessages()`: Drops thinking-only assistant messages with no same-`message.id` partner carrying non-thinking content (handles resume / compaction artifacts).
 2. `filterTrailingThinkingFromLastAssistant()`: Strips trailing thinking / redacted_thinking from the last assistant message. If stripping removes all content, inserts a `[No message content]` placeholder to preserve user / assistant alternation.
 3. `filterWhitespaceOnlyAssistantMessages()`: Removes assistant messages with only whitespace text.
 4. `ensureNonEmptyAssistantContent()`: Safety net for empty assistant messages.
 
-Order matters: trailing thinking must be stripped before whitespace filtering, otherwise a message like `[text("\n\n"), thinking("...")]` survives the whitespace filter, then thinking stripping removes the thinking block, leaving `[text("\n\n")]` which the API rejects.
+Trailing thinking must be stripped before whitespace filtering. Otherwise a message like `[text("\n\n"), thinking("...")]` survives the whitespace filter and then loses its thinking block, leaving `[text("\n\n")]`, which the API rejects.
 
 ### Constraints
 
@@ -97,12 +97,7 @@ Order matters: trailing thinking must be stripped before whitespace filtering, o
 
 ## Signatures
 
-Every `thinking` block includes a `signature` field received via `signature_delta`. The signature lets the API check that the request's model can read the block, as [model switches](#constraints) describes, and that the `system`, `tools`, and earlier `messages` are unchanged since the block was produced. Signatures are:
-
-- Received as a full value (not incremental like text deltas).
-- Stored alongside the thinking content.
-- Validated by the API on subsequent requests.
-- Bound to the account that produced them for Sonnet 5.5 and Haiku 5.5 blocks, as [account binding](#constraints) describes.
+Every `thinking` block carries a `signature` that arrives whole in one `signature_delta`, is stored beside the thinking content, and is validated by the API on later requests. It lets the API check that the request's model can read the block, as [model switches](#constraints) describes, and that the `system`, `tools`, and earlier `messages` are unchanged since the block was produced. Sonnet 5.5 and Haiku 5.5 signatures are also bound to the account that produced them, as [account binding](#constraints) describes.
 
 Claude Code's `stripSignatureBlocks()` removes all thinking / redacted_thinking blocks whenever the `/login` dialog closes, even after a cancelled sign-in, which discards reasoning that the API would keep or drop on its own.
 

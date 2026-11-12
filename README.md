@@ -5,9 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![WakaTime coding time for oxide-code](https://wakatime.com/badge/user/f4a35a1f-0e29-4093-a647-e66aad164737/project/12cf90d4-91c9-44ab-b8a9-57954dba9812.svg)
 
-A terminal-based AI coding assistant written in Rust, inspired by [Claude Code].
-
-[Claude Code]: https://code.claude.com/docs
+A terminal-based AI coding assistant written in Rust, inspired by [Claude Code](https://code.claude.com/docs).
 
 ## Overview
 

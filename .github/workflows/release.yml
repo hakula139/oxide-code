@@ -181,9 +181,7 @@ jobs:
     name: Pin Nix packages
     if: github.ref_type == 'tag' && !inputs.notes
     needs: tagged-ci
-    uses: ./.github/workflows/nix-cache.yml
-    with:
-      tag: ${{ github.ref_name }}
+    uses: hakula139/devkit/.github/workflows/nix-cache.yml@v3
     secrets:
       CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
 

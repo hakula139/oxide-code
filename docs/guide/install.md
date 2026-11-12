@@ -124,24 +124,20 @@ programs.oxide-code = {
 | `settings`    | `{ }`                      | TOML configuration written to `ox/config.toml` when nonempty                                                |
 | `context`     | `""`                       | User instructions for `ox/AGENTS.md`: inline text (any string), or a Nix path or package linked as the file |
 
-File paths are relative to `$XDG_CONFIG_HOME`, which defaults to `~/.config`. The module owns `config.toml`, so keep local overrides in `ox/config.d/`, where they take precedence.
+- **Files**: Paths are relative to `$XDG_CONFIG_HOME`, which defaults to `~/.config`. The module owns `config.toml`, so keep local overrides in `ox/config.d/`, where they take precedence.
 
-The default `package` is built from the flake directly, so an override applied to `pkgs.oxide-code` does not reach it. To wrap or patch the package, apply `inputs.oxide-code.overlays.default` to your package set and set `programs.oxide-code.package` to your wrapper around `pkgs.oxide-code`.
+- **Wrapping the package**: The default `package` is built from the flake directly, so an override applied to `pkgs.oxide-code` does not reach it. Apply `inputs.oxide-code.overlays.default` to your package set and set `package` to your wrapper around `pkgs.oxide-code`.
 
-With `checkConfig` on, the build runs the configured package's [`ox config check`](configuration.md#checking-the-config) on the generated `config.toml`, so a typo or an invalid value fails `home-manager switch` with `ox`'s own error. The check runs as a Nix build user with an empty scratch home directory and no credentials, inside the build sandbox where Nix enables one (macOS does not by default), so a wrapper `package` must start without your home directory or secrets.
+- **`checkConfig`**: The module runs the package's [`ox config check`](configuration.md#checking-the-config) on the generated `config.toml`, so a typo or an invalid value fails `home-manager switch` with `ox`'s own error. The check runs as a Nix build user with an empty scratch home directory and no credentials, inside the build sandbox where Nix enables one (macOS does not by default), so a wrapper `package` must start without your home directory or secrets. Since `~` there names the scratch home, give a theme file as a Nix path, such as `tui.theme.base = ./theme.toml`, and write an extra root under your home directory with `~/`. Set `checkConfig = false` if the check still rejects a path that exists where `ox` runs.
 
-Paths in `settings` resolve in that environment, where `~` names the scratch home and your own home directory is out of reach. Give a theme file as a Nix path, such as `tui.theme.base = ./theme.toml`, and write an extra root under your home directory with `~/`. Set `checkConfig = false` if the check still rejects a path that exists where `ox` runs.
+- **Credentials**: Generated settings enter the Nix store, so keep credentials in a separate secret file, which the check never opens. Set `client.auth.file` to a quoted runtime path and its `type` as [Fixed Credentials](authentication.md#fixed-credentials) describes:
 
-Generated settings enter the Nix store, so keep credentials in a separate secret file. Set `client.auth.file` to a quoted runtime path, and select its scheme as described in [Authentication](authentication.md):
-
-```nix
-settings.client.auth = {
-  type = "bearer";
-  file = "/run/secrets/ox-token";
-};
-```
-
-The configuration check validates credential declarations without opening secret files.
+  ```nix
+  settings.client.auth = {
+    type = "bearer";
+    file = "/run/secrets/ox-token";
+  };
+  ```
 
 ## Verify Your Installation
 

@@ -1,6 +1,6 @@
 # Terminal UI
 
-The terminal UI is a ratatui app that composes its components directly, paints each frame without flicker, renders only the chat blocks near the viewport, renders streamed markdown from a cache of the blocks already complete, and paints a welcome screen while the chat is empty.
+The terminal UI is a ratatui app that composes its components directly and paints each frame without flicker. The chat renders only the blocks near the viewport and streamed markdown from a cache of its complete blocks, and a welcome screen fills the chat while it is empty.
 
 ## Stack
 
@@ -17,11 +17,11 @@ The terminal UI is a ratatui app that composes its components directly, paints e
 
 ### Components
 
-Components are concrete structs (`ChatView`, `InputArea`, `StatusBar`, modals) that the App composes directly, since there's no formal `Component` trait. Each owns its state, handles its events, and renders into a given area, while the root `App` dispatches events top-down and collects actions bottom-up.
+Components are concrete structs, such as `ChatView`, `InputArea`, and `StatusBar`, that `App` composes directly. Each owns its state, handles its events, and renders into a given area, while `App` dispatches events top-down and collects actions bottom-up.
 
 ### Named Keys
 
-The app's global keys, Ctrl+O for expanded output and Ctrl+R for prompt history, live in `APP_KEYMAP` in `ox_tui::action`, a table of named `AppAction`s built from the `KeyAction`, `KeyChord`, and `Keymap` types in `ox_tui::keymap`. Each entry carries its key and hint, so the hint a footer shows comes from the entry the key dispatches through. They work while no modal holds the keyboard and reach the app before the input box. The `/resume` picker builds its keys and footer from the same types. Other keys are matched beside the state they change: the prompt's editing table in `ox_tui::grapheme`, the app's exit and interrupt keys in `app::dispatch`, and each modal's keys in its own module. Every hint takes the `Key to effect` shape from `keymap::hint`.
+The app's global keys live in `APP_KEYMAP` in `ox_tui::action`, a table of named `AppAction`s built from the `ox_tui::keymap` types. Each entry carries its key and hint, so a footer's hint comes from the entry the key dispatches through. Global keys work while no modal holds the keyboard and reach the app before the input box, and the `/resume` picker builds its keys and footer from the same types. Other keys are matched beside the state they change: the prompt's editing table in `ox_tui::grapheme`, the exit and interrupt keys in `app::dispatch`, and each modal's keys in its own module. Every hint takes the `Key to effect` shape from `keymap::hint`.
 
 ### Async Event Loop
 
@@ -55,7 +55,7 @@ A resize, theme swap, or view toggle invalidates every cached block, so the chat
 
 The chat opens in the compact view, and **Ctrl+O** switches between it and the expanded view:
 
-- **Compact.** A tool body caps its rows and cuts each at 512 bytes. Most tools show their first five rows. An edit's diff shows up to twenty lines, with a `⋮` row between hunks. A first hunk longer than that keeps its first and last ten lines on either side of its footer, and the hunks that no longer fit collapse into one footer. A diff that reached its 2000-line cap ends in a plain `... +N lines past the diff limit` row in either view, since expanding cannot show those lines. A task list shows five tasks, starting just before the one in progress, and a list of edit locations shows eight. The hidden rows collapse into an overflow footer, such as `... +3 lines · Ctrl+O to expand`, in `dim`, which says `files`, `tasks`, or `hunks` for those lists. Grep and glob footers add `(limit reached)` when the tool's own cap also cut the results. Committed thinking shows only its `Thought` header. A click on a footer or header expands that block alone, as [Mouse Interactions](mouse.md#expanding-a-block) describes.
+- **Compact.** A tool body caps its rows, five for most tools, and cuts each row at 512 bytes. An edit's diff shows up to twenty lines with a `⋮` row between hunks. A longer first hunk keeps its first and last ten lines around its footer, and the hunks that no longer fit collapse into one footer. A task list shows five tasks, starting just before the one in progress, and a list of edit locations shows eight. The hidden rows collapse into a `dim` overflow footer, such as `... +3 lines · Ctrl+O to expand`, which counts `files`, `tasks`, or `hunks` for those lists, and Grep and Glob footers add `(limit reached)` when the tool's own cap also cut the results. A diff that reached its 2000-line cap ends in a plain `... +N lines past the diff limit` row in either view, since expanding cannot show those lines. Committed thinking shows only its `Thought` header. A click on a footer or header expands that block alone, as [Mouse Interactions](mouse.md#expanding-a-block) describes.
 - **Expanded.** Every tool body and thinking block renders in full. A toggle in either direction drops the expansions made by clicks.
 
 Thinking that is still streaming shows its body in both views under the spinner and `Thinking`. A progress note the model wrote before a tool call shows as prose only while `show_thinking` is off, since otherwise the thinking block holds the same text.
@@ -81,11 +81,11 @@ A `<br>` in a cell starts a new line in that cell, since a GFM cell has no other
 
 ## Welcome Screen
 
-While the chat has no blocks, no streaming reply, no thinking buffer, and no compaction summary, and `show_welcome` is on, `App::draw_frame` paints the welcome in the chat region: an identity ribbon with the version, then a body column with the model, effort, and auth source, the working directory, three starter commands, and a tip. `/clear` empties the chat, so the welcome returns, and a resume fills it, so a resumed session never shows the welcome.
+While the chat holds nothing, streaming included, and `show_welcome` is on, `App::draw_frame` paints the welcome in the chat region: an identity ribbon with the version, then the model, effort, and auth source, the working directory, three starter commands, and a tip. `/clear` empties the chat, so the welcome returns, while a resumed session never shows it.
 
 The starters sample the built-in commands a new session can run bare, each with its registry description, and the tip samples `TIP_POOL`, offering the pull request tip only when the configured status line includes the `pull-request` segment. Both draws seed `fastrand` with the xxh64 hash of the session ID, so a session keeps its picks while each new session draws again.
 
-The body lines pad to one shared width, since `Paragraph::alignment(Center)` centers each line on its own, so lines of different widths would each start at a different column. The layout steps down by width:
+The body lines pad to one shared width, since `Paragraph::alignment(Center)` centers each line on its own and lines of different widths would start at different columns. The layout steps down by width:
 
 | Cols  | Identity                    | Environment                       | Cwd                         | Starters and tip |
 | ----- | --------------------------- | --------------------------------- | --------------------------- | ---------------- |
@@ -101,7 +101,7 @@ A chat region shorter than 13 rows hides the starters and the tip at any width.
 1. **ratatui + crossterm + tokio.** Codex builds its TUI on the same stack, which diffs a double buffer and streams terminal events into the async loop, so oxide-code writes no renderer or input reader of its own.
 2. **Concrete component structs.** `App` composes chat, input, status, and modal surfaces directly. They share nothing beyond rendering into an area, so a component trait would add dynamic dispatch with nothing to abstract over.
 3. **Synchronized output by default.** A terminal that supports mode 2026 presents each frame at once, so a large repaint never shows half drawn, and a terminal without it ignores the mode.
-4. **Render throttling at ~60 FPS, and a sleeping idle loop.** Tokens can stream faster than a terminal can repaint, so the tick batches them into one frame, which keeps the event loop free for input. Background work, such as a git probe or a `/resume` picker's page read, reports on one channel, so its result wakes the loop as an event and nothing polls for it. The tick runs every frame while a redraw is pending, and otherwise only at the earliest timed change, such as the busy spinner's next frame, a git probe falling due, the clock segment's next minute, a usage-limit reset, or an expiring notice, so an idle session wakes about once every 5 s for the branch probe while the roster shows the branch. Each component that changes with time reports its next deadline beside its `tick`.
+4. **Render throttling at ~60 FPS, and a sleeping idle loop.** Tokens can stream faster than a terminal can repaint, so the tick batches them into one frame, which keeps the event loop free for input. Background work reports on one channel, so its result wakes the loop as an event and nothing polls for it. The tick runs every frame while a redraw is pending, and otherwise only at the earliest deadline a component reports beside its `tick`, such as the spinner's next frame or an expiring notice, so an idle session wakes about once every 5 s for the branch probe while the roster shows the branch.
 5. **Block-based markdown commit with a stable-prefix cache.** Re-parsing a whole reply on every frame costs more as the reply grows, so complete blocks render once and each frame re-parses only the tail.
 6. **Custom pulldown-cmark + syntect renderer.** Uses Codex's `pending_marker` pattern for correct list handling.
 7. **Two-tier tool display.** An inline summary with a per-tool icon keeps a long tool loop scannable, while the output body, which the compact view caps, shows what a reader needs to judge the call.
@@ -112,7 +112,7 @@ A chat region shorter than 13 rows hides the starters and the tip at any width.
 12. **Tildes stay literal.** The model writes `~` for "approximately" and in home-relative paths, and pulldown-cmark 0.13 strikes the text between two single tildes, so `cost ~$1-~$2` would render `$1-` crossed out. The renderer leaves strikethrough off, as Claude Code does for the same reason, while Codex keeps it.
 13. **The welcome paints in place of an empty chat.** It is an ephemeral placeholder, so `App::draw_frame` chooses between it and the chat render, and `ChatView` stays free of onboarding UI that would break its `is_empty` check and leak into the transcript.
 14. **The welcome is a stateless projection.** `paint` reads `LiveSessionInfo` on each frame, and its picks are a pure function of the session ID and the status line, so a model, effort, or sign-in change shows on the next frame with no cached copy to refresh.
-15. **Three sampled starters and a tip.** Listing every slash command would defeat "try one of", while sampled starters and a curated tip add variety without becoming a dashboard, and every entry is an action a user can take next.
+15. **Three sampled starters and a tip.** Listing every slash command would defeat "try one of", while sampled starters and a curated tip add variety without becoming a dashboard, and each is an action a user can take next.
 16. **Starters come from the slash registry.** A new command joins the pool with its registry description, so no second description drifts. `NOT_STARTERS` names the exceptions, since an `is_starter` method on `SlashCommand` would push welcome curation into every command.
 17. **An editorial ribbon, with no box, mascot, or animation.** A four-side box reads as generic CLI chrome, and an ASCII mascot, as Claude Code shows, or an animation, as Codex shows, is outsized for the value. The single ribbon line anchors the wordmark, which uses the project name `oxide-code`, the name a migrator searches for, while `ox` stays the binary name.
 18. **A coarse width ladder.** Codex and Claude Code truncate and reflow, and opencode shrinks flex items, but the welcome's content is fixed, so three tiers are simpler than a shrink rule per element.

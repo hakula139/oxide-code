@@ -2,10 +2,8 @@
 
 How oxide-code's code, tests, docs, and GitHub work are written. [`AGENTS.md`](../../AGENTS.md) holds the rules for every change and links each area here.
 
-| Document                      | Description                                                                                                                                                        |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [Rust](rust.md)               | Enforced lints, lint suppression, architecture, traits, errors and their messages, visibility, modules, layout, strings, dependencies                              |
-| [Testing](testing.md)         | Placement, grouping and naming, data and infrastructure, hermetic tests, time, assertions, snapshots, coverage, mutation testing, live tests and the TUI checklist |
-| [Writing](writing.md)         | Comments, docstrings, prose, messages, Markdown, documentation, design docs, research notes                                                                        |
-| [GitHub](github.md)           | Commits and branches, pull requests and their labels, review and merge, issues and the release milestone                                                           |
-| [Development](development.md) | Dev shell, pre-commit hooks, toolchain, Nix style, config style, debug info, CI, failing checks                                                                    |
+- [Rust](rust.md): lints, architecture, errors, visibility, modules, layout, strings, and dependencies
+- [Testing](testing.md): test placement and naming, hermetic tests, assertions, snapshots, coverage, and live tests
+- [Writing](writing.md): comments, docstrings, prose, messages, Markdown, and documentation
+- [GitHub](github.md): commits, branches, pull requests, review and merge, and issues
+- [Development](development.md): the dev shell, toolchain, Nix and config style, CI, and failing checks
