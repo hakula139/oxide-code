@@ -47,6 +47,7 @@ insta
 irwxu
 keepalives
 killpg
+libc
 macchiato
 misparse
 mkfifo
