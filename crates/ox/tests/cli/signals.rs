@@ -15,7 +15,9 @@ async fn interrupted_run(args: &[&str], signal: &str) -> (Option<i32>, String, S
     let server = MockServer::start().await;
     mount_stalled_reply_once(&server).await;
     let dir = tempfile::tempdir().expect("create a scratch directory");
-    let mut child = tokio::process::Command::from(ox(dir.path()))
+    let mut command = ox(dir.path());
+    reset_test_signals(&mut command);
+    let mut child = tokio::process::Command::from(command)
         .args(args)
         .current_dir(dir.path())
         .env("ANTHROPIC_API_KEY", "test-key")
@@ -40,12 +42,34 @@ async fn interrupted_run(args: &[&str], signal: &str) -> (Option<i32>, String, S
     assert!(killed.success());
     let output = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
         .await
-        .expect("ox exits after the signal")
+        .unwrap_or_else(|error| panic!("ox exits after SIG{signal}: {error:?}"))
         .expect("wait for ox");
 
     let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
     let stderr = String::from_utf8(output.stderr).expect("stderr is UTF-8");
     (output.status.signal(), stdout, stderr)
+}
+
+/// Resets the signals under test in the child, since a background shell may start the test with
+/// SIGINT ignored.
+#[expect(
+    unsafe_code,
+    reason = "setting child dispositions requires CommandExt::pre_exec and libc::signal"
+)]
+fn reset_test_signals(command: &mut Command) {
+    use std::os::unix::process::CommandExt as _;
+
+    // The child calls only async-signal-safe libc functions between fork and exec.
+    unsafe {
+        command.pre_exec(|| {
+            for signal in [nix::libc::SIGHUP, nix::libc::SIGINT, nix::libc::SIGTERM] {
+                if nix::libc::signal(signal, nix::libc::SIG_DFL) == nix::libc::SIG_ERR {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
 }
 
 #[tokio::test]
