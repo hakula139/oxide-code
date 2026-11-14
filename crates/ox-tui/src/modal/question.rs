@@ -289,6 +289,7 @@ mod tests {
     use ox_core::tool::ask::QuestionOption;
 
     use super::*;
+    use crate::modal::acceptance::TYPE_AHEAD_GUARD;
     use crate::modal::testing::render_rows;
 
     fn modal() -> QuestionModal {
@@ -326,8 +327,8 @@ mod tests {
     mod render {
         use super::*;
 
-        #[test]
-        fn restoring_the_body_shows_the_pending_answer_and_rearms_acceptance() {
+        #[tokio::test(start_paused = true)]
+        async fn restoring_the_body_shows_the_pending_answer_and_rearms_acceptance() {
             use ratatui::Terminal;
             use ratatui::backend::TestBackend;
             use ratatui::layout::Position;
@@ -337,7 +338,7 @@ mod tests {
             render_rows(&mut modal, 30, 12);
             modal.handle_paste("custom");
             render_rows(&mut modal, 30, 2);
-            modal.acceptance.expire();
+            tokio::time::advance(TYPE_AHEAD_GUARD).await;
             let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
             assert!(matches!(modal.handle_key(&enter), ModalKey::Consumed));
             let mut terminal = Terminal::new(TestBackend::new(30, 12)).unwrap();
@@ -358,7 +359,7 @@ mod tests {
                 Position::new(8, u16::try_from(answer_row).unwrap()),
             );
             assert!(matches!(modal.handle_key(&enter), ModalKey::Consumed));
-            modal.acceptance.expire();
+            tokio::time::advance(TYPE_AHEAD_GUARD).await;
             assert_eq!(
                 submitted(modal.handle_key(&enter)),
                 QuestionAnswer::Answered("custom".to_owned()),
