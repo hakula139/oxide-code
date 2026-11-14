@@ -255,71 +255,12 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: formula
-          path: Formula
+          path: ${{ runner.temp }}/formula
 
       - name: Open formula PR
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          # Follow the latest release, or the newest prerelease before the first stable one.
-          latest=$(
-            gh api graphql \
-              -F owner='{owner}' \
-              -F name='{repo}' \
-              -f query="query(\$owner: String!, \$name: String!) {
-                repository(owner: \$owner, name: \$name) {
-                  latestRelease { tagName }
-                }
-              }" \
-              --jq '.data.repository.latestRelease.tagName // empty'
-          )
-
-          if [[ -z "$latest" ]]; then
-            latest=$(
-              gh release list \
-                --exclude-drafts \
-                --limit 1 \
-                --json tagName \
-                --jq '.[0].tagName // empty'
-            )
-          fi
-
-          if [[ -z "$latest" ]]; then
-            echo '::error::No published release found for the Homebrew formula'
-            exit 1
-          fi
-          if [[ "$latest" != "$GITHUB_REF_NAME" ]]; then
-            echo "Skipping $GITHUB_REF_NAME, since the formula follows $latest."
-            exit 0
-          fi
-
-          branch="chore/homebrew-$GITHUB_REF_NAME"
-          title="chore(release): refresh Homebrew formula for $GITHUB_REF_NAME"
-          git switch -c "$branch"
-          if git diff --quiet; then
-            echo "The formula on main already points at $GITHUB_REF_NAME."
-            exit 0
-          fi
-
-          git \
-            -c user.name='hakula-release-bot[bot]' \
-            -c user.email='351352052+hakula-release-bot[bot]@users.noreply.github.com' \
-            commit -am "$title"
-          # A rerun rebuilds this commit on the current main and replaces the earlier push.
-          git push --force origin "$branch"
-
-          if [[ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]] &&
-            ! gh pr create \
-              --base main \
-              --head "$branch" \
-              --title "$title" \
-              --assignee hakula139 \
-              --label chore \
-              --body-file .github/templates/homebrew-formula-pr.md
-          then
-            echo "::error::Could not open the formula PR."
-            exit 1
-          fi
+        run: bash scripts/open-homebrew-pr.sh "$RUNNER_TEMP/formula/oxide-code.rb"
 
   notes:
     name: Republish Release Notes
