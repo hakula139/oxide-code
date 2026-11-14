@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.11](https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.10...v0.1.0-alpha.11) - 2026-11-15
+
+### Highlights
+
+- `auto` is now the default permission mode: unmatched actions are classified to run or request approval.
+- Agents can ask questions inline, and users can configure timeouts for question and approval waits.
+- Interactive sessions use the TUI, while `-p` handles one-shot and piped prompts.
+
+### Breaking changes
+
+- _(permission)_ Make `auto` the default mode, using a configurable model to allow unmatched actions or request approval. Explicit deny and ask rules, read-only plan mode, and session grants take precedence, and classifier failures request approval. Use `permission.auto.model` and `permission.auto.instructions` to configure classification. Set `permission.mode = "manual"` to keep manual approval, and replace removed `permission.defaults` entries and implicit read or workspace-edit approvals with explicit rules ([#833](https://github.com/hakula139/oxide-code/pull/833))
+- _(permission)_ Scope read and edit path rules to native file tools and search walks. Bash now uses explicit exec rules and the selected permission mode without inferred filesystem effects. Configure explicit exec rules for fixed command policies, or use automatic classification and manual approval ([#835](https://github.com/hakula139/oxide-code/pull/835))
+- Remove the bare `--no-tui` REPL. Interactive sessions require a terminal on stdin and stdout, while `-p` retains one-shot prompts, piped input, continued sessions, and structured output ([#838](https://github.com/hakula139/oxide-code/pull/838))
+
+### Added
+
+- _(tool)_ Let the agent ask a question and continue the turn with the answer. The TUI offers recommended choices, freeform input, skip, and cancel, and restores the selected answer or editor when a collapsed prompt becomes visible ([#834](https://github.com/hakula139/oxide-code/pull/834), [#865](https://github.com/hakula139/oxide-code/pull/865))
+- _(interaction)_ Configure optional question and approval waits with `timeout_seconds` and `on_timeout` under `[interaction.questions]` and `[interaction.approvals]`. Questions use the recommended choice or skip on timeout, while approvals deny by default or allow when explicitly configured ([#839](https://github.com/hakula139/oxide-code/pull/839))
+
+### Fixed
+
+- _(driver)_ Preserve inherited ignored signals, so ignored terminal hangups and interrupts continue to be ignored when sessions start under `nohup` or shells that set those dispositions ([#828](https://github.com/hakula139/oxide-code/pull/828))
+- _(prompt)_ Describe `auto` and `manual` behavior accurately in the System prompt, without claiming the wrong default, workspace-edit permission, or automatic approval for unanalyzable syntax ([#854](https://github.com/hakula139/oxide-code/pull/854))
+- _(release)_ Preserve existing Homebrew formula branch edits and recover a missing pull request when a workflow rerun follows a successful push ([#864](https://github.com/hakula139/oxide-code/pull/864))
+
+[Full changelog](https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.10...v0.1.0-alpha.11)
+
 ## [0.1.0-alpha.10](https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.9..v0.1.0-alpha.10) - 2026-11-01
 
 ### Highlights
