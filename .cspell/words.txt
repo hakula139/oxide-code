@@ -34,9 +34,11 @@ fcntl
 feff
 fffd
 fullfsync
+Gadzhi
 getpgid
 ghostty
 ghsa
+gwenzek
 hakula
 idna
 illumos
@@ -46,8 +48,12 @@ indoc
 insta
 irwxu
 keepalives
+Kharkharov
 killpg
+Koen
+Lageveen
 libc
+Lickel
 macchiato
 misparse
 mkfifo
@@ -114,6 +120,7 @@ unwritable
 wakatime
 wakeup
 webpki
+wintermi
 xattr
 xhigh
 xpress
