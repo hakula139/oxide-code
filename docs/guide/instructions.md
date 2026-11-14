@@ -31,22 +31,4 @@ The project root is the nearest directory at or above the working directory that
 
 ## Writing Effective Instructions
 
-A typical file lists coding conventions and project-specific rules:
-
-```markdown
-# AGENTS.md
-
-## Coding conventions
-
-- Use snake_case for function names and SCREAMING_SNAKE_CASE for constants.
-- All public functions must have doc comments.
-- Error handling: use `anyhow::Result` in application code, `thiserror` for library errors.
-
-## Project-specific rules
-
-- Do not modify files in `vendor/` or `generated/`.
-- Run `cargo test` after any code change.
-- Commit messages follow conventional commits: `type(scope): description`.
-```
-
 Keep instructions concise, since they consume tokens on every request, and focus on rules the assistant cannot infer from the code. Run `/init` to have the assistant draft a file from the codebase or suggest edits to an existing one.

@@ -1,21 +1,16 @@
 # GitHub
 
-Conventions for commits, branches, pull requests, and issues.
+Follow the [shared Git workflow](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/git-workflow/SKILL.md) and devkit's [GitHub conventions](https://github.com/hakula139/devkit/blob/v3/docs/github.md). This page adds oxide-code's changelog, label, and issue requirements.
 
-## Commits and Branches
+## Commit Titles
 
-- Keep each commit to one logical change. Use the imperative mood for its title, formatted as `type(scope): description`. For substantial changes, add a body explaining the problem, rationale, and tradeoffs.
-- Choose one of these types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `ci`, `build`, `chore`, `style`, or `revert`.
 - Use the most specific scope the change touches, such as a module (`client`, `config`, `oauth`) or a documentation target (`AGENTS`, `research`). Use a crate name, such as `ox-core`, only for changes that span its modules, and omit the scope for changes that span crates.
 - If a change breaks the [stability surface](../../RELEASING.md#stability-surface), add `!` after the scope, as in `feat(config)!: ...`.
-- Name branches `<type>/<short-name>`, using the same types.
 
 ## Pull Requests
 
-- Merge into `main` only with squash merges. The squash commit uses the PR title, which becomes the PR's draft [changelog](../../RELEASING.md#release-preparation) entry, so write the title for users.
-- Fill in the PR template, which [`hakula139/.github`](https://github.com/hakula139/.github) supplies. Start the Summary with prose describing the problem and resulting behavior, then cover each part of the change in a bullet with a bold label. In the Test plan, list the checks actually run and note any verification limits.
-- Add `Closes #N` for each resolved issue.
-- Do not request a review from the PR author because GitHub rejects the request.
+- The squashed PR title becomes the draft [changelog](../../RELEASING.md#release-preparation) entry, so write it for users.
+- Use the PR template inherited from [`hakula139/.github`](https://github.com/hakula139/.github).
 - Maintainers with triage access assign the PR to `hakula139`, set its milestone to the linked issue's milestone or the planned delivery batch when no issue is linked, and add one type label plus the `area:` labels for the areas it changes:
 
 | Commit type               | Label                            |
@@ -29,14 +24,6 @@ Conventions for commits, branches, pull requests, and issues.
 | `ci`                      | `ci`                             |
 | `build`, `chore`, `style` | `chore`                          |
 | `revert`                  | The reverted change's type label |
-
-## Review and Merge
-
-- Review each PR once. Fix every finding, including suggestions, verify the fixes with the [verification](../../AGENTS.md#verification) block, and merge without a second review round. After a batch of related PRs merges, make one simplification pass over the merged changes.
-- Agents working for the maintainer merge a reviewed PR without asking for per-PR approval, once the required checks pass on its head. Wait on `gh pr checks <n> --watch --fail-fast`, then for `gh pr view <n> --json mergeStateStatus` to read `CLEAN`, since `codecov/patch` arrives only after the other checks finish. If it reads `BEHIND`, run `gh pr update-branch <n>` and wait again. Merge with `gh pr merge <n> --squash --match-head-commit <sha>`, and never pass `--auto`, which the ruleset's admin bypass turns into a merge before the required checks finish. An agent that opens a PR leaves the merge to the agent that reviews it. Tags and releases still need the approval [RELEASING.md](../../RELEASING.md) describes.
-- Keep each line of work's open PRs in a single stack, with each PR based on the one before it and no more than three unmerged at a time. Land the bottom PR before opening another, since parallel PRs based on `main` multiply the conflicts created by each merge.
-- The repository has no merge queue. After each merge, run `gh pr update-branch` on open PRs that fell behind, and send conflicting PRs back to their authors to rebase. Land ready PRs in the order that minimizes conflicts, small or foundational ones first.
-- When the maintainer calls a wrap-up, start no new work. Let the open PRs finish and merge them, leaving `main` at a stable checkpoint, then cut the release if one is planned and clean up branches and worktrees.
 
 ## Issues
 

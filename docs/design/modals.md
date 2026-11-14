@@ -6,15 +6,7 @@ Three needs drove the abstraction: `/theme` swaps palettes as the user arrows th
 
 ## Trait Shape
 
-A modal is `Send`, since the App lives on tokio, but not `Sync`, since modals own mutable state and are never shared across threads. It declares its `height` for layout, paints itself into a `Rect`, and routes one `KeyEvent` to one of five outcomes:
-
-- **Consumed.** The modal stays open, having handled the key internally.
-- **Cancelled.** The modal closes and dispatches its `on_cancel` action, if any.
-- **Submitted.** The modal closes and dispatches an `Action`, which is an op for the engine, a TUI-only change, or a no-op when the modal already applied its effect locally.
-- **Emit.** The modal forwards an action without closing, as `/theme`'s live preview does on each cursor move, and as `/resume`'s archive toggle and the confirm modal's delete do.
-- **Push.** The modal nests a child modal above itself, and focus returns to the parent when the child pops.
-
-`Submitted` and `Emit` carry a `ModalAction`: `Dispatch(Action)`, which follows the `App::dispatch_action` path of a keyboard action, or `SystemMessage(String)`, which prints a confirmation into the chat after the pop.
+The [`Modal` trait and its result types](../../crates/ox-tui/src/modal.rs) define rendering, input handling, and typed actions. A modal is `Send`, since the App lives on tokio, but not `Sync`, since modals own mutable state and are never shared across threads. The App dispatches their engine or TUI actions. A pushed child leaves its parent on the stack, so focus returns to the parent when the child closes.
 
 ## Hooks
 

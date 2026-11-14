@@ -1,6 +1,6 @@
 # Development
 
-Conventions for the dev shell, toolchain, Nix and config file style, debug info, CI, and failing checks. [Installation](../guide/install.md) covers other ways to build `ox`.
+Conventions for the dev shell, toolchain, Nix and config file style, debug info, and CI. [Installation](../guide/install.md) covers other ways to build `ox`.
 
 ## Dev Shell
 
@@ -26,23 +26,19 @@ With [direnv](https://direnv.net), run `direnv allow` once, and `.envrc` loads t
 
 ## Nix Style
 
-`nixfmt`, `statix`, and `deadnix` check `flake.nix` and `nix/`. They leave these rules open:
+Follow the shared [Nix](https://github.com/hakula139/plugins/blob/main/plugins/hakula-languages/skills/nix/SKILL.md) and [code layout](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/code-layout/SKILL.md) conventions. `nixfmt`, `statix`, and `deadnix` check `flake.nix` and `nix/`, with these repository additions:
 
 - Mark a file header with `=` banners at column 0 and each section with `-` banners indented with the code, ending every banner line at column 100. A file without banners stays without them.
-- Put each argument of a top-level function on its own line. Take `...` only when the caller passes a broader set, as with flake outputs.
 - In a `callPackage` file, such as `nix/package.nix`, declare each dependency as its own argument so `.override` can replace it, with `lib` first and the rest in alphabetical order. In the flake, reach packages through `pkgs`.
 - Put `inherit` entries first in a `let` block and in a call's argument set.
-- Group related bindings, order a `let` block so each binding follows what it depends on, and fall back to alphabetical order.
-- Follow a multiline binding or attribute with a blank line, and keep single-line siblings together. A single-line binding may lead directly into a related multiline one.
-- Write multiline text, such as a shell hook, as an indented string with literal line breaks.
 
 ## Config Style
 
-Prettier, Taplo, and shfmt format YAML, TOML, and shell files, while comments and long strings are wrapped by hand:
+Prettier, Taplo, and shfmt format YAML, TOML, and shell files. Follow the shared [code layout](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/code-layout/SKILL.md) conventions for commands and multiline text, with these width and syntax requirements:
 
 - Wrap comments as [Writing](writing.md#comments) describes, and other lines at about 100 columns. A line holding an unbreakable token, such as a URL, or content in a heredoc or literal block stays long.
 - Wrap a long string only where its value stays the same, breaking it where [Rust](rust.md#strings) breaks a continued literal.
-- Split a long shell command at its pipelines and `&&` / `||` lists. If a part is still too long, keep at most what names the operation on the first line, such as the command, its subcommands, and a leading script, pattern, or message, and put each further flag with its value, or each group of related arguments, on its own line, one level deeper. End each line but the last with `\` unless it ends with `|`, `&&`, or `||`. Workflows put such a command in a `run: |` block.
+- End each continued shell line with `\` unless it ends with `|`, `&&`, or `||`. Workflows put multiline commands in a `run: |` block.
 - Put a multiline command substitution's command on the next line and its closing `)` on its own line, aligned with the assignment.
 
 ## Debug Info
@@ -69,8 +65,4 @@ Branch protection requires CI Result and Codecov's `codecov/patch`. Add each new
 
 Every job but Windows and CI Result reads the `hakula` Cachix cache, and a Cachix failure never fails a job. A download that stalls without failing still runs the job into its timeout, which [#715](https://github.com/hakula139/oxide-code/issues/715) tracks.
 
-## Failing Checks
-
-Fix the cause of a failing hook, lint, test, or CI job. Skips, `--exclude` flags, ignore and allowlist entries, `continue-on-error`, `|| true`, retries, and special cases for one path or commit only hide the failure. Restructure a test that cannot run in some environment, such as Windows, as [Hermetic Tests](testing.md#hermetic-tests) describes.
-
-Keep an ignore or allowlist entry only when it is the design, such as a license the project accepts, an advisory with no fix, or a generated file that a formatter must skip. Keep `continue-on-error` only on a step whose failure cannot change what a build or check finds, such as the Cachix setup. Give the reason in the PR that adds either.
+[Hermetic Tests](testing.md#hermetic-tests) covers tests whose environment affects their result.

@@ -11,7 +11,7 @@ Before publication, devkit's `nix-cache.yml` pushes the flake's x86_64 Linux and
 - **Main during a soak:** merge only `fix`, `docs`, `test`, and `chore(release)` PRs. Feature and refactor PRs wait for the stable tag, so the stable commit matches the soaked rc plus its fixes. Renovate automerges dependency bumps, so set `"enabled": false` in `.github/renovate.json` when the soak starts and revert it after the stable tag, both through `ci(renovate)` PRs.
 - **After 0.1.0:** a breaking change to the [stability surface](#stability-surface) bumps the minor version, and every other change bumps the patch version. Prereleases of the next minor (`v0.2.0-alpha.N`) follow the rules above.
 - **Milestones:** each planned release batch, including a patch release or prerelease, has its own milestone, such as `v0.2.0` or `v0.2.0-alpha.1`.
-- **Breaking changes:** a PR that breaks the stability surface marks its title with [`!`](docs/conventions/github.md#commits-and-branches) both before and after 0.1.0. Before 0.1.0, the version still advances within the prerelease sequence.
+- **Breaking changes:** a PR that breaks the stability surface marks its title with [`!`](docs/conventions/github.md#commit-titles) both before and after 0.1.0. Before 0.1.0, the version still advances within the prerelease sequence.
 - **MSRV:** the CI MSRV job checks `rust-version`. A bump affects `cargo install` users and Nix source builds, so it ships as a normal change that names the new floor in its PR title. The Nix jobs fail when the floor passes the Rust release of the flake's nixpkgs.
 
 ### Stability Surface
@@ -31,7 +31,7 @@ Before 0.1.0, config, environment variable, and session format changes may freel
 
 ## Release Preparation
 
-Follow the [shared release procedure](https://github.com/hakula139/devkit/blob/v3/docs/releasing.md) for changelog curation, the release PR, tagging its exact merged commit after separate approval, and CI recovery. Draft `CHANGELOG.md` with the shared configuration.
+Follow the [shared release procedure](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/release/SKILL.md) for changelog curation, the release PR, and tag approval. Devkit's [release guide](https://github.com/hakula139/devkit/blob/v3/docs/releasing.md) documents changelog drafting and CI recovery. Use its shared changelog configuration, with these repository-specific changes:
 
 Security fixes describe the gap, affected releases, and published advisory as [SECURITY.md](SECURITY.md) promises. Add an advisory published later to every affected changelog section through a correction PR.
 
@@ -50,21 +50,20 @@ Security fixes describe the gap, affected releases, and published advisory as [S
    INSTA_UPDATE=unseen cargo test -p ox-core --lib session_format::resumes_from_every_release_fixture
    ```
 
-4. Run the [verification block](AGENTS.md#verification), including session compatibility checks for stable releases. The release PR changes the version files, changelog, pinned install snippet, any needed spelling entries, and stable-release fixtures and snapshots.
+Include session compatibility checks in the [verification block](AGENTS.md#verification) for stable releases.
 
 ## Verify Publication
 
-Watch the [Release workflow](https://github.com/hakula139/oxide-code/actions/workflows/release.yml) with `gh run watch` and check:
+After the [Release workflow](https://github.com/hakula139/oxide-code/actions/workflows/release.yml) completes, verify:
 
-- The release notes match the changelog section, and a prerelease tag published a prerelease.
 - Every [target](#targets) archive and its `.sha256` sidecar are attached, and `gh attestation verify <archive> --repo hakula139/oxide-code` passes for one of them.
 - `nix run github:hakula139/oxide-code/vX.Y.Z -- --version` prints the version on one host.
 
-The workflow then renders the Homebrew formula from the release sidecars, runs `brew test` on macOS and Linux, and opens a `chore(release): refresh Homebrew formula for vX.Y.Z` PR. Merging that PR once its checks pass is the final release step. The formula follows the latest release, or the newest prerelease until the first stable release, so other tags skip this job. If the job fails, fix the cause and rerun it, which reuses an open PR.
+The workflow then renders the Homebrew formula from the release sidecars, runs `brew test` on macOS and Linux, and opens a `chore(release): refresh Homebrew formula for vX.Y.Z` PR. Merging that PR through the shared Git workflow is the final release step. The formula follows the latest release, or the newest prerelease until the first stable release, so other tags skip this job. A workflow rerun reuses an open formula PR or opens one with the rebuilt checksums.
 
 ## Recovery
 
-Follow the shared release procedure for notes corrections and CI retries. Let an in-flight release finish before rebuilding assets, and rebuild the original commit for the same tag. A source change requires a new version and release PR. A release workflow rerun refreshes the open formula PR or opens one with the rebuilt checksums.
+Follow the [shared release procedure](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/release/SKILL.md) and devkit's [release guide](https://github.com/hakula139/devkit/blob/v3/docs/releasing.md) for recovery. Asset rebuilds use the original commit for the same tag. A source change requires a new version and release PR.
 
 ## Stable Gates for 0.1.0
 
@@ -72,7 +71,7 @@ Before tagging `v0.1.0-rc.1`:
 
 - All planned prerelease work is complete, and the [`v0.1.0` milestone](https://github.com/hakula139/oxide-code/milestone/1) holds no open issue except the release work for these gates.
 - CI on `main` passes the full test suite on Linux, macOS, and Windows ([#127](https://github.com/hakula139/oxide-code/issues/127)).
-- Each auth mode works live in a TUI turn that calls a tool and a `-p` run: Claude Code OAuth login, a long-lived OAuth token ([#121](https://github.com/hakula139/oxide-code/issues/121)), an API key, and a gateway with a bearer token and custom headers ([#122](https://github.com/hakula139/oxide-code/issues/122)). Every Claude 5.5 model answers at least one turn. Record the matrix in the rc PR's Test plan.
+- Each auth mode works live in a TUI turn that calls a tool and a `-p` run: Claude Code OAuth login, a long-lived OAuth token ([#121](https://github.com/hakula139/oxide-code/issues/121)), an API key, and a gateway with a bearer token and custom headers ([#122](https://github.com/hakula139/oxide-code/issues/122)). Every Claude 5.5 model answers at least one turn. Record the matrix in the rc PR's Verification section.
 - The persisted formats are documented: the session store and export in [`docs/design/persistence.md`](docs/design/persistence.md), config keys in [`docs/guide/configuration.md`](docs/guide/configuration.md) and [`docs/guide/permissions.md`](docs/guide/permissions.md), and the theme TOML in [`docs/guide/theming.md`](docs/guide/theming.md).
 - `SECURITY.md` exists ([#200](https://github.com/hakula139/oxide-code/issues/200)), and every archive ships `THIRD-PARTY-NOTICES` ([#207](https://github.com/hakula139/oxide-code/issues/207)).
 
