@@ -59,7 +59,7 @@ Keep each `tracing` message a constant phrase and pass variable data as fields, 
 
 ## Layout
 
-Follow the shared [code layout] conventions, with these Rust additions:
+Follow the shared [code layout](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/code-layout/SKILL.md) conventions, with these Rust additions:
 
 - List derives in the order `Debug`, `Clone`, `Copy`, `Default`, `PartialEq`, `Eq`, `PartialOrd`, `Ord`, `Hash`, followed by `Serialize`, `Deserialize`, and then other crates' derives, such as `thiserror::Error`. Give parallel types the same set.
 - Separate distinct groups of items with `// ── Section Name ──` banners using U+2500. Tests group by function in child modules, as described in [Testing](testing.md#grouping-and-naming).
@@ -93,5 +93,3 @@ Follow the shared [code layout] conventions, with these Rust additions:
 - Pin each dependency version in the root `Cargo.toml` under `[workspace.dependencies]`, then reference it from member crates with `dep.workspace = true`.
 - Add dependencies to the workspace only when a change first requires them, and prefer crates with few transitive dependencies.
 - Declare a platform-specific dependency in the crate's `Cargo.toml` under the narrowest `[target.'cfg(...)'.dependencies]` table that covers every use.
-
-[code layout]: https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/code-layout/SKILL.md

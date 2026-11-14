@@ -26,7 +26,7 @@ With [direnv](https://direnv.net), run `direnv allow` once, and `.envrc` loads t
 
 ## Nix Style
 
-Follow the shared [Nix] and [code layout] conventions. `nixfmt`, `statix`, and `deadnix` check `flake.nix` and `nix/`, with these repository additions:
+Follow the shared [Nix](https://github.com/hakula139/plugins/blob/main/plugins/hakula-languages/skills/nix/SKILL.md) and [code layout](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/code-layout/SKILL.md) conventions. `nixfmt`, `statix`, and `deadnix` check `flake.nix` and `nix/`, with these repository additions:
 
 - Mark a file header with `=` banners at column 0 and each section with `-` banners indented with the code, ending every banner line at column 100. A file without banners stays without them.
 - In a `callPackage` file, such as `nix/package.nix`, declare each dependency as its own argument so `.override` can replace it, with `lib` first and the rest in alphabetical order. In the flake, reach packages through `pkgs`.
@@ -34,7 +34,7 @@ Follow the shared [Nix] and [code layout] conventions. `nixfmt`, `statix`, and `
 
 ## Config Style
 
-Prettier, Taplo, and shfmt format YAML, TOML, and shell files. Follow the shared [code layout] conventions for commands and multiline text, with these width and syntax requirements:
+Prettier, Taplo, and shfmt format YAML, TOML, and shell files. Follow the shared [code layout](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/code-layout/SKILL.md) conventions for commands and multiline text, with these width and syntax requirements:
 
 - Wrap comments as [Writing](writing.md#comments) describes, and other lines at about 100 columns. A line holding an unbreakable token, such as a URL, or content in a heredoc or literal block stays long.
 - Wrap a long string only where its value stays the same, breaking it where [Rust](rust.md#strings) breaks a continued literal.
@@ -66,6 +66,3 @@ Branch protection requires CI Result and Codecov's `codecov/patch`. Add each new
 Every job but Windows and CI Result reads the `hakula` Cachix cache, and a Cachix failure never fails a job. A download that stalls without failing still runs the job into its timeout, which [#715](https://github.com/hakula139/oxide-code/issues/715) tracks.
 
 [Hermetic Tests](testing.md#hermetic-tests) covers tests whose environment affects their result.
-
-[Nix]: https://github.com/hakula139/plugins/blob/main/plugins/hakula-languages/skills/nix/SKILL.md
-[code layout]: https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/code-layout/SKILL.md

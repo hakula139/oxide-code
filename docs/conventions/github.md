@@ -1,6 +1,6 @@
 # GitHub
 
-Follow the [shared Git workflow] and devkit's [GitHub conventions]. This page adds oxide-code's changelog, label, and issue requirements.
+Follow the [shared Git workflow](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/git-workflow/SKILL.md) and devkit's [GitHub conventions](https://github.com/hakula139/devkit/blob/v3/docs/github.md). This page adds oxide-code's changelog, label, and issue requirements.
 
 ## Commit Titles
 
@@ -35,6 +35,3 @@ Follow the [shared Git workflow] and devkit's [GitHub conventions]. This page ad
 - Close an issue as completed when its PR merges, and tick each acceptance criterion the merged work satisfies. Leave an unmet criterion unchecked, and track it in a follow-up issue.
 - Before starting new feature work, audit open issues and their epics for unmet acceptance criteria and unfinished sub-issues, and resolve those first.
 - Assign issues accepted for a planned delivery batch to that release's milestone, including prereleases. Keep work required for the first stable release in `v0.1.0` until it joins an earlier delivery batch. Leave unplanned work without a milestone.
-
-[shared Git workflow]: https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/git-workflow/SKILL.md
-[GitHub conventions]: https://github.com/hakula139/devkit/blob/v3/docs/github.md

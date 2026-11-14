@@ -31,7 +31,7 @@ Before 0.1.0, config, environment variable, and session format changes may freel
 
 ## Release Preparation
 
-Follow the [shared release procedure] for changelog curation, the release PR, and tag approval. Devkit's [release guide] documents changelog drafting and CI recovery. Use its shared changelog configuration, with these repository-specific changes:
+Follow the [shared release procedure](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/release/SKILL.md) for changelog curation, the release PR, and tag approval. Devkit's [release guide](https://github.com/hakula139/devkit/blob/v3/docs/releasing.md) documents changelog drafting and CI recovery. Use its shared changelog configuration, with these repository-specific changes:
 
 Security fixes describe the gap, affected releases, and published advisory as [SECURITY.md](SECURITY.md) promises. Add an advisory published later to every affected changelog section through a correction PR.
 
@@ -63,7 +63,7 @@ The workflow then renders the Homebrew formula from the release sidecars, runs `
 
 ## Recovery
 
-Follow the [shared release procedure] and devkit's [release guide] for recovery. Asset rebuilds use the original commit for the same tag. A source change requires a new version and release PR.
+Follow the [shared release procedure](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/release/SKILL.md) and devkit's [release guide](https://github.com/hakula139/devkit/blob/v3/docs/releasing.md) for recovery. Asset rebuilds use the original commit for the same tag. A source change requires a new version and release PR.
 
 ## Stable Gates for 0.1.0
 
@@ -89,6 +89,3 @@ The build matrix in `release.yml` lists the targets. Each release attaches one a
 
 - The release jobs read the platform floors from `docs/guide/install.md`, so keep its `Linux with glibc <version> or later` and `**macOS**: <version> or later` wording. The Linux job fails when the binary needs a newer glibc, which a runner image update can cause, so pin the previous image or raise the floor. The macOS job fails when the binary's minimum macOS differs from the floor, and raising it also changes `MACOSX_DEPLOYMENT_TARGET` in `release.yml` and `depends_on macos:` in `scripts/oxide-code-formula.rb`.
 - Add a target by extending the matrix. Each target needs a runner that executes its binary, since every build job checks its archive there.
-
-[shared release procedure]: https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/release/SKILL.md
-[release guide]: https://github.com/hakula139/devkit/blob/v3/docs/releasing.md

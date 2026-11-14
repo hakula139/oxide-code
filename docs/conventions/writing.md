@@ -1,10 +1,10 @@
 # Writing
 
-Follow the shared [writing instructions], [phrasing rules], and [prose rules] for comments, docs, commit and PR text, and strings read by users or the model. This page adds oxide-code's Rust, terminal, and documentation conventions.
+Follow the shared [writing instructions](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/instructions/shared.md#writing), [phrasing rules](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/shared/prompt-fragments/phrasing.md), and [prose rules](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/shared/prompt-fragments/prose-tics.md) for comments, docs, commit and PR text, and strings read by users or the model. This page adds oxide-code's Rust, terminal, and documentation conventions.
 
 ## Comments
 
-Follow the shared [comment rules].
+Follow the shared [comment rules](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/shared/prompt-fragments/comments.md).
 
 - Write `//` comments as prose. A docstring may use a Markdown list for parallel options or a sequence.
 - Wrap comment and docstring prose at 100 columns, counting indentation and comment markers, in every language and in prose literals continued by hand. Fill each paragraph, separate paragraphs with a blank comment line, and break early to keep a code span or link together. Reword a paragraph whose last line would hold one short word, and preserve intentional layout in code examples, lists, tables, and diagrams.
@@ -67,8 +67,3 @@ These rules apply to errors, warnings, notices, and other strings shown to users
 
 - `docs/research/` holds API references and surveys that inform open design questions, and each survey links the `design` issues it informs. The PR that settles one moves any comparison its decision still depends on into that decision's reason and trims the survey. The PR that closes the last one deletes the survey, since nobody re-verifies a closed survey while the reference implementations drift.
 - Follow each survey's opening paragraph with a `Verified <date> against <versions>.` line naming the reference implementations and versions its last full re-read covered. A claim you add or edit afterward in any research note carries its own date and version. Delete a claim if a newer test contradicts it or you can no longer verify it.
-
-[writing instructions]: https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/instructions/shared.md#writing
-[phrasing rules]: https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/shared/prompt-fragments/phrasing.md
-[prose rules]: https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/shared/prompt-fragments/prose-tics.md
-[comment rules]: https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/shared/prompt-fragments/comments.md
