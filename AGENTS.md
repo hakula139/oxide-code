@@ -2,7 +2,7 @@
 
 oxide-code is a terminal-based AI coding assistant written in Rust, inspired by [Claude Code](https://code.claude.com/docs). Its binary, `ox`, talks to LLM APIs to help developers with software engineering tasks from the terminal.
 
-This file holds the rules for every change and links the conventions for each area. Open GitHub issues track planned work.
+This file adds oxide-code's requirements to the [shared instructions]. Open GitHub issues track planned work.
 
 ## Project Layout
 
@@ -38,10 +38,8 @@ The tree lists only the top-level entries whose names leave their purpose unclea
 - Run the [verification](#verification) block before review.
 - Add new words, including those in Rust sources, to `.cspell/words.txt` in alphabetical order.
 - Update whatever the change makes stale: the `README.md` Features and Scope sections, the trust model in `SECURITY.md`, the user guides, design docs and the module map, research surveys whose open questions it settles, open issues it resolves or invalidates, and the Home Manager module in `nix/home-manager.nix` when `ox` reads a new file from the user config directory.
-- Design each change to hold up long term. Survey the reference implementations that [Writing](docs/conventions/writing.md#documentation) lists, reason from first principles toward a design better than any of them, and land any refactor the design needs first. Fix a problem in the layer that owns it, so when `ox` misbehaves in some environment, fix `ox` and leave the environment alone. Never ship a stopgap labeled temporary.
+- Survey the reference implementations that [Writing](docs/conventions/writing.md#documentation) lists when designing a change.
 - Settle design choices, including the plan for a new subsystem, without waiting for the maintainer's approval. Record each uncertain choice, with the option taken, in the main worktree's gitignored `.agents/plans/questions.md`, raise them together in the next reply to the maintainer, and delete each entry once the maintainer answers it.
-- When a change or review exposes a gap or inconsistency in the conventions, settle the standard from first principles, record it in the convention doc that owns the area, and bring existing code and docs up to it in a scoped refactor PR.
-- Issues, PRs, and their comments link only public material. Never reference gitignored or local material, such as working notes, local paths, or private repositories.
 
 ## Verification
 
@@ -60,10 +58,7 @@ cargo deny check           # Check dependencies when they change
 
 ## Code Review
 
-Review the complete change, its affected callers, and the adjacent code it touches against the convention docs. Propose a fix wherever that nearby code could be more concise or elegant, even when the fix is a large refactor. Check in particular:
+Use the [shared review procedure] and the convention docs linked above.
 
-- Cross-file consistency: parallel types use the same structure, naming, ordering, and derive traits.
-- Comment hygiene: one-line docs where one line suffices, and a comment wherever a constraint is non-obvious.
-- Visibility no wider than its use.
-- Idiomatic Rust: iterators, pattern matching, the type system, ownership, and the standard library.
-- Hand-written logic that an established crate already handles.
+[shared instructions]: https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/instructions/shared.md
+[shared review procedure]: https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/review/SKILL.md

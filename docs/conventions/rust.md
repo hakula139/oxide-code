@@ -12,7 +12,7 @@ Conventions for Rust code under `crates/`, starting with what tooling enforces.
 ## Lint Suppression
 
 - An `#[expect]` reason explains why the code triggers the lint today.
-- The Windows file ID query in `util::fs` and the Unix signal-disposition query in `ox::driver` may use a function-scoped `#[expect(unsafe_code, reason = "...")]`, since their safe APIs do not expose those queries. Keep raw handles and pointers inside those boundaries, document ownership and buffer invariants, and expose safe operations. The signal query passes a null action so it cannot change the disposition. The Unix signal test may reset its three signal dispositions in a child through `CommandExt::pre_exec`, with only async-signal-safe `libc::signal` calls and spawn error propagation in the closure. Other code remains subject to the workspace's `unsafe_code` denial.
+- The [Windows file ID query](../../crates/ox-core/src/util/fs.rs), [Unix signal-disposition query](../../crates/ox/src/driver.rs), and [Unix signal test's child-disposition reset](../../crates/ox/tests/cli/signals.rs) may use a function-scoped `#[expect(unsafe_code, reason = "...")]`. Keep raw handles and pointers inside those boundaries, document ownership and buffer invariants, and expose safe operations. Other code remains subject to the workspace's `unsafe_code` denial.
 - For complexity and size lints such as `too_many_lines`, `cognitive_complexity`, and `too_many_arguments`, extract a helper or bundle parameters that belong together into a struct. Suppress the lint only when the function is irreducibly cohesive, and explain why in the reason.
 
 ## Architecture
@@ -59,12 +59,12 @@ Keep each `tracing` message a constant phrase and pass variable data as fields, 
 
 ## Layout
 
-- Order entries such as struct fields, enum variants, and list items by meaning: the general case before its exceptions, related entries together, and dependencies before their dependents. Use alphabetical order only when no stronger relationship applies.
+Follow the shared [code layout] conventions, with these Rust additions:
+
 - List derives in the order `Debug`, `Clone`, `Copy`, `Default`, `PartialEq`, `Eq`, `PartialOrd`, `Ord`, `Hash`, followed by `Serialize`, `Deserialize`, and then other crates' derives, such as `thiserror::Error`. Give parallel types the same set.
 - Separate distinct groups of items with `// ── Section Name ──` banners using U+2500. Tests group by function in child modules, as described in [Testing](testing.md#grouping-and-naming).
 - Leave one blank line between top-level items. Closely related one-line `const` or `static` items may be grouped when they share a theme, such as the OAuth client constants. Leave one blank line after the group before unrelated items.
 - Leave one blank line before and after each banner.
-- In function bodies, use blank lines to separate logical phases such as setup, validation, execution, and result.
 - Put a single-line computation directly above its early-return guard, with no blank line between them. For a multi-line `let` binding, such as an async chain or builder, leave a blank line before the guard.
 - Open a module with its `//!` doc, then its `mod` declarations, its re-exports at any visibility as a group of their own, and its `use` groups.
 - Order `use` groups as std, external crates, workspace crates (`ox_core::`, `ox_tui::`), then internal paths (`crate::`, `super::`, and `self::`), with a blank line between groups. rustfmt sorts imports within each group, putting `self` before `super` before `crate`, but does not move imports between groups. Authors and reviewers must maintain the grouping.
@@ -93,3 +93,5 @@ Keep each `tracing` message a constant phrase and pass variable data as fields, 
 - Pin each dependency version in the root `Cargo.toml` under `[workspace.dependencies]`, then reference it from member crates with `dep.workspace = true`.
 - Add dependencies to the workspace only when a change first requires them, and prefer crates with few transitive dependencies.
 - Declare a platform-specific dependency in the crate's `Cargo.toml` under the narrowest `[target.'cfg(...)'.dependencies]` table that covers every use.
+
+[code layout]: https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/code-layout/SKILL.md
