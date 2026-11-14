@@ -155,10 +155,10 @@ pub const INTERRUPTED_MARKER: &str = "(interrupted)";
 // ── Diffs ──
 
 /// The row between two diff hunks, right-aligned in the number column.
-pub const HUNK_GAP: &str = "⋮";
+pub(crate) const HUNK_GAP: &str = "⋮";
 
 /// The separator between a diff row's number and its text, which signs a changed row.
-pub const fn diff_sign(kind: DiffLineKind) -> &'static str {
+pub(crate) const fn diff_sign(kind: DiffLineKind) -> &'static str {
     match kind {
         DiffLineKind::Context => " │ ",
         DiffLineKind::Removed => " - ",
@@ -170,7 +170,7 @@ pub const fn diff_sign(kind: DiffLineKind) -> &'static str {
 pub(crate) const DIFF_SIGN_WIDTH: usize = 3;
 
 /// The row closing a diff its row cap cut, counting the lines it left out.
-pub fn diff_cap_row(lines: usize) -> String {
+pub(crate) fn diff_cap_row(lines: usize) -> String {
     format!(
         "{} past the diff limit",
         overflow_count(lines, "line", "lines")

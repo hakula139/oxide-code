@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 /// Points the home, config, data, and state directories of `command` under `root`.
-pub(super) fn use_scratch_dirs(command: &mut Command, root: &Path) {
+pub(crate) fn use_scratch_dirs(command: &mut Command, root: &Path) {
     command
         .env("HOME", root.join("home"))
         .env("USERPROFILE", root.join("home"))
@@ -13,7 +13,7 @@ pub(super) fn use_scratch_dirs(command: &mut Command, root: &Path) {
         .env("XDG_STATE_HOME", root.join("state"));
 }
 
-pub(super) fn is_provider_var(name: &str) -> bool {
+pub(crate) fn is_provider_var(name: &str) -> bool {
     name.starts_with("ANTHROPIC_")
         || name.starts_with("CLAUDE_CODE_")
         || matches!(
@@ -33,11 +33,11 @@ pub(super) fn is_provider_var(name: &str) -> bool {
         )
 }
 
-pub(super) fn is_ox_setting(name: &str) -> bool {
+pub(crate) fn is_ox_setting(name: &str) -> bool {
     name.starts_with("OX_") && !is_provider_var(name)
 }
 
-pub(super) fn remove_inherited(command: &mut Command, predicate: impl Fn(&str) -> bool) {
+pub(crate) fn remove_inherited(command: &mut Command, predicate: impl Fn(&str) -> bool) {
     // Without USER, ox skips the Claude Code login in the macOS Keychain, and without
     // CLAUDE_CONFIG_DIR, it looks for Claude Code's login and instructions in the scratch home.
     command.env_remove("USER");

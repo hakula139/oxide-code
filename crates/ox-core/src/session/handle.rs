@@ -544,11 +544,10 @@ mod tests {
     use crate::session::handle::testing::record_write_call;
     use crate::session::state::STOPPED;
     use crate::session::store::local_testing::{
-        fail_writes, load_dump, mask_export, sql_dump, unmask,
+        fail_writes, load_dump, mask_export, saved_message_count, sql_dump, unmask,
     };
     use crate::session::store::testing::{
-        WriterBarrier, archive_test_session, isolated_store, saved_message_count,
-        seed_test_session, test_store,
+        WriterBarrier, archive_test_session, isolated_store, seed_test_session, test_store,
     };
     use crate::tool::StoredView;
     use crate::tool::tasks::testing::plan;

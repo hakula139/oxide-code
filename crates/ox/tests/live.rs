@@ -3,6 +3,9 @@
 #[path = "support/env.rs"]
 mod env;
 
+#[path = "support/files.rs"]
+mod files;
+
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -341,26 +344,10 @@ fn env_or(name: &str, default: &str) -> String {
 }
 
 fn files_under(dir: &Path) -> Vec<PathBuf> {
-    children(dir)
+    files::tree(dir)
         .into_iter()
-        .flat_map(|path| {
-            if path.is_dir() {
-                files_under(&path)
-            } else {
-                vec![path]
-            }
-        })
+        .filter(|path| !path.is_dir())
         .collect()
-}
-
-fn children(dir: &Path) -> Vec<PathBuf> {
-    fs::read_dir(dir)
-        .and_then(|entries| {
-            entries
-                .map(|entry| entry.map(|entry| entry.path()))
-                .collect()
-        })
-        .unwrap_or_else(|error| panic!("list {}: {error}", dir.display()))
 }
 
 fn json_lines(text: &str) -> Vec<Value> {

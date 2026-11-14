@@ -519,7 +519,7 @@ pub(crate) mod local_testing {
 
     use super::search::{SearchRoot, search_arg};
     use super::spill::run_capped;
-    use super::{Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec};
+    use super::{ApprovalBody, ApprovalPreview, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec};
     use crate::file_tracker::FileTracker;
     use crate::permission::rule::Rule;
     use crate::permission::{Mode, PermissionClass, Policy, ReadFilter, Workspace};
@@ -586,6 +586,14 @@ pub(crate) mod local_testing {
         SearchRoot::new(base, path, ctx.workspace)
     }
 
+    /// The approval preview of a foreground `bash` call that runs `command`.
+    pub(super) fn bash_preview(command: &str) -> ApprovalPreview {
+        ApprovalPreview {
+            title: "Bash".to_owned(),
+            body: ApprovalBody::Command(command.to_owned()),
+        }
+    }
+
     impl ToolRegistry {
         /// [`run`] for valid input to the tool registered as `name`, through the output cap.
         pub(crate) async fn run_input(
@@ -620,16 +628,8 @@ pub mod testing {
 
     use super::bash::BashTool;
     use super::diff::{Change, diff_with_changes};
-    use super::{ApprovalBody, ApprovalPreview, Tool, ToolRegistry};
+    use super::{Tool, ToolRegistry};
     use crate::tool::view::{DiffLine, DiffLineKind, EditDiff};
-
-    /// The approval preview of a foreground `bash` call that runs `command`.
-    pub fn bash_preview(command: &str) -> ApprovalPreview {
-        ApprovalPreview {
-            title: "Bash".to_owned(),
-            body: ApprovalBody::Command(command.to_owned()),
-        }
-    }
 
     /// A registry of `tools` followed by a `bash` tool with background shells of its own.
     pub fn bash_registry(mut tools: Vec<Box<dyn Tool>>) -> ToolRegistry {

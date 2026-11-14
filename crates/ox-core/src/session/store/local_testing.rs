@@ -1,22 +1,29 @@
-//! Store fixtures only this crate's tests use: the deterministic SQL dump and export masks the
-//! session format tests snapshot, and the loaders that read them back.
+//! Store fixtures only this crate's tests use.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
+use anyhow::Result;
 use regex::{Captures, Regex};
 use rusqlite::Connection;
 use rusqlite::types::Value;
 use uuid::Uuid;
 
 use super::commit::{Commit, Head, MessageRow, Record, Saved, SessionRow, commit, find_head};
+use super::load::{SessionData, load};
 use super::testing::test_store;
 use super::{DB_FILE, SessionStore};
 use crate::message::Message;
 
 /// The columns that hold Unix-millisecond timestamps.
 const TIME_COLUMNS: [&str; 3] = ["created_at", "updated_at", "archived_at"];
+
+impl SessionStore {
+    pub(crate) fn load_session_data(&self, session_id: &str) -> Result<SessionData> {
+        load(&mut self.connect()?, session_id)
+    }
+}
 
 /// A deterministic SQL dump of `store`: its revision, the schema from `sqlite_schema`, then every
 /// row of each table in insertion order. UUIDs are numbered `<UUID-n>` in order of appearance, so a
@@ -205,4 +212,9 @@ pub(crate) fn load_dump(dir: &Path, dump: &str) -> SessionStore {
         .execute_batch(dump)
         .unwrap();
     test_store(dir)
+}
+
+/// Number of messages that resuming the session `session_id` loads.
+pub(crate) fn saved_message_count(store: &SessionStore, session_id: &str) -> usize {
+    store.load_session_data(session_id).unwrap().messages.len()
 }
