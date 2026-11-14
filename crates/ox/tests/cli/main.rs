@@ -4,6 +4,9 @@
 #[path = "../support/env.rs"]
 mod env;
 
+#[path = "../support/files.rs"]
+mod files;
+
 mod config_check;
 mod headless;
 mod native_auth;
@@ -25,6 +28,8 @@ use ox_core::session::resolver::export_session;
 use ox_core::session::store::SessionStore;
 use ox_core::session::store::listing::{ArchiveState, ListScope, ProjectScope, SessionInfo};
 use ox_core::util::tls::testing::TEST_CA_PATH;
+
+use self::files::tree;
 
 fn ox(root: &Path) -> Command {
     let mut ox = Command::new(env!("CARGO_BIN_EXE_ox"));
@@ -60,23 +65,6 @@ fn write_user_config(root: &Path, body: &str) -> PathBuf {
     let file = dir.join("config.toml");
     std::fs::write(&file, body).expect("the scratch config file can be written");
     file
-}
-
-/// Every path under `root`, sorted.
-fn tree(root: &Path) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(&dir).expect("the scratch directory can be listed") {
-            let path = entry.expect("the scratch entry can be read").path();
-            if path.is_dir() {
-                pending.push(path.clone());
-            }
-            paths.push(path);
-        }
-    }
-    paths.sort();
-    paths
 }
 
 fn assert_private_auth_run(root: &Path, output: &Output) {

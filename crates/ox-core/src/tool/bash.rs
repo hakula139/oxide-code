@@ -798,9 +798,8 @@ mod tests {
     use super::testing::{record_pid, until_gone, until_recorded};
     use super::*;
     use crate::config::credentials::secret_env_vars;
-    use crate::tool::local_testing::{self, ctx, spill_path, temp_ctx};
+    use crate::tool::local_testing::{self, bash_preview, ctx, spill_path, temp_ctx};
     use crate::tool::spill::MAX_OUTPUT_BYTES;
-    use crate::tool::testing::bash_preview;
     #[cfg(unix)]
     use crate::util::path::local_testing::canonical_tempdir;
 

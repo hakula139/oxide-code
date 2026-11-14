@@ -18,6 +18,7 @@ use super::{EngineUpdate, Modal, ModalAction, ModalKey, UpdateReply};
 use crate::action::Action;
 use crate::saturating_u16;
 use crate::theme::Theme;
+use crate::viewport::Viewport;
 use crate::wrap::wrap_line;
 
 pub(crate) struct QuestionModal {
@@ -26,9 +27,8 @@ pub(crate) struct QuestionModal {
     selected: usize,
     editor: LineEditor,
     acceptance: Acceptance,
-    scroll: usize,
-    rows: usize,
-    max_scroll: usize,
+    viewport: Viewport,
+    body_len: usize,
     focus_changed: bool,
     deadline: Option<PromptDeadline>,
 }
@@ -41,9 +41,8 @@ impl QuestionModal {
             question,
             editor: LineEditor::new(""),
             acceptance: Acceptance::default(),
-            scroll: 0,
-            rows: 0,
-            max_scroll: 0,
+            viewport: Viewport::default(),
+            body_len: 0,
             focus_changed: true,
             deadline: None,
         }
@@ -172,20 +171,17 @@ impl Modal for QuestionModal {
             ..area
         };
         let focus = if editing { editor_row } else { selected_row };
-        self.rows = usize::from(body_area.height);
-        self.max_scroll = lines.len().saturating_sub(self.rows);
-        if self.focus_changed {
-            if focus < self.scroll {
-                self.scroll = focus;
-            } else if focus >= self.scroll + self.rows {
-                self.scroll = focus.saturating_add(1).saturating_sub(self.rows);
-            }
+        self.body_len = lines.len();
+        let cursor = (self.focus_changed && !body_area.is_empty()).then_some(focus);
+        let visible = self
+            .viewport
+            .window(self.body_len, usize::from(body_area.height), cursor);
+        if !body_area.is_empty() {
             self.focus_changed = false;
         }
-        self.scroll = self.scroll.min(self.max_scroll);
-        let scroll = self.scroll;
+        let scroll = visible.start;
         self.acceptance
-            .update(!body_area.is_empty() && focus >= scroll && focus < scroll + self.rows);
+            .update(!body_area.is_empty() && visible.contains(&focus));
         frame.render_widget(
             Paragraph::new(lines)
                 .scroll((saturating_u16(scroll), 0))
@@ -202,7 +198,7 @@ impl Modal for QuestionModal {
             .style(theme.surface()),
             footer_area,
         );
-        if editing && editor_row >= scroll && editor_row < scroll + self.rows {
+        if editing && visible.contains(&editor_row) {
             self.editor.place_cursor(
                 frame,
                 body_area,
@@ -220,12 +216,14 @@ impl Modal for QuestionModal {
         let choices = self.question.options.len();
         match event.code {
             KeyCode::PageUp | KeyCode::PageDown => {
-                let page = self.rows.saturating_sub(1).max(1);
-                self.scroll = if event.code == KeyCode::PageUp {
-                    self.scroll.saturating_sub(page)
+                let page = isize::try_from(self.viewport.page().saturating_sub(1).max(1))
+                    .unwrap_or(isize::MAX);
+                let delta = if event.code == KeyCode::PageUp {
+                    -page
                 } else {
-                    self.scroll.saturating_add(page).min(self.max_scroll)
+                    page
                 };
+                self.viewport.scroll_by(delta, self.body_len);
                 self.acceptance.reset();
                 ModalKey::Consumed
             }
@@ -327,6 +325,45 @@ mod tests {
 
     mod render {
         use super::*;
+
+        #[test]
+        fn restoring_the_body_shows_the_pending_answer_and_rearms_acceptance() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+            use ratatui::layout::Position;
+
+            let mut modal = modal();
+            modal.question.question = "Review the output before choosing a color. ".repeat(8);
+            render_rows(&mut modal, 30, 12);
+            modal.handle_paste("custom");
+            render_rows(&mut modal, 30, 2);
+            modal.acceptance.expire();
+            let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+            assert!(matches!(modal.handle_key(&enter), ModalKey::Consumed));
+            let mut terminal = Terminal::new(TestBackend::new(30, 12)).unwrap();
+
+            terminal
+                .draw(|frame| {
+                    modal.render(frame, Rect::new(0, 0, 30, 12), &Theme::default());
+                })
+                .unwrap();
+
+            let rows = crate::testing::buffer_rows(terminal.backend().buffer());
+            let answer_row = rows
+                .iter()
+                .position(|row| row.contains("/ custom"))
+                .unwrap();
+            assert_eq!(
+                terminal.get_cursor_position().unwrap(),
+                Position::new(8, u16::try_from(answer_row).unwrap()),
+            );
+            assert!(matches!(modal.handle_key(&enter), ModalKey::Consumed));
+            modal.acceptance.expire();
+            assert_eq!(
+                submitted(modal.handle_key(&enter)),
+                QuestionAnswer::Answered("custom".to_owned()),
+            );
+        }
 
         #[test]
         fn a_short_narrow_view_keeps_wrapped_controls_visible_while_the_question_scrolls() {

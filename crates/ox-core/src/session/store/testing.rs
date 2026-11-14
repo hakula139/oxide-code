@@ -10,7 +10,6 @@ use rusqlite::TransactionBehavior;
 use time::OffsetDateTime;
 
 use super::listing::{ArchiveState, ListScope, ProjectScope, SessionInfo};
-use super::load::{SessionData, load};
 use super::{CONTENT_VERSION, SessionStore, to_millis};
 use crate::message::Message;
 
@@ -38,10 +37,6 @@ impl SessionStore {
     /// Every resumable unarchived session in the home project, most recently active first.
     pub fn list(&self) -> Result<Vec<SessionInfo>> {
         Ok(self.list_paged(None, ListScope::default())?.into_sessions())
-    }
-
-    pub(crate) fn load_session_data(&self, session_id: &str) -> Result<SessionData> {
-        load(&mut self.connect()?, session_id)
     }
 }
 
@@ -166,26 +161,6 @@ pub fn archive_test_session(store: &SessionStore, session_id: &str) {
         Some(true),
         "session {session_id} is seeded and active"
     );
-}
-
-/// Number of messages that resuming the session `session_id` loads.
-pub fn saved_message_count(store: &SessionStore, session_id: &str) -> usize {
-    store
-        .load_session_data(session_id)
-        .expect("the session loads")
-        .messages
-        .len()
-}
-
-/// The messages that resuming the session `session_id` loads, in their JSON form.
-pub fn saved_messages(store: &SessionStore, session_id: &str) -> Vec<serde_json::Value> {
-    store
-        .load_session_data(session_id)
-        .expect("the session loads")
-        .messages
-        .iter()
-        .map(|message| serde_json::to_value(message).expect("a message serializes"))
-        .collect()
 }
 
 /// IDs of the home project's sessions in the given archive state, most recently active first.

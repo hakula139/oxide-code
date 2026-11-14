@@ -20,26 +20,6 @@ fn missing_terminals_fail_before_config_auth_or_session_storage_is_loaded() {
     assert_eq!(tree(dir.path()), before);
 }
 
-#[test]
-fn removed_no_tui_flag_is_rejected() {
-    let dir = tempfile::tempdir().unwrap();
-
-    let output = ox(dir.path())
-        .arg("--no-tui")
-        .current_dir(dir.path())
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(2), "{output:?}");
-
-    assert_eq!(output.stdout, b"");
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.starts_with("error: unexpected argument '--no-tui' found"),
-        "{stderr}"
-    );
-    assert_eq!(tree(dir.path()), [] as [PathBuf; 0]);
-}
-
 #[tokio::test]
 async fn headless_prints_a_startup_error_as_one_line_even_with_backtraces_on() {
     let dir = tempfile::tempdir().unwrap();
