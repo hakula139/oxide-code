@@ -100,12 +100,8 @@
                 cargo = rustDevToolchain;
                 clippy = rustDevToolchain;
               };
-              # `.cargo/config.toml` already denies warnings, and matching `cargo clippy`'s
-              # arguments lets the hook and a plain run share one build cache.
-              settings.denyWarnings = false;
             };
 
-            nu-check.enable = true;
             prettier.enable = true;
 
             rustfmt = {
@@ -146,16 +142,13 @@
             inputsFrom = [ preCommit ];
           };
 
-          # CI's Dependency Check and formula rendering run in this shell, which leaves out the
-          # pinned toolchain so that every tool comes from the nixpkgs binary cache. `cargo deny`
-          # needs only `cargo metadata`, which nixpkgs' cargo serves for this workspace.
+          # Use nixpkgs' cargo for cargo-deny's metadata so CI needs no pinned toolchain build.
           lint = pkgs.mkShell {
             name = "oxide-code-lint";
 
             packages = [
               pkgs.cargo
               pkgs.cargo-deny
-              dk.nushell
             ];
           };
 

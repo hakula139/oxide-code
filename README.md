@@ -54,8 +54,7 @@ Releases follow the [versioning policy](RELEASING.md#versioning), and stable rel
 On Apple Silicon macOS and x86_64 Linux, install with Homebrew:
 
 ```bash
-brew tap hakula139/oxide-code https://github.com/hakula139/oxide-code
-brew install oxide-code
+brew install hakula139/tap/oxide-code
 ```
 
 [Installation](docs/guide/install.md) covers the prebuilt binary, Cargo, Nix, Windows, the Home Manager module, and updating and uninstalling.
