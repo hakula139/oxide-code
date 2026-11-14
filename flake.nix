@@ -152,10 +152,10 @@
           lint = pkgs.mkShell {
             name = "oxide-code-lint";
 
-            packages = with pkgs; [
-              cargo
-              cargo-deny
-              nushell
+            packages = [
+              pkgs.cargo
+              pkgs.cargo-deny
+              dk.nushell
             ];
           };
 

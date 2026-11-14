@@ -5,8 +5,7 @@
     {
       "matchManagers": ["rust-toolchain"],
       "groupName": "flake inputs",
-      "semanticCommitScope": "flake",
-      "automerge": true
+      "semanticCommitScope": "flake"
     },
     {
       "description": "Matches the unicode-width bound in Cargo.toml, which explains it.",
