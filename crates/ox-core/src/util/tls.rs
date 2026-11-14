@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
-use std::{cell::Cell, collections::HashSet, fmt, sync::Arc};
+use std::{cell::Cell, collections::HashSet, fmt, sync::Arc, time::Duration};
 
 use anyhow::{Context as _, Result, bail};
 use reqwest::ClientBuilder;
@@ -452,11 +452,7 @@ impl AppleTrust for SecurityFramework {
             .as_secs()
             .checked_sub(CF_EPOCH_UNIX_SECS)
             .ok_or(Error::FailedToGetCurrentTime)?;
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "seconds since 2001 stay far below 2^53, which f64 holds exactly"
-        )]
-        let since_cf_epoch = since_cf_epoch as f64;
+        let since_cf_epoch = Duration::from_secs(since_cf_epoch).as_secs_f64();
         trust
             .set_trust_verify_date(&CFDate::new(since_cf_epoch))
             .map_err(general)?;
