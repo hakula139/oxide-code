@@ -5,8 +5,7 @@
 On Apple Silicon macOS and x86_64 Linux, install with Homebrew:
 
 ```bash
-brew tap hakula139/oxide-code https://github.com/hakula139/oxide-code
-brew install oxide-code
+brew install hakula139/tap/oxide-code
 ```
 
 See [Installation](install.md) for the prebuilt binary, Cargo, Nix, and other platforms.
