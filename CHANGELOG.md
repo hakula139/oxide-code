@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0-alpha.11](https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.10...v0.1.0-alpha.11) - 2026-11-15
+## [0.1.0-alpha.11] - 2026-11-15
 
 ### Highlights
 
@@ -29,9 +29,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - _(prompt)_ Describe `auto` and `manual` behavior accurately in the System prompt, without claiming the wrong default, workspace-edit permission, or automatic approval for unanalyzable syntax ([#854](https://github.com/hakula139/oxide-code/pull/854))
 - _(release)_ Preserve existing Homebrew formula branch edits and recover a missing pull request when a workflow rerun follows a successful push ([#864](https://github.com/hakula139/oxide-code/pull/864))
 
-[Full changelog](https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.10...v0.1.0-alpha.11)
+[0.1.0-alpha.11]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.10...v0.1.0-alpha.11
 
-## [0.1.0-alpha.10](https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.9..v0.1.0-alpha.10) - 2026-11-01
+## [0.1.0-alpha.10] - 2026-11-01
 
 ### Highlights
 
@@ -80,7 +80,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - _(tui)_ Reparse only the growing tail of streamed thinking and summaries ([#716](https://github.com/hakula139/oxide-code/pull/716))
 - _(prompt)_ Tell the model it runs in oxide-code and which permission mode is active ([#735](https://github.com/hakula139/oxide-code/pull/735), [#784](https://github.com/hakula139/oxide-code/pull/784))
 
-## [0.1.0-alpha.9](https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.8..v0.1.0-alpha.9) - 2026-10-25
+[0.1.0-alpha.10]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.9..v0.1.0-alpha.10
+
+## [0.1.0-alpha.9] - 2026-10-25
 
 ### Highlights
 
@@ -97,7 +99,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - _(model)_ Explain that unknown models can auto-compact when a token threshold is set, while cost tracking is unavailable ([#657](https://github.com/hakula139/oxide-code/pull/657))
 - _(permission)_ Hold recursive searches when a read rule matches a descendant. For example, `grep -r PRIVATE ~` now asks or denies when a rule protects `~/.ssh` ([#665](https://github.com/hakula139/oxide-code/pull/665))
 
-## [0.1.0-alpha.8](https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.7..v0.1.0-alpha.8) - 2026-10-25
+[0.1.0-alpha.9]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.8..v0.1.0-alpha.9
+
+## [0.1.0-alpha.8] - 2026-10-25
 
 ### Highlights
 
@@ -125,7 +129,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - _(release)_ Prevent reruns of older prereleases from downgrading the Homebrew formula. The formula follows GitHub's latest stable release, or the newest published prerelease before the first stable release. ([#640](https://github.com/hakula139/oxide-code/pull/640))
 - _(nix)_ Include the project license and third-party notices in Nix installations under `share/doc/oxide-code`. ([#646](https://github.com/hakula139/oxide-code/pull/646))
 
-## [0.1.0-alpha.7](https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.6..v0.1.0-alpha.7) - 2026-10-23
+[0.1.0-alpha.8]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.7..v0.1.0-alpha.8
+
+## [0.1.0-alpha.7] - 2026-10-23
 
 ### Highlights
 
@@ -166,7 +172,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - _(permission)_ `yolo` mode runs tool calls unless a deny rule holds them. Built-in holds, such as protected paths and forced recursive `rm`, no longer prompt or deny, and a command ox cannot analyze runs. Your own ask rules still prompt in an attended session and are denied in an unattended run ([#587](https://github.com/hakula139/oxide-code/pull/587), [#614](https://github.com/hakula139/oxide-code/pull/614))
 
-## [0.1.0-alpha.6](https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.5..v0.1.0-alpha.6) - 2026-10-23
+[0.1.0-alpha.7]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.6..v0.1.0-alpha.7
+
+## [0.1.0-alpha.6] - 2026-10-23
 
 ### Highlights
 
@@ -251,7 +259,9 @@ The project fixes security issues publicly before 1.0, and the first two entries
 - _(session)_ Stop writing a title's source and a compaction's trigger to session files, since nothing read them. Older session files still load, but binaries through v0.1.0-alpha.5 require a title's source, so they list sessions titled by this build as untitled ([#554](https://github.com/hakula139/oxide-code/pull/554))
 - _(tui)_ Sleep between timed changes while idle ([#535](https://github.com/hakula139/oxide-code/pull/535))
 
-## [0.1.0-alpha.5](https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.4..v0.1.0-alpha.5) - 2026-10-20
+[0.1.0-alpha.6]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.5..v0.1.0-alpha.6
+
+## [0.1.0-alpha.5] - 2026-10-20
 
 ### Highlights
 
@@ -277,7 +287,9 @@ The project fixes security issues publicly before 1.0, and the first two entries
 - _(theme)_ Make tool output, thinking, hints, and unselected popup and picker rows readable in every built-in theme, and give inline code, blockquotes, the input box, and the idle `Ready` state distinct colors. Blockquotes show a `│` bar and muted text, keeping the thinking style inside thinking blocks, and the input box's rules take the accent color while Enter queues the prompt, such as during a turn. Each dark theme's selection highlight now keeps dim text legible on it ([#425](https://github.com/hakula139/oxide-code/pull/425), [#429](https://github.com/hakula139/oxide-code/pull/429))
 - _(prompt)_ Have the model run the checks that prove a task before reporting it done, then say what it verified and what it did not. It reports findings without editing files on review-only requests, inspects the actual output after a failure before trying again, never prints credentials, writes comments that describe the code without narrating the change, writes tests that fail for a plausible bug, and commits only when asked. Compaction summaries record which checks passed, failed, or have not run ([#409](https://github.com/hakula139/oxide-code/pull/409))
 
-## [0.1.0-alpha.4](https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.3..v0.1.0-alpha.4) - 2026-10-18
+[0.1.0-alpha.5]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.4..v0.1.0-alpha.5
+
+## [0.1.0-alpha.4] - 2026-10-18
 
 ### Highlights
 
@@ -327,7 +339,9 @@ The project fixes security issues publicly before 1.0, and the first two entries
 
 - _(tool)_ Run consecutive read, grep, and glob calls in parallel after their permission checks ([#276](https://github.com/hakula139/oxide-code/pull/276))
 
-## [0.1.0-alpha.3](https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.2..v0.1.0-alpha.3) - 2026-10-17
+[0.1.0-alpha.4]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.3..v0.1.0-alpha.4
+
+## [0.1.0-alpha.3] - 2026-10-17
 
 ### Highlights
 
@@ -388,7 +402,9 @@ The project fixes security issues publicly before 1.0, and the first two entries
 - _(tui)_ Keep long chats responsive while streaming, scrolling, resizing, and changing themes by caching rendered blocks and rendering only those near the viewport ([#111](https://github.com/hakula139/oxide-code/pull/111), [#244](https://github.com/hakula139/oxide-code/pull/244))
 - _(session)_ Find the session targeted by `ox -c`, `/resume`, and `/delete` without parsing every transcript ([#182](https://github.com/hakula139/oxide-code/pull/182))
 
-## [0.1.0-alpha.2](https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.1..v0.1.0-alpha.2) - 2026-06-25
+[0.1.0-alpha.3]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.2..v0.1.0-alpha.3
+
+## [0.1.0-alpha.2] - 2026-06-25
 
 ### Added
 
@@ -411,7 +427,9 @@ The project fixes security issues publicly before 1.0, and the first two entries
 
 - _(deps)_ Bump idna from 3.11 to 3.15 (#88)
 
-## [0.1.0-alpha.1](https://github.com/hakula139/oxide-code/releases/tag/v0.1.0-alpha.1) - 2026-05-09
+[0.1.0-alpha.2]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.1..v0.1.0-alpha.2
+
+## [0.1.0-alpha.1] - 2026-05-09
 
 ### Added
 
@@ -470,3 +488,5 @@ The project fixes security issues publicly before 1.0, and the first two entries
 
 - _(deps)_ Bump rustls-webpki and rand for Dependabot alerts (#17)
 - _(deps)_ Bump rustls-webpki from 0.103.12 to 0.103.13 (#34)
+
+[0.1.0-alpha.1]: https://github.com/hakula139/oxide-code/releases/tag/v0.1.0-alpha.1
