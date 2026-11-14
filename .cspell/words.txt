@@ -66,6 +66,7 @@ nixfmt
 nixos
 nixpkgs
 nocapture
+nohup
 noprefix
 notadb
 ntfs
@@ -111,6 +112,7 @@ tildifies
 tildify
 toolu
 trustd
+unanalyzable
 unarchived
 unarchives
 unarchiving
