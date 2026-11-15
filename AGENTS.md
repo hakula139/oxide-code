@@ -25,7 +25,7 @@ The tree lists only the top-level entries whose names leave their purpose unclea
 
 | When the change touches                                   | Read                                                                               |
 | --------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| Rust code                                                 | [Rust](docs/conventions/rust.md) and the [module map](docs/design/architecture.md) |
+| Rust sources or Cargo manifests                           | [Rust](docs/conventions/rust.md) and the [module map](docs/design/architecture.md) |
 | Tests                                                     | [Testing](docs/conventions/testing.md)                                             |
 | Comments, docs, or text that users or the model read      | [Writing](docs/conventions/writing.md)                                             |
 | Commits, branches, PRs, or issues                         | [GitHub](docs/conventions/github.md)                                               |
