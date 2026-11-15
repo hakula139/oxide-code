@@ -224,17 +224,10 @@ jobs:
             release-assets/oxide-code-x86_64-pc-windows-msvc.zip
             release-assets/oxide-code-x86_64-pc-windows-msvc.sha256
 
-  formula:
-    name: Check Homebrew Formula
+  homebrew:
+    name: Notify Homebrew Tap
     if: github.ref_type == 'tag'
     needs: publish
-    uses: ./.github/workflows/formula.yml
-    with:
-      tag: ${{ github.ref_name }}
-
-  homebrew:
-    name: Update Homebrew Formula
-    needs: [publish, formula]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -244,23 +237,27 @@ jobs:
         with:
           client-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: hakula139
+          repositories: homebrew-tap
+          permission-actions: write
 
-      - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          ref: main
-          token: ${{ steps.app-token.outputs.token }}
-
-      - name: Download formula
-        uses: actions/download-artifact@v8
-        with:
-          name: formula
-          path: ${{ runner.temp }}/formula
-
-      - name: Open formula PR
+      - name: Notify tap workflow
+        uses: actions/github-script@v9
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: bash scripts/open-homebrew-pr.sh "$RUNNER_TEMP/formula/oxide-code.rb"
+          RELEASE_TAG: ${{ github.ref_name }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'hakula139',
+              repo: 'homebrew-tap',
+              workflow_id: 'update.yml',
+              ref: 'main',
+              inputs: {
+                formula: 'oxide-code',
+                tag: process.env.RELEASE_TAG,
+              },
+            });
 
   notes:
     name: Republish Release Notes

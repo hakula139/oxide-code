@@ -14,10 +14,18 @@ How to install `ox` on macOS, Linux, and Windows. For first-run setup once insta
 
 | Method                              | Platforms                                     | Builds from source |
 | ----------------------------------- | --------------------------------------------- | ------------------ |
-| [Prebuilt binary](#prebuilt-binary) | Apple Silicon macOS, x86_64 Linux and Windows | No                 |
 | [Homebrew](#homebrew)               | Apple Silicon macOS, x86_64 Linux             | No                 |
+| [Prebuilt binary](#prebuilt-binary) | Apple Silicon macOS, x86_64 Linux and Windows | No                 |
 | [Cargo](#from-source-via-cargo)     | Any platform Rust supports                    | Yes                |
 | [Nix](#nix)                         | Linux and Apple Silicon macOS                 | Yes                |
+
+### Homebrew
+
+The formula installs the prebuilt release binary on Apple Silicon macOS and x86_64 Linux:
+
+```bash
+brew install hakula139/tap/oxide-code
+```
 
 ### Prebuilt Binary
 
@@ -49,15 +57,6 @@ Each release includes a build provenance attestation linking each archive to the
 curl -fsSLO "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz"
 gh attestation verify oxide-code-aarch64-apple-darwin.tar.gz --repo hakula139/oxide-code
 tar -xzf oxide-code-aarch64-apple-darwin.tar.gz
-```
-
-### Homebrew
-
-The formula installs the prebuilt release binary on Apple Silicon macOS and x86_64 Linux:
-
-```bash
-brew tap hakula139/oxide-code https://github.com/hakula139/oxide-code
-brew install oxide-code
 ```
 
 ### From Source via Cargo
@@ -150,7 +149,7 @@ ox --version
 | Install method               | Update command                                                                                        |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------- |
 | Prebuilt binary              | Re-run the download commands with `VERSION` set to the new tag                                        |
-| Homebrew                     | `brew update && brew upgrade oxide-code`                                                              |
+| Homebrew                     | `brew upgrade hakula139/tap/oxide-code`                                                               |
 | Cargo, from `main`           | `cargo install --git https://github.com/hakula139/oxide-code --locked --force`                        |
 | Cargo, pinned to a tag       | The same command with `--tag` set to the new tag                                                      |
 | Nix profile, from `main`     | `nix profile upgrade oxide-code`                                                                      |
@@ -162,7 +161,7 @@ ox --version
 | Install method  | Uninstall command                                                                                  |
 | --------------- | -------------------------------------------------------------------------------------------------- |
 | Prebuilt binary | `sudo rm /usr/local/bin/ox` (or wherever you moved it)                                             |
-| Homebrew        | `brew uninstall oxide-code && brew untap hakula139/oxide-code`                                     |
+| Homebrew        | `brew uninstall oxide-code`                                                                        |
 | Cargo           | `cargo uninstall ox`, or `cargo uninstall oxide-code` if `cargo install --list` lists `oxide-code` |
 | Nix profile     | `nix profile remove oxide-code`                                                                    |
 | Home Manager    | Remove the module import or set `programs.oxide-code.enable = false`, then switch                  |

@@ -1,8 +1,6 @@
 # Releasing
 
-Pushing a tag that matches `v[0-9]+.*` starts `.github/workflows/release.yml`, which waits for a passing CI run on the tagged commit, builds and checks every target, and publishes a GitHub Release with the tag's `CHANGELOG.md` section as its notes. A tag with a prerelease suffix, such as `v0.1.0-rc.1`, publishes a prerelease.
-
-Before publication, devkit's `nix-cache.yml` pushes the flake's x86_64 Linux and Apple Silicon macOS packages to the `hakula` Cachix cache and pins each as `oxide-code-<tag>-<system>` to retain its closure. [Recover a release](https://github.com/hakula139/devkit/blob/v3/docs/releasing.md#recover-a-release) shows how to restore a deleted pin.
+Follow the [shared release procedure](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/release/SKILL.md) and devkit's [release guide](https://github.com/hakula139/devkit/blob/v3/docs/releasing.md). This page records oxide-code's versioning, release preparation, and publication contracts.
 
 ## Versioning
 
@@ -31,7 +29,7 @@ Before 0.1.0, config, environment variable, and session format changes may freel
 
 ## Release Preparation
 
-Follow the [shared release procedure](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/release/SKILL.md) for changelog curation, the release PR, and tag approval. Devkit's [release guide](https://github.com/hakula139/devkit/blob/v3/docs/releasing.md) documents changelog drafting and CI recovery. Use its shared changelog configuration, with these repository-specific changes:
+Use devkit's shared changelog configuration.
 
 Security fixes describe the gap, affected releases, and published advisory as [SECURITY.md](SECURITY.md) promises. Add an advisory published later to every affected changelog section through a correction PR.
 
@@ -59,11 +57,11 @@ After the [Release workflow](https://github.com/hakula139/oxide-code/actions/wor
 - Every [target](#targets) archive and its `.sha256` sidecar are attached, and `gh attestation verify <archive> --repo hakula139/oxide-code` passes for one of them.
 - `nix run github:hakula139/oxide-code/vX.Y.Z -- --version` prints the version on one host.
 
-The workflow then renders the Homebrew formula from the release sidecars, runs `brew test` on macOS and Linux, and opens a `chore(release): refresh Homebrew formula for vX.Y.Z` PR. Merging that PR through the shared Git workflow is the final release step. The formula follows the latest release, or the newest prerelease until the first stable release, so other tags skip this job. A workflow rerun reuses an open formula PR or opens one with the rebuilt checksums.
+Successful publication notifies the [Homebrew tap](https://github.com/hakula139/homebrew-tap#maintain-formulae). Check its formula update PR.
 
 ## Recovery
 
-Follow the [shared release procedure](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/release/SKILL.md) and devkit's [release guide](https://github.com/hakula139/devkit/blob/v3/docs/releasing.md) for recovery. Asset rebuilds use the original commit for the same tag. A source change requires a new version and release PR.
+Asset rebuilds use the original commit for the same tag. A source change requires a new version and release PR.
 
 ## Stable Gates for 0.1.0
 
@@ -87,5 +85,5 @@ The `v0.1.0` release PR also switches the install snippets to `releases/latest/d
 
 The build matrix in `release.yml` lists the targets. Each release attaches one archive per target with a `.sha256` sidecar and a build provenance attestation, and release asset names belong to the [stability surface](#stability-surface).
 
-- The release jobs read the platform floors from `docs/guide/install.md`, so keep its `Linux with glibc <version> or later` and `**macOS**: <version> or later` wording. The Linux job fails when the binary needs a newer glibc, which a runner image update can cause, so pin the previous image or raise the floor. The macOS job fails when the binary's minimum macOS differs from the floor, and raising it also changes `MACOSX_DEPLOYMENT_TARGET` in `release.yml` and `depends_on macos:` in `scripts/oxide-code-formula.rb`.
+- The release jobs read the platform floors from `docs/guide/install.md`, so keep its `Linux with glibc <version> or later` and `**macOS**: <version> or later` wording. The Linux job fails when the binary needs a newer glibc, which a runner image update can cause, so pin the previous image or raise the floor. The macOS job fails when the binary's minimum macOS differs from the floor, and raising it also changes `MACOSX_DEPLOYMENT_TARGET` in `release.yml` and `depends_on macos:` in the [tap formula template](https://github.com/hakula139/homebrew-tap/blob/main/scripts/formula/templates/oxide-code.rb).
 - Add a target by extending the matrix. Each target needs a runner that executes its binary, since every build job checks its archive there.
