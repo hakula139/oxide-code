@@ -231,6 +231,7 @@ fn token_error_details(body: &str) -> Option<String> {
 mod tests {
     use std::path::Path;
 
+    use indoc::indoc;
     use wiremock::matchers::{method, path as wm_path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -415,8 +416,11 @@ mod tests {
                     Some("invalid_grant"),
                 ),
                 (
-                    "<!DOCTYPE html>\n<html><head><title>503 Service Unavailable</title>\n\
-                     <style>body { margin: 0 }</style></head><body>...</body></html>",
+                    indoc! {"
+                        <!DOCTYPE html>
+                        <html><head><title>503 Service Unavailable</title>
+                        <style>body { margin: 0 }</style></head><body>...</body></html>"
+                    },
                     Some("503 Service Unavailable"),
                 ),
                 ("", None),
