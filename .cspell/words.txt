@@ -116,8 +116,6 @@ unanalyzable
 unarchived
 unarchives
 unarchiving
-uninlined
-untap
 unwritable
 wakatime
 wakeup

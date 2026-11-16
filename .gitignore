@@ -21,6 +21,6 @@ result-*
 
 # Assistant local state
 .agents/plans/
-.claude/agent-memory-local
+**/.claude/agent-memory-local/
 .claude/plans
 **/.claude/settings.local.json
