@@ -44,13 +44,27 @@
       rust-overlay,
       devkit,
       home-manager,
-      ...
     }:
     let
+      platformKey = p: {
+        inherit (p) config isStatic;
+      };
+
       packageFor =
         pkgs:
-        self.packages.${pkgs.stdenv.hostPlatform.system}.oxide-code
-          or (pkgs.callPackage ./nix/package.nix { });
+        let
+          inherit (pkgs) stdenv;
+          locked = self.packages.${stdenv.hostPlatform.system}.oxide-code or null;
+        in
+        if
+          locked != null
+          && platformKey stdenv.buildPlatform == platformKey locked.stdenv.buildPlatform
+          && platformKey stdenv.hostPlatform == platformKey locked.stdenv.hostPlatform
+          && stdenv.hostPlatform == stdenv.targetPlatform
+        then
+          locked
+        else
+          pkgs.callPackage ./nix/package.nix { };
 
       # A key lets the module system deduplicate the module when it is imported twice.
       homeModuleKey = "${self}/flake.nix#homeModules.default";
@@ -59,7 +73,7 @@
     # Overlay and Home Manager Module
     # ----------------------------------------------------------------------------------------------
     {
-      overlays.default = final: _: { oxide-code = packageFor final; };
+      overlays.default = _: prev: { oxide-code = packageFor prev; };
 
       homeModules.default = {
         _class = "homeManager";
@@ -176,17 +190,35 @@
           package = oxide-code;
 
           home-manager = import ./nix/home-manager-tests.nix {
-            inherit home-manager oxide-code pkgs;
+            inherit pkgs home-manager oxide-code;
             homeModule = self.homeModules.default;
           };
 
           overlay =
             let
-              callerPkgs = pkgs // {
-                callPackage = _: _: throw "consumer package reconstruction";
-              };
+              consumerPkgs =
+                (pkgs.extend (
+                  _: prev: {
+                    cargo-about = prev.cargo-about.overrideAttrs { pname = "cargo-about-consumer"; };
+                  }
+                )).extend
+                  self.overlays.default;
+
+              staticOxideCode = (pkgs.pkgsStatic.extend self.overlays.default).oxide-code;
+
+              muslOk =
+                !pkgs.stdenv.hostPlatform.isLinux
+                || (
+                  let
+                    muslOxideCode = (pkgs.pkgsMusl.extend self.overlays.default).oxide-code;
+                  in
+                  muslOxideCode.drvPath != oxide-code.drvPath && muslOxideCode.stdenv.hostPlatform.isMusl
+                );
             in
-            assert (self.overlays.default callerPkgs pkgs).oxide-code.drvPath == oxide-code.drvPath;
+            assert consumerPkgs.oxide-code.drvPath == oxide-code.drvPath;
+            assert staticOxideCode.drvPath != oxide-code.drvPath;
+            assert staticOxideCode.stdenv.hostPlatform.isStatic;
+            assert muslOk;
             pkgs.emptyFile;
         };
 

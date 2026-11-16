@@ -8,8 +8,8 @@
 
 {
   config,
-  lib,
   pkgs,
+  lib,
   ...
 }:
 
