@@ -19,6 +19,7 @@ let
   evalHome =
     options:
     home-manager.lib.homeManagerConfiguration {
+      inherit pkgs;
       # Home Manager imports nixpkgs again, so pass the caller as the module argument.
       extraSpecialArgs.pkgs = callerPkgs;
       modules = [
@@ -33,7 +34,6 @@ let
           programs.oxide-code = options;
         }
       ];
-      inherit pkgs;
     };
 
   # Home Manager throws on a failed assertion before exposing `config`, so evaluate the module

@@ -199,26 +199,21 @@
               consumerPkgs =
                 (pkgs.extend (
                   _: prev: {
-                    cargo-about = prev.cargo-about.overrideAttrs { pname = "cargo-about-consumer"; };
+                    cargo-about = prev.cargo-about.overrideAttrs {
+                      pname = "cargo-about-consumer";
+                    };
                   }
                 )).extend
                   self.overlays.default;
 
               staticOxideCode = (pkgs.pkgsStatic.extend self.overlays.default).oxide-code;
-
-              muslOk =
-                !pkgs.stdenv.hostPlatform.isLinux
-                || (
-                  let
-                    muslOxideCode = (pkgs.pkgsMusl.extend self.overlays.default).oxide-code;
-                  in
-                  muslOxideCode.drvPath != oxide-code.drvPath && muslOxideCode.stdenv.hostPlatform.isMusl
-                );
+              muslOxideCode = (pkgs.pkgsMusl.extend self.overlays.default).oxide-code;
             in
             assert consumerPkgs.oxide-code.drvPath == oxide-code.drvPath;
             assert staticOxideCode.drvPath != oxide-code.drvPath;
             assert staticOxideCode.stdenv.hostPlatform.isStatic;
-            assert muslOk;
+            assert pkgs.stdenv.hostPlatform.isLinux -> muslOxideCode.drvPath != oxide-code.drvPath;
+            assert pkgs.stdenv.hostPlatform.isLinux -> muslOxideCode.stdenv.hostPlatform.isMusl;
             pkgs.emptyFile;
         };
 
