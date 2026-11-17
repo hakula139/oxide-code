@@ -54,7 +54,7 @@ grep-searcher = "0.1"
 ignore = "0.4"
 indoc = "2"
 insta = { version = "1", features = ["glob"] }
-nix = { version = "0.31", default-features = false, features = ["fs"] }
+nix = { version = "0.32", default-features = false, features = ["fs"] }
 open = "5"
 ox-core = { path = "crates/ox-core" }
 ox-tui = { path = "crates/ox-tui" }
