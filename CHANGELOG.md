@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.12] - 2026-11-18
+
+### Highlights
+
+- The Nix overlay and Home Manager now build `ox` for static, musl, and cross targets.
+- The Homebrew formula has moved to the shared tap.
+
+### Fixed
+
+- _(nix)_ Build `ox` with the consumer's package set for static, musl, and cross targets. Matching native platforms still reuse the flake package. When the builder cannot execute the target binary, installation skips the version check and Home Manager disables configuration validation by default ([#874](https://github.com/hakula139/oxide-code/pull/874))
+
+### Changed
+
+- _(homebrew)_ Install the formula from the shared tap with `brew install hakula139/tap/oxide-code` and update it with `brew upgrade hakula139/tap/oxide-code` ([#870](https://github.com/hakula139/oxide-code/pull/870))
+
+[0.1.0-alpha.12]: https://github.com/hakula139/oxide-code/compare/v0.1.0-alpha.11...v0.1.0-alpha.12
+
 ## [0.1.0-alpha.11] - 2026-11-15
 
 ### Highlights
