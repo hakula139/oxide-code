@@ -115,13 +115,17 @@ programs.oxide-code = {
 };
 ```
 
-| Option        | Default                    | Purpose                                                                                                     |
-| ------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `enable`      | `false`                    | Install and configure `ox`                                                                                  |
-| `package`     | oxide-code from this flake | Package to install, or `null` to manage only the configuration                                              |
-| `checkConfig` | `package != null`          | Validate the generated `config.toml` at build time with `ox config check`                                   |
-| `settings`    | `{ }`                      | TOML configuration written to `ox/config.toml` when nonempty                                                |
-| `context`     | `""`                       | User instructions for `ox/AGENTS.md`: inline text (any string), or a Nix path or package linked as the file |
+| Option        | Default                       | Purpose                                     |
+| ------------- | ----------------------------- | ------------------------------------------- |
+| `enable`      | `false`                       | Install and configure `ox`                  |
+| `package`     | oxide-code from this flake    | Install `ox`, or set `null` for config only |
+| `checkConfig` | When the builder can run `ox` | Validate `config.toml` at build time        |
+| `settings`    | `{ }`                         | Write nonempty settings to `ox/config.toml` |
+| `context`     | `""`                          | Set user instructions in `ox/AGENTS.md`     |
+
+The check defaults to `true` when `package != null` and the build platform can run host binaries.
+
+A `context` string is inline text. A Nix path or package is linked as `ox/AGENTS.md`.
 
 - **Files**: Paths are relative to `$XDG_CONFIG_HOME`, which defaults to `~/.config`. The module owns `config.toml`, so keep local overrides in `ox/config.d/`, where they take precedence.
 

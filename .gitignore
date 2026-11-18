@@ -20,7 +20,6 @@ result-*
 *.snap.new
 
 # Assistant local state
-.agents/plans/
+**/.agents/plans/
 **/.claude/agent-memory-local/
-.claude/plans
 **/.claude/settings.local.json

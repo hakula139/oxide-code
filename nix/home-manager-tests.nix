@@ -4,6 +4,7 @@
 
 {
   pkgs,
+  crossPkgs,
   home-manager,
   homeModule,
   oxide-code,
@@ -39,7 +40,7 @@ let
   # Home Manager throws on a failed assertion before exposing `config`, so evaluate the module
   # without its surrounding modules to read its own entries.
   evalRawHome =
-    options:
+    pkgs: options:
     lib.evalModules {
       modules = [
         homeModule
@@ -49,7 +50,10 @@ let
             default = [ ];
           };
         }
-        { _module.check = false; }
+        {
+          _module.args.pkgs = pkgs;
+          _module.check = false;
+        }
         { programs.oxide-code = options; }
       ];
     };
@@ -111,6 +115,7 @@ let
     }).config;
 
   defaults = (evalHome { enable = true; }).config;
+  crossDefaults = (evalRawHome crossPkgs { enable = true; }).config.programs.oxide-code;
 
   linkedContexts = {
     file = ../AGENTS.md;
@@ -161,6 +166,18 @@ let
       };
     };
 
+    testCrossDefaultsRebuildThePackageAndSkipConfigChecking = {
+      expr = {
+        rebuildsPackage = crossDefaults.package.drvPath != oxide-code.drvPath;
+        checksConfig = crossDefaults.checkConfig;
+      };
+
+      expected = {
+        rebuildsPackage = true;
+        checksConfig = false;
+      };
+    };
+
     testConfigOnlyWritesSettingsWithoutInstallingOrChecking = {
       expr = {
         packages = map toString noPackage.home.packages;
@@ -195,7 +212,7 @@ let
     testCheckingRequiresAPackage = {
       expr = map (assertion: assertion.message) (
         builtins.filter (assertion: !assertion.assertion)
-          (evalRawHome {
+          (evalRawHome pkgs {
             enable = true;
             package = null;
             checkConfig = true;

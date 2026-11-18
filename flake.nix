@@ -88,6 +88,12 @@
         pkgs = nixpkgs.legacyPackages.${system};
         dk = devkit.lib.mkLib pkgs;
 
+        crossPkgs =
+          if pkgs.stdenv.hostPlatform.isAarch64 then
+            pkgs.pkgsCross.gnu64
+          else
+            pkgs.pkgsCross.aarch64-multiplatform;
+
         rustVersion = (pkgs.lib.importTOML ./Cargo.toml).workspace.package.rust-version;
         rustBin = rust-overlay.lib.mkRustBin { } pkgs;
         rustToolchain = rustBin.fromRustupToolchainFile ./rust-toolchain.toml;
@@ -190,7 +196,12 @@
           package = oxide-code;
 
           home-manager = import ./nix/home-manager-tests.nix {
-            inherit pkgs home-manager oxide-code;
+            inherit
+              pkgs
+              crossPkgs
+              home-manager
+              oxide-code
+              ;
             homeModule = self.homeModules.default;
           };
 
@@ -208,12 +219,15 @@
 
               staticOxideCode = (pkgs.pkgsStatic.extend self.overlays.default).oxide-code;
               muslOxideCode = (pkgs.pkgsMusl.extend self.overlays.default).oxide-code;
+              crossOxideCode = (crossPkgs.extend self.overlays.default).oxide-code;
             in
             assert consumerPkgs.oxide-code.drvPath == oxide-code.drvPath;
             assert staticOxideCode.drvPath != oxide-code.drvPath;
             assert staticOxideCode.stdenv.hostPlatform.isStatic;
             assert pkgs.stdenv.hostPlatform.isLinux -> muslOxideCode.drvPath != oxide-code.drvPath;
             assert pkgs.stdenv.hostPlatform.isLinux -> muslOxideCode.stdenv.hostPlatform.isMusl;
+            assert crossOxideCode.drvPath != oxide-code.drvPath;
+            assert !crossOxideCode.doInstallCheck;
             pkgs.emptyFile;
         };
 
