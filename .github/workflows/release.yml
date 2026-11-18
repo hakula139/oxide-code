@@ -77,6 +77,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Set up Rust
         run: rustup toolchain install
@@ -198,6 +200,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Download archives
         uses: actions/download-artifact@v8
@@ -228,36 +232,13 @@ jobs:
     name: Notify Homebrew Tap
     if: github.ref_type == 'tag'
     needs: publish
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Create GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ secrets.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          owner: hakula139
-          repositories: homebrew-tap
-          permission-actions: write
-
-      - name: Notify tap workflow
-        uses: actions/github-script@v9
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        with:
-          github-token: ${{ steps.app-token.outputs.token }}
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: 'hakula139',
-              repo: 'homebrew-tap',
-              workflow_id: 'update.yml',
-              ref: 'main',
-              inputs: {
-                formula: 'oxide-code',
-                tag: process.env.RELEASE_TAG,
-              },
-            });
+    uses: hakula139/devkit/.github/workflows/homebrew.yml@v3
+    with:
+      formula: oxide-code
+      tap-repository: homebrew-tap
+    secrets:
+      RELEASE_APP_ID: ${{ secrets.RELEASE_APP_ID }}
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
   notes:
     name: Republish Release Notes
@@ -269,6 +250,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install changelog parser
         uses: taiki-e/install-action@parse-changelog

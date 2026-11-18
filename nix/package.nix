@@ -43,7 +43,7 @@ rustPlatform.buildRustPackage {
     install -Dm644 -t "$out/share/doc/oxide-code" LICENSE THIRD-PARTY-NOTICES
   '';
 
-  doInstallCheck = true;
+  doInstallCheck = stdenv.buildPlatform.canExecute stdenv.hostPlatform;
   nativeInstallCheckInputs = [ versionCheckHook ];
 
   meta = {

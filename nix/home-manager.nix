@@ -8,14 +8,15 @@
 
 {
   config,
-  lib,
   pkgs,
+  lib,
   ...
 }:
 
 let
   cfg = config.programs.oxide-code;
   toml = pkgs.formats.toml { };
+  canExecute = pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform;
 
   contextTarget =
     if builtins.isString cfg.context then { text = cfg.context; } else { source = cfg.context; };
@@ -66,8 +67,11 @@ in
 
     checkConfig = lib.mkOption {
       type = lib.types.bool;
-      default = cfg.package != null;
-      defaultText = lib.literalExpression "config.programs.oxide-code.package != null";
+      default = cfg.package != null && canExecute;
+      defaultText = lib.literalExpression ''
+        config.programs.oxide-code.package != null
+        && pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform
+      '';
       description = ''
         Whether to validate the generated configuration at build time with
         {command}`ox config check` from {option}`programs.oxide-code.package`.
