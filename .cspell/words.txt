@@ -80,6 +80,7 @@ pkexec
 pkgs
 pname
 popd
+PREK
 pushd
 pythonunbuffered
 rects

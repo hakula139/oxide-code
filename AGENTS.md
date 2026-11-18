@@ -2,7 +2,7 @@
 
 oxide-code is a terminal-based AI coding assistant written in Rust, inspired by [Claude Code](https://code.claude.com/docs). Its binary, `ox`, talks to LLM APIs to help developers with software engineering tasks from the terminal.
 
-This file adds oxide-code's requirements to the [shared instructions](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/instructions/shared.md). Open GitHub issues track planned work.
+This file adds oxide-code's requirements to the [shared instructions](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/shared/instructions/instructions.md). Open GitHub issues track planned work.
 
 ## Project Layout
 
@@ -32,7 +32,7 @@ The tree lists only the top-level entries whose names leave their purpose unclea
 
 ## Rules for Every Change
 
-- Run the pre-commit hooks on every commit. In each new checkout or worktree, run `nix develop -c true` once to install the hooks. Never bypass the hooks with `--no-verify` or `PRE_COMMIT_ALLOW_NO_CONFIG`.
+- Run the pre-commit hooks on every commit. In each new checkout or worktree, run `nix develop -c true` once to install the hooks. Never bypass the hooks with `--no-verify` or `PREK_ALLOW_NO_CONFIG`.
 - Run the [verification](#verification) block before review.
 - Add new words, including those in Rust sources, to `.cspell/words.txt` in alphabetical order.
 - Update whatever the change makes stale: the `README.md` Features and Scope sections, the trust model in `SECURITY.md`, the user guides, design docs and the module map, research surveys whose open questions it settles, open issues it resolves or invalidates, and the Home Manager module in `nix/home-manager.nix` when `ox` reads a new file from the user config directory.

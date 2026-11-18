@@ -1,6 +1,6 @@
 # Testing
 
-Follow the [shared test requirements](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/instructions/shared.md#tests) for test inputs, structure, and behavioral assertions. This page adds oxide-code's test layout, fixtures, timing, coverage, mutation testing, and live tests.
+Follow the [shared test requirements](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/shared/instructions/docs/verification-and-tests.md#tests) for test inputs, structure, and behavioral assertions. This page adds oxide-code's test layout, fixtures, timing, coverage, mutation testing, and live tests.
 
 ## Placement
 
