@@ -1,6 +1,6 @@
 # Writing
 
-Follow the shared [writing instructions](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/instructions/shared.md#writing), [phrasing rules](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/shared/prompt-fragments/phrasing.md), and [prose rules](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/shared/prompt-fragments/prose-tics.md) for comments, docs, commit and PR text, and strings read by users or the model. This page adds oxide-code's Rust, terminal, and documentation conventions.
+Follow the shared [writing instructions](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/shared/instructions/docs/writing.md), [phrasing rules](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/shared/prompt-fragments/phrasing.md), and [prose rules](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/shared/prompt-fragments/prose-tics.md) for comments, docs, commit and PR text, and strings read by users or the model. This page adds oxide-code's Rust, terminal, and documentation conventions.
 
 ## Comments
 
