@@ -4,7 +4,7 @@ Conventions for the dev shell, toolchain, Nix and config file style, debug info,
 
 ## Dev Shell
 
-The flake's dev shell provides the pinned Rust toolchain, `cargo-deny`, `cargo-insta`, `cargo-llvm-cov`, `cargo-mutants`, `git-cliff`, `sqlite3`, and the [hook tools](https://github.com/hakula139/devkit/blob/v3/docs/hooks.md):
+Use the [dev shell](../../flake.nix) for local builds and checks:
 
 ```bash
 nix develop                # Enter the dev shell, which installs the hooks
@@ -47,19 +47,7 @@ Dev and test builds keep line tables for the workspace crates and no debug info 
 
 ## CI
 
-CI runs on pushes to `main`, pull requests, and manual dispatch. The release workflow requires a passing run on the tagged commit and calls CI for a dry run from another ref.
-
-| Job              | Systems      | Checks                                                                                                            |
-| ---------------- | ------------ | ----------------------------------------------------------------------------------------------------------------- |
-| Nix              | Linux, macOS | `nix flake check`, then every hook on Linux and a dev-shell build on macOS                                        |
-| Rust Check       | Linux, macOS | `cargo clippy --all-targets` on macOS, `cargo llvm-cov` with its Codecov upload, and doc tests                    |
-| MSRV Check       | Linux        | `cargo check --all-targets` in the flake's `msrv` shell                                                           |
-| Rust Lint Check  | Linux, macOS | `cargo clippy` without test targets, `cargo doc --no-deps`, and on Linux `cargo insta test --unreferenced=reject` |
-| Windows Check    | Windows      | `cargo clippy --all-targets`, `cargo clippy`, `cargo doc --no-deps`, and `cargo llvm-cov` with its Codecov upload |
-| Dependency Check | Linux        | `cargo deny check` in the flake's `lint` shell, which leaves out the pinned toolchain                             |
-| CI Result        | Linux        | Fails unless every other job succeeded or was skipped                                                             |
-
-The Nix, Rust, and MSRV jobs come from devkit's [reusable workflows](https://github.com/hakula139/devkit/blob/v3/docs/ci.md), and the Rust Lint job runs the checks `rust.yml` leaves out.
+The [CI workflow](../../.github/workflows/ci.yml) defines the jobs and calls devkit's [shared checks](https://github.com/hakula139/devkit/blob/v3/docs/ci.md). The [release workflow](../../.github/workflows/release.yml) requires a passing run on the tagged commit.
 
 Branch protection requires CI Result and Codecov's `codecov/patch`. Add each new job to CI Result's `needs`, since the gate runs once those jobs finish and skips any job still running, and give each new job a `timeout-minutes` several times its usual duration, since a hung test otherwise holds the runner for six hours. libtest names any test still running after 60 s, so a timed-out job's log shows which test hung.
 
