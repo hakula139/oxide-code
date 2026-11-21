@@ -6,18 +6,7 @@ This file adds oxide-code's requirements to the [shared instructions](https://gi
 
 ## Project Layout
 
-The tree lists only the top-level entries whose names leave their purpose unclear. The [module map](docs/design/architecture.md) covers each crate's modules.
-
-```text
-.
-├── about.toml             # Release dependency license selection
-├── crates/ox/             # The `ox` binary with the CLI and headless frontend
-├── crates/ox-core/        # The agent core library
-├── crates/ox-tui/         # The terminal UI library
-├── docs/                  # User guides, conventions, design specs, and research notes
-├── licenses/              # Third-party notice templates and bundled asset licenses
-└── nix/                   # Nix package and Home Manager module with its tests
-```
+The [module map](docs/design/architecture.md) explains crate boundaries and which layers may depend on each other.
 
 ## Read Before You Edit
 
@@ -52,7 +41,7 @@ cargo llvm-cov             # Run tests and check coverage
 cargo deny check           # Check dependencies when they change
 ```
 
-[CI](docs/conventions/development.md#ci) lists the job that runs each check.
+[CI](docs/conventions/development.md#ci) covers the required checks.
 
 ## Code Review
 

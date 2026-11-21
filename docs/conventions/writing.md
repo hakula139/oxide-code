@@ -42,12 +42,13 @@ These rules apply to errors, warnings, notices, and other strings shown to users
 
 ## Documentation
 
+- Document what readers need to use or change the feature, including decisions whose reasons the source cannot show. Link to the implementation for details readers can infer there.
 - Add a row to the configuration guide's [Reference](../guide/configuration.md#reference) for each new config key and each new environment variable that configures `ox`. The `config::tests::reference` tests catch a missing key or `ANTHROPIC_`, `CLAUDE_`, or `OX_` variable, but not a variable with another prefix.
 - Cite Claude Code, [Codex](https://github.com/openai/codex), [pi](https://github.com/badlogic/pi-mono), and [oh-my-pi](https://github.com/can1357/oh-my-pi) as reference implementations in new research and design notes. Existing notes may retain their opencode citations.
 
 ### Design Docs
 
-- A design doc explains how a feature's mechanism works at module level and why, for the maintainer who changes it next. Leave per-function walkthroughs to the code, and a set the code enumerates, such as enum variants, to the type that holds it. Link the user guide for user-facing behavior, including any set users rely on, and keep the design doc to what that behavior means for the mechanism.
+- Explain how the modules work together and link the user guide for user-facing behavior.
 
 - Open a feature's design doc with a sentence saying what the feature does, then describe its mechanism in sections named for their topics, followed by the sections below in this order.
 
