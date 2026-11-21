@@ -35,3 +35,9 @@ Follow the [shared Git workflow](https://github.com/hakula139/plugins/blob/main/
 - Close an issue as completed when its PR merges, and tick each acceptance criterion the merged work satisfies. Leave an unmet criterion unchecked, and track it in a follow-up issue.
 - Before starting new feature work, audit open issues and their epics for unmet acceptance criteria and unfinished sub-issues, and resolve those first.
 - Assign issues accepted for a planned delivery batch to that release's milestone, including prereleases. Keep work required for the first stable release in `v0.1.0` until it joins an earlier delivery batch. Leave unplanned work without a milestone.
+
+### Project
+
+When the maintainer selects work for an agent, add the existing issue to the `Oxide Code` project in `hakulab` if needed and set it to `Ready`. Before taking an item, check its open dependencies, linked pull requests, and active worktrees or sessions for overlapping work.
+
+Move the item to `In Progress` when you start. If you hand it back, use `Ready` when another agent can take it, or `Todo` while a blocker recorded on the issue remains open. Close completed issues through the normal merge workflow. Setting `Done` manually also closes the issue. If you cannot update the project, report the pending status change in the handoff.
