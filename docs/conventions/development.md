@@ -47,7 +47,7 @@ Dev and test builds keep line tables for the workspace crates and no debug info 
 
 ## CI
 
-The [CI workflow](../../.github/workflows/ci.yml) defines the jobs and calls devkit's [shared checks](https://github.com/hakula139/devkit/blob/v3/docs/ci.md). The [release workflow](../../.github/workflows/release.yml) requires a passing run on the tagged commit.
+The [CI workflow](../../.github/workflows/ci.yml) defines the jobs and calls devkit's [shared checks](https://github.com/hakulab/devkit/blob/v3/docs/ci.md). The [release workflow](../../.github/workflows/release.yml) requires a passing run on the tagged commit.
 
 Branch protection requires CI Result and Codecov's `codecov/patch`. Add each new job to CI Result's `needs`, since the gate runs once those jobs finish and skips any job still running, and give each new job a `timeout-minutes` several times its usual duration, since a hung test otherwise holds the runner for six hours. libtest names any test still running after 60 s, so a timed-out job's log shows which test hung.
 
