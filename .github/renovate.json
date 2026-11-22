@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>hakulab/devkit#v3"],
+  "extends": ["github>hakulab/devkit#v3.7.0"],
   "packageRules": [
     {
       "matchManagers": ["rust-toolchain"],
