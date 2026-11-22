@@ -1,6 +1,6 @@
 # Releasing
 
-Follow the [shared release procedure](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/release/SKILL.md) and devkit's [release guide](https://github.com/hakula139/devkit/blob/v3/docs/releasing.md). This page records oxide-code's versioning, release preparation, and publication contracts.
+Follow the [shared release procedure](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/release/SKILL.md) and devkit's [release guide](https://github.com/hakulab/devkit/blob/v3/docs/releasing.md). This page records oxide-code's versioning, release preparation, and publication contracts.
 
 ## Versioning
 

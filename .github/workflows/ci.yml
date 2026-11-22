@@ -19,7 +19,7 @@ env:
 
 jobs:
   nix:
-    uses: hakula139/devkit/.github/workflows/nix.yml@v3
+    uses: hakulab/devkit/.github/workflows/nix.yml@v3
     secrets:
       CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
@@ -27,7 +27,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: hakula139/devkit/.github/workflows/rust.yml@v3
+    uses: hakulab/devkit/.github/workflows/rust.yml@v3
     with:
       msrv: true
     secrets:
@@ -49,7 +49,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Nix
-        uses: hakula139/devkit/.github/actions/setup-nix@v3
+        uses: hakulab/devkit/.github/actions/setup-nix@v3
         with:
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
@@ -132,7 +132,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Nix
-        uses: hakula139/devkit/.github/actions/setup-nix@v3
+        uses: hakulab/devkit/.github/actions/setup-nix@v3
         with:
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
@@ -150,4 +150,4 @@ jobs:
 
     steps:
       - name: Check results
-        uses: hakula139/devkit/.github/actions/ci-result@v3
+        uses: hakulab/devkit/.github/actions/ci-result@v3

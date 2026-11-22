@@ -54,7 +54,7 @@ jobs:
       actions: read
     steps:
       - name: Wait for CI on the tagged commit
-        uses: hakula139/devkit/.github/actions/tagged-ci@v3
+        uses: hakulab/devkit/.github/actions/tagged-ci@v3
 
   build:
     name: Build (${{ matrix.target }})
@@ -183,7 +183,7 @@ jobs:
     name: Pin Nix packages
     if: github.ref_type == 'tag' && !inputs.notes
     needs: tagged-ci
-    uses: hakula139/devkit/.github/workflows/nix-cache.yml@v3
+    uses: hakulab/devkit/.github/workflows/nix-cache.yml@v3
     secrets:
       CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
@@ -218,7 +218,7 @@ jobs:
             release-assets/*.zip
 
       - name: Publish release
-        uses: hakula139/devkit/.github/actions/publish-release@v3
+        uses: hakulab/devkit/.github/actions/publish-release@v3
         with:
           assets: |
             release-assets/oxide-code-x86_64-unknown-linux-gnu.tar.gz
@@ -232,7 +232,7 @@ jobs:
     name: Notify Homebrew Tap
     if: github.ref_type == 'tag'
     needs: publish
-    uses: hakula139/devkit/.github/workflows/homebrew.yml@v3
+    uses: hakulab/devkit/.github/workflows/homebrew.yml@v3
     with:
       formula: oxide-code
       tap-repository: homebrew-tap

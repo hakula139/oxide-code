@@ -24,7 +24,7 @@
     };
 
     devkit = {
-      url = "github:hakula139/devkit/v3";
+      url = "github:hakulab/devkit/v3";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 

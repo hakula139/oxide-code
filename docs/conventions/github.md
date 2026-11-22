@@ -1,6 +1,6 @@
 # GitHub
 
-Follow the [shared Git workflow](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/git-workflow/SKILL.md) and devkit's [GitHub conventions](https://github.com/hakula139/devkit/blob/v3/docs/github.md). This page adds oxide-code's changelog, label, and issue requirements.
+Follow the [shared Git workflow](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/git-workflow/SKILL.md) and devkit's [GitHub conventions](https://github.com/hakulab/devkit/blob/v3/docs/github.md). This page adds oxide-code's changelog, label, and issue requirements.
 
 ## Commit Titles
 
