@@ -1,10 +1,10 @@
 # Writing
 
-Follow the shared [writing instructions](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/shared/instructions/docs/writing.md), [phrasing rules](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/shared/prompt-fragments/phrasing.md), and [prose rules](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/shared/prompt-fragments/prose-tics.md) for comments, docs, commit and PR text, and strings read by users or the model. This page adds oxide-code's Rust, terminal, and documentation conventions.
+Follow the shared [writing instructions](https://github.com/hakulab/nixos-config/blob/main/home/modules/llm-assistants/shared/instructions/docs/writing.md), [phrasing rules](https://github.com/hakulab/nixos-config/blob/main/home/modules/llm-assistants/shared/prompt-fragments/phrasing.md), and [prose rules](https://github.com/hakulab/nixos-config/blob/main/home/modules/llm-assistants/shared/prompt-fragments/prose-tics.md) for comments, docs, commit and PR text, and strings read by users or the model. This page adds oxide-code's Rust, terminal, and documentation conventions.
 
 ## Comments
 
-Follow the shared [comment rules](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/shared/prompt-fragments/comments.md).
+Follow the shared [comment rules](https://github.com/hakulab/nixos-config/blob/main/home/modules/llm-assistants/shared/prompt-fragments/comments.md).
 
 - Write `//` comments as prose. A docstring may use a Markdown list for parallel options or a sequence.
 - Wrap comment and docstring prose at 100 columns, counting indentation and comment markers, in every language and in prose literals continued by hand. Fill each paragraph, separate paragraphs with a blank comment line, and break early to keep a code span or link together. Reword a paragraph whose last line would hold one short word, and preserve intentional layout in code examples, lists, tables, and diagrams.

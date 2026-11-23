@@ -6,7 +6,7 @@ Security fixes go into `main` and ship with the next release. Report vulnerabili
 
 ## Reporting a Vulnerability
 
-Report vulnerabilities privately through a [GitHub security advisory](https://github.com/hakula139/oxide-code/security/advisories/new), not in public issues. Include:
+Report vulnerabilities privately through a [GitHub security advisory](https://github.com/hakulab/oxide-code/security/advisories/new), not in public issues. Include:
 
 - The affected version (`ox --version`) or commit, and your platform
 - The permission mode and any relevant `allow` or `deny` rules
@@ -31,7 +31,7 @@ Commands run by the `bash` tool, and the `git` and `gh` processes `ox` starts it
 
 The gate uses tree-sitter-bash to match `exec` rules against literal simple-command words. A command-specific allow must cover every component, while the whole-class exec rule `*` permits any Bash call after deny and ask checks. Dynamic words, redirections, and unsupported syntax remain unmatched by command-specific allow rules. Wrappers and script arguments remain ordinary words. Bash does not use native `read` and `edit` path rules, and no shell filesystem effects are inferred. A permitted command can access any resource the operating system allows. [Permissions](docs/guide/permissions.md#rules) defines the supported matching grammar.
 
-Native read, grep, glob, edit, and write tools resolve the path before the gate and use that resolved path when running. Configured path deny and ask rules match the requested and resolved spellings, equivalent directory aliases, and folded names. Search walks withhold matching files. A symlink swapped into a parent directory after the check remains a gap that `openat`-style traversal or an OS sandbox ([#133](https://github.com/hakula139/oxide-code/issues/133)) would close. Edit and Write recheck files before publication, but concurrent changes and crashes can still affect an in-place write. [File Edits](docs/design/file-edits.md) defines these integrity checks.
+Native read, grep, glob, edit, and write tools resolve the path before the gate and use that resolved path when running. Configured path deny and ask rules match the requested and resolved spellings, equivalent directory aliases, and folded names. Search walks withhold matching files. A symlink swapped into a parent directory after the check remains a gap that `openat`-style traversal or an OS sandbox ([#133](https://github.com/hakulab/oxide-code/issues/133)) would close. Edit and Write recheck files before publication, but concurrent changes and crashes can still affect an in-place write. [File Edits](docs/design/file-edits.md) defines these integrity checks.
 
 Run untrusted work in an external sandbox or container. Configured rules, classifier judgment, and user approval govern which calls start, while the operating system determines what a running program can access.
 

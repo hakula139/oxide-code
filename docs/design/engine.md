@@ -38,7 +38,7 @@ A turn is a loop of rounds. Each round sends the transcript to the model, stream
 
 ## Out of Scope
 
-- **An ACP frontend for editors.** It would drive the same contract ([#150](https://github.com/hakula139/oxide-code/issues/150)).
+- **An ACP frontend for editors.** It would drive the same contract ([#150](https://github.com/hakulab/oxide-code/issues/150)).
 
 ## Sources
 

@@ -72,7 +72,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
           Sign in   Set ANTHROPIC_API_KEY, or run /login inside ox
           Config    ~/.config/ox/config.toml, checked by `ox config check`
 
-        Guides: https://github.com/hakula139/oxide-code/tree/main/docs/guide"
+        Guides: https://github.com/hakulab/oxide-code/tree/main/docs/guide"
     }
 )]
 #[command(group(

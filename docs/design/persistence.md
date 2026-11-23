@@ -201,8 +201,8 @@ Listing rows show an untitled session as `(untitled)` and follow a fork's title 
 
 ## Out of Scope
 
-- **Rewind history** ([#293](https://github.com/hakula139/oxide-code/issues/293)). Abandoned rows already stay in the store, so browsing them needs no format change.
-- **Subagent sessions** ([#136](https://github.com/hakula139/oxide-code/issues/136), [#285](https://github.com/hakula139/oxide-code/issues/285)). A parent session column would arrive as an additive revision.
+- **Rewind history** ([#293](https://github.com/hakulab/oxide-code/issues/293)). Abandoned rows already stay in the store, so browsing them needs no format change.
+- **Subagent sessions** ([#136](https://github.com/hakulab/oxide-code/issues/136), [#285](https://github.com/hakulab/oxide-code/issues/285)). A parent session column would arrive as an additive revision.
 
 ## Sources
 

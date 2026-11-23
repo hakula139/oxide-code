@@ -93,7 +93,7 @@ in
       description = ''
         Configuration written to {file}`$XDG_CONFIG_HOME/ox/config.toml`. The configuration
         guide lists every key:
-        <https://github.com/hakula139/oxide-code/blob/main/docs/guide/configuration.md>.
+        <https://github.com/hakulab/oxide-code/blob/main/docs/guide/configuration.md>.
       '';
     };
 

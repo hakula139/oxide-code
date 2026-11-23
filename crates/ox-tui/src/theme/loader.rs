@@ -314,8 +314,7 @@ impl Patch {
 // ── Parsing ──
 
 /// Where every slot is described, linked from a missing-slot error.
-const THEMING_GUIDE: &str =
-    "https://github.com/hakula139/oxide-code/blob/main/docs/guide/theming.md";
+const THEMING_GUIDE: &str = "https://github.com/hakulab/oxide-code/blob/main/docs/guide/theming.md";
 
 pub(super) fn parse_theme(content: &str) -> Result<Theme> {
     let file: ThemeFile = match toml::from_str(content) {

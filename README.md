@@ -1,7 +1,7 @@
 # oxide-code
 
-[![CI](https://github.com/hakula139/oxide-code/actions/workflows/ci.yml/badge.svg)](https://github.com/hakula139/oxide-code/actions/workflows/ci.yml)
-[![Coverage](https://codecov.io/gh/hakula139/oxide-code/graph/badge.svg)](https://codecov.io/gh/hakula139/oxide-code)
+[![CI](https://github.com/hakulab/oxide-code/actions/workflows/ci.yml/badge.svg)](https://github.com/hakulab/oxide-code/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/hakulab/oxide-code/graph/badge.svg)](https://codecov.io/gh/hakulab/oxide-code)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![WakaTime coding time for oxide-code](https://wakatime.com/badge/user/f4a35a1f-0e29-4093-a647-e66aad164737/project/12cf90d4-91c9-44ab-b8a9-57954dba9812.svg)
 
@@ -38,11 +38,11 @@ oxide-code follows a few principles:
 - Keep context and state visible: model, instructions, compaction, queued prompts, and session identity should be inspectable from the UI.
 - Add workflow depth only when it fits the current agent-harness model.
 
-Planned work lives in the [open enhancement issues](https://github.com/hakula139/oxide-code/issues?q=is%3Aissue%20is%3Aopen%20label%3Aenhancement), and themes that span several issues are grouped under [epics](https://github.com/hakula139/oxide-code/issues?q=is%3Aissue%20is%3Aopen%20label%3Aepic).
+Planned work lives in the [open enhancement issues](https://github.com/hakulab/oxide-code/issues?q=is%3Aissue%20is%3Aopen%20label%3Aenhancement), and themes that span several issues are grouped under [epics](https://github.com/hakulab/oxide-code/issues?q=is%3Aissue%20is%3Aopen%20label%3Aepic).
 
 Out of scope for now:
 
-- Editor-specific extensions and a GUI. ACP support for editors is tracked in [#150](https://github.com/hakula139/oxide-code/issues/150).
+- Editor-specific extensions and a GUI. ACP support for editors is tracked in [#150](https://github.com/hakulab/oxide-code/issues/150).
 - In-process plugin runtimes, such as WASM modules, dynamic libraries, or embedded scripting.
 - Compatibility with Claude Code settings files, hook formats, or permission rule syntax. oxide-code reads `CLAUDE.md` instructions and Claude Code OAuth credentials, and its own configuration may diverge where its design calls for it.
 - Feature parity with Claude Code. Focus on the core workflow first.
@@ -54,7 +54,7 @@ Releases follow the [versioning policy](RELEASING.md#versioning), and stable rel
 On Apple Silicon macOS and x86_64 Linux, install with Homebrew:
 
 ```bash
-brew install hakula139/tap/oxide-code
+brew install hakulab/tap/oxide-code
 ```
 
 [Installation](docs/guide/install.md) covers the prebuilt binary, Cargo, Nix, Windows, the Home Manager module, and updating and uninstalling.

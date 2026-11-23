@@ -2,7 +2,7 @@
 
 oxide-code is a terminal-based AI coding assistant written in Rust, inspired by [Claude Code](https://code.claude.com/docs). Its binary, `ox`, talks to LLM APIs to help developers with software engineering tasks from the terminal.
 
-This file adds oxide-code's requirements to the [shared instructions](https://github.com/hakula139/nixos-config/blob/main/home/modules/llm-assistants/shared/instructions/instructions.md). Open GitHub issues track planned work.
+This file adds oxide-code's requirements to the [shared instructions](https://github.com/hakulab/nixos-config/blob/main/home/modules/llm-assistants/shared/instructions/instructions.md). Open GitHub issues track planned work.
 
 ## Project Layout
 
@@ -45,4 +45,4 @@ cargo deny check           # Check dependencies when they change
 
 ## Code Review
 
-Use the [shared review procedure](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/review/SKILL.md) and the convention docs linked above.
+Use the [shared review procedure](https://github.com/hakulab/plugins/blob/main/plugins/hakula-workflow/skills/review/SKILL.md) and the convention docs linked above.

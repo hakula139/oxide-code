@@ -1,6 +1,6 @@
 # Rust
 
-Follow the shared [Rust](https://github.com/hakula139/plugins/blob/main/plugins/hakula-languages/skills/rust/SKILL.md) and [code layout](https://github.com/hakula139/plugins/blob/main/plugins/hakula-workflow/skills/code-layout/SKILL.md) conventions for Rust sources and Cargo manifests. This page adds oxide-code's contracts and tooling requirements.
+Follow the shared [Rust](https://github.com/hakulab/plugins/blob/main/plugins/hakula-languages/skills/rust/SKILL.md) and [code layout](https://github.com/hakulab/plugins/blob/main/plugins/hakula-workflow/skills/code-layout/SKILL.md) conventions for Rust sources and Cargo manifests. This page adds oxide-code's contracts and tooling requirements.
 
 ## Enforced by Tooling
 

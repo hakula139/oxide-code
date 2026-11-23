@@ -62,7 +62,7 @@ The stack routes keys before any component sees them. A modal whose `captures_es
 - **Persistent modals in the chat scroll.** Modals are ephemeral, and output that needs scrollback, such as `/diff`, prints into the chat.
 - **Mouse interaction.** The TUI captures the mouse ([Mouse Interactions](mouse.md)), but a modal receives only the wheel, as Up / Down keys, and stays keyboard-driven.
 - **Concurrent modals on different layers.** A toast over a modal would need a second layer, while the chat's error blocks already cover what toasts would.
-- **User-defined modal commands.** The trait already supports them, and user-invocable skills are tracked in [#163](https://github.com/hakula139/oxide-code/issues/163).
+- **User-defined modal commands.** The trait already supports them, and user-invocable skills are tracked in [#163](https://github.com/hakulab/oxide-code/issues/163).
 
 ## Sources
 

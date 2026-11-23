@@ -24,26 +24,26 @@ How to install `ox` on macOS, Linux, and Windows. For first-run setup once insta
 The formula installs the prebuilt release binary on Apple Silicon macOS and x86_64 Linux:
 
 ```bash
-brew install hakula139/tap/oxide-code
+brew install hakulab/tap/oxide-code
 ```
 
 ### Prebuilt Binary
 
-Download the archive for your platform from [Releases](https://github.com/hakula139/oxide-code/releases), extract it, and move the `ox` binary to a directory on your `PATH`. Set `VERSION` to the newest tag listed on that page:
+Download the archive for your platform from [Releases](https://github.com/hakulab/oxide-code/releases), extract it, and move the `ox` binary to a directory on your `PATH`. Set `VERSION` to the newest tag listed on that page:
 
 ```bash
 VERSION=v0.1.0-alpha.12
 
 # macOS aarch64 (Apple Silicon)
-curl -fsSL "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz" | tar -xz
+curl -fsSL "https://github.com/hakulab/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz" | tar -xz
 sudo mv ox /usr/local/bin/
 
 # Linux x86_64
-curl -fsSL "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-x86_64-unknown-linux-gnu.tar.gz" | tar -xz
+curl -fsSL "https://github.com/hakulab/oxide-code/releases/download/$VERSION/oxide-code-x86_64-unknown-linux-gnu.tar.gz" | tar -xz
 sudo mv ox /usr/local/bin/
 
 # Windows x86_64 (Git Bash / MSYS). Under WSL, use the Linux commands above.
-curl -fsSLO "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-x86_64-pc-windows-msvc.zip"
+curl -fsSLO "https://github.com/hakulab/oxide-code/releases/download/$VERSION/oxide-code-x86_64-pc-windows-msvc.zip"
 unzip oxide-code-x86_64-pc-windows-msvc.zip
 mkdir -p ~/bin
 mv ox.exe ~/bin/
@@ -54,8 +54,8 @@ Each archive contains `ox`, `LICENSE`, and `THIRD-PARTY-NOTICES`. Each release a
 Each release includes a build provenance attestation linking each archive to the release workflow run that built it. To verify an archive with the GitHub CLI, download it to disk before extracting it:
 
 ```bash
-curl -fsSLO "https://github.com/hakula139/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz"
-gh attestation verify oxide-code-aarch64-apple-darwin.tar.gz --repo hakula139/oxide-code
+curl -fsSLO "https://github.com/hakulab/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz"
+gh attestation verify oxide-code-aarch64-apple-darwin.tar.gz --repo hakulab/oxide-code
 tar -xzf oxide-code-aarch64-apple-darwin.tar.gz
 ```
 
@@ -64,7 +64,7 @@ tar -xzf oxide-code-aarch64-apple-darwin.tar.gz
 Requires [Rust](https://www.rust-lang.org/tools/install) 1.91 or later.
 
 ```bash
-cargo install --git https://github.com/hakula139/oxide-code --locked
+cargo install --git https://github.com/hakulab/oxide-code --locked
 ```
 
 This builds the `main` branch and installs `ox` to `~/.cargo/bin`. To pin a release, pass `--tag vX.Y.Z`.
@@ -74,15 +74,15 @@ This builds the `main` branch and installs `ox` to `~/.cargo/bin`. To pin a rele
 The repo includes a flake whose packages are available from the `hakula` Cachix cache. Nix builds from source when a matching cached package is unavailable:
 
 ```bash
-nix run github:hakula139/oxide-code                     # One-shot
-nix profile install github:hakula139/oxide-code         # Install to user profile
-nix profile install github:hakula139/oxide-code/vX.Y.Z  # Install a specific release
+nix run github:hakulab/oxide-code                     # One-shot
+nix profile install github:hakulab/oxide-code         # Install to user profile
+nix profile install github:hakulab/oxide-code/vX.Y.Z  # Install a specific release
 ```
 
 Or as a flake input from another project:
 
 ```nix
-inputs.oxide-code.url = "github:hakula139/oxide-code";
+inputs.oxide-code.url = "github:hakulab/oxide-code";
 # Outputs: packages.${system}.{default, oxide-code}, overlays.default, homeModules.default
 ```
 
@@ -94,7 +94,7 @@ The flake's Home Manager module installs `ox` and writes its configuration from 
 
 ```nix
 inputs.oxide-code = {
-  url = "github:hakula139/oxide-code";
+  url = "github:hakulab/oxide-code";
   inputs = {
     devkit.inputs.git-hooks-nix.follows = "git-hooks-nix";
     home-manager.follows = "home-manager";
@@ -153,8 +153,8 @@ ox --version
 | Install method               | Update command                                                                                        |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------- |
 | Prebuilt binary              | Re-run the download commands with `VERSION` set to the new tag                                        |
-| Homebrew                     | `brew upgrade hakula139/tap/oxide-code`                                                               |
-| Cargo, from `main`           | `cargo install --git https://github.com/hakula139/oxide-code --locked --force`                        |
+| Homebrew                     | `brew upgrade hakulab/tap/oxide-code`                                                                 |
+| Cargo, from `main`           | `cargo install --git https://github.com/hakulab/oxide-code --locked --force`                          |
 | Cargo, pinned to a tag       | The same command with `--tag` set to the new tag                                                      |
 | Nix profile, from `main`     | `nix profile upgrade oxide-code`                                                                      |
 | Nix profile, pinned to a tag | `nix profile remove oxide-code`, then install the new tag's ref                                       |

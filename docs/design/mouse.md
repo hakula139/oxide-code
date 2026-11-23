@@ -94,7 +94,7 @@ Every control character is filtered out of a URL before the envelope is written,
 
 - **OSC 8 links in markdown body text.** A link in body text would require threading URLs through the markdown renderer.
 - **Selecting text outside the chat.** The capture serves chat scrollback, while the input and modals stay keyboard-driven.
-- **Copying source text without gutters or soft-wrap breaks.** Each block would need to map rendered rows back to its source ([#300](https://github.com/hakula139/oxide-code/issues/300)).
+- **Copying source text without gutters or soft-wrap breaks.** Each block would need to map rendered rows back to its source ([#300](https://github.com/hakulab/oxide-code/issues/300)).
 
 ## Sources
 
