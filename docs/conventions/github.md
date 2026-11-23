@@ -10,7 +10,7 @@ Follow the [shared Git workflow](https://github.com/hakulab/plugins/blob/main/pl
 ## Pull Requests
 
 - The squashed PR title becomes the draft [changelog](../../RELEASING.md#release-preparation) entry, so write it for users.
-- Use the PR template inherited from [`hakula139/.github`](https://github.com/hakula139/.github).
+- Use the PR template inherited from [`hakulab/.github`](https://github.com/hakulab/.github).
 - Maintainers with triage access assign the PR to `hakula139`, set its milestone to the linked issue's milestone or the planned delivery batch when no issue is linked, and add one type label plus the `area:` labels for the areas it changes:
 
 | Commit type               | Label                            |
