@@ -39,7 +39,7 @@ The popup lists the matching commands in two columns, the name and the descripti
 
 ## Out of Scope
 
-- **User-defined commands.** `BUILT_INS` is the entire registry, and skills as commands are tracked in [#163](https://github.com/hakula139/oxide-code/issues/163).
+- **User-defined commands.** `BUILT_INS` is the entire registry, and skills as commands are tracked in [#163](https://github.com/hakulab/oxide-code/issues/163).
 
 ## Sources
 

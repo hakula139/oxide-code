@@ -29,7 +29,7 @@ Both `[tui.theme]` keys are optional. Without them the default is `mocha` (Catpp
 | `latte`     | Catppuccin | Light                 |
 | `material`  | Material   | Dark M2 baseline      |
 
-Each ships as a TOML file [in the source tree](https://github.com/hakula139/oxide-code/tree/main/crates/ox-tui/themes), which doubles as a starting point for a custom theme.
+Each ships as a TOML file [in the source tree](https://github.com/hakulab/oxide-code/tree/main/crates/ox-tui/themes), which doubles as a starting point for a custom theme.
 
 ## Custom Theme Files
 

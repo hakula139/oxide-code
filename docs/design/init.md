@@ -25,7 +25,7 @@ Both prompts share one rubric: include only information an agent would otherwise
 
 ## Out of Scope
 
-- **Enforcing the diff.** A guard scoped to the `/init` turn could require approval for edits to instruction files, so the approval preview shows the diff whatever the model does. It needs per-turn state in the permission gate, tracked in [#261](https://github.com/hakula139/oxide-code/issues/261).
+- **Enforcing the diff.** A guard scoped to the `/init` turn could require approval for edits to instruction files, so the approval preview shows the diff whatever the model does. It needs per-turn state in the permission gate, tracked in [#261](https://github.com/hakulab/oxide-code/issues/261).
 
 ## Sources
 

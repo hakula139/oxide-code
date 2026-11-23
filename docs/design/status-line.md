@@ -67,9 +67,9 @@ The status line keeps the highest-priority segment, truncating it if needed, the
 
 ## Out of Scope
 
-- **A user-command segment.** It would run a shell command on each refresh, which needs its own failure and refresh policy ([#166](https://github.com/hakula139/oxide-code/issues/166)).
+- **A user-command segment.** It would run a shell command on each refresh, which needs its own failure and refresh policy ([#166](https://github.com/hakulab/oxide-code/issues/166)).
 - **ccusage integration.** It would re-read stored sessions to total cost, while the status line already shows the response's own usage.
-- **Pricing for other providers.** It waits for the data-driven model catalog ([#152](https://github.com/hakula139/oxide-code/issues/152)).
+- **Pricing for other providers.** It waits for the data-driven model catalog ([#152](https://github.com/hakulab/oxide-code/issues/152)).
 
 ## Sources
 

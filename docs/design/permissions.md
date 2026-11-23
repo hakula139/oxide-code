@@ -6,7 +6,7 @@ Companion docs: [Modals](modals.md), [File Edits](file-edits.md).
 
 ## Rules and Classes
 
-Rules live in three tables under `[permission]`, one per tier, and each table holds a pattern list for each permission class. Each tool declares its class in its `ToolSpec`, and `Tool::spec` has no default, so a new tool cannot inherit a permissive class. No built-in tool belongs to `net` or `mcp` yet, so those lists parse and validate but match no calls, and MCP tools join `mcp` with [#178](https://github.com/hakula139/oxide-code/issues/178).
+Rules live in three tables under `[permission]`, one per tier, and each table holds a pattern list for each permission class. Each tool declares its class in its `ToolSpec`, and `Tool::spec` has no default, so a new tool cannot inherit a permissive class. No built-in tool belongs to `net` or `mcp` yet, so those lists parse and validate but match no calls, and MCP tools join `mcp` with [#178](https://github.com/hakulab/oxide-code/issues/178).
 
 A `Rule` pairs a class with a pattern, and the list that holds it sets its tier. Every pattern compiles when the config loads, so a malformed pattern fails startup and names its file.
 
@@ -47,7 +47,7 @@ Response usage is recorded before the decision is read, malformed decisions and 
 
 While idle, the engine applies a switch at once. During a turn, a compaction, or a sign-in, the switch waits in the operation's `Mailbox`, and `Mailbox::apply_mode` hands it to the policy before the gate weighs each call, at each round boundary, and before the engine renders the user context for a prompt or a compaction, so the model reads the mode the policy enforces, as [Prompt](prompt.md#user-context) describes. `Engine::serve` applies a switch still waiting once the operation ends, however it ends (**Mode switches wait for the next gate, round boundary, or context render**).
 
-Tab steps forward and Shift+Tab backward through `Mode`'s declared order, `auto`, `manual`, `plan`, then `yolo`, wrapping at both ends (**The keyboard cycle reaches `plan` before `yolo` and wraps at both ends**). The TUI steps from the last mode it requested, so a second press before the engine confirms the first moves on. The same order lists the modes in the `/mode` picker, its argument completion, `--mode --help`, and error messages, and the keys stay fixed until configurable key bindings land with [#278](https://github.com/hakula139/oxide-code/issues/278).
+Tab steps forward and Shift+Tab backward through `Mode`'s declared order, `auto`, `manual`, `plan`, then `yolo`, wrapping at both ends (**The keyboard cycle reaches `plan` before `yolo` and wraps at both ends**). The TUI steps from the last mode it requested, so a second press before the engine confirms the first moves on. The same order lists the modes in the `/mode` picker, its argument completion, `--mode --help`, and error messages, and the keys stay fixed until configurable key bindings land with [#278](https://github.com/hakulab/oxide-code/issues/278).
 
 ## Path Targets
 
@@ -105,7 +105,7 @@ Headless `-p` runs render engine events through `run_op`. `main` calls `Config::
 2. **The classifier can allow or ask.** Uncertainty leaves the decision with the user. Explicit deny, read-only mode, user rejection, and unavailable approval can prevent execution.
 3. **User intent has explicit provenance.** Assistant explanations and tool output can contain untrusted instructions, so they cannot supply authorization.
 4. **Classification is a side query.** Reusing the existing client keeps authentication, gateway behavior, cancellation, and billing in their owning layers without introducing another provider framework.
-5. **Native path tools resolve once and act on the result.** This binds permission matching to the path the tool uses, and a no-follow open makes a symlink swapped into the final component fail. A swap in an intermediate directory needs `openat`-style traversal or an OS sandbox ([#133](https://github.com/hakula139/oxide-code/issues/133)). File integrity checks stay independent of approval.
+5. **Native path tools resolve once and act on the result.** This binds permission matching to the path the tool uses, and a no-follow open makes a symlink swapped into the final component fail. A swap in an intermediate directory needs `openat`-style traversal or an OS sandbox ([#133](https://github.com/hakulab/oxide-code/issues/133)). File integrity checks stay independent of approval.
 6. **Project files tighten only.** A checkout may add deny or ask rules while classifier settings and permission grants stay user-controlled.
 7. **Approvals stay in process.** Session grants disappear when the session changes and are never restored from persisted tool output. A persisted grant has no disk ground truth to revalidate on resume, unlike a `FileSnapshot` rehash, so restoring it would regress trust.
 8. **Gitignore-style paths.** Patterns work like `.gitignore` entries, so `.env` and `target` need no `**/` prefix and cover what is beneath them. Anchoring at every anchor directory applies a project rule to each workspace root, while `/` and `~/` keep exact absolute rules available.
@@ -116,7 +116,7 @@ Headless `-p` runs render engine events through `run_op`. `main` calls `Config::
 
 ## Out of Scope
 
-- **An OS sandbox** ([#133](https://github.com/hakula139/oxide-code/issues/133)). It would enforce a filesystem boundary that the rules cannot reach, covering files a `bash` command touches and intermediate-directory swaps.
+- **An OS sandbox** ([#133](https://github.com/hakulab/oxide-code/issues/133)). It would enforce a filesystem boundary that the rules cannot reach, covering files a `bash` command touches and intermediate-directory swaps.
 
 ## Sources
 

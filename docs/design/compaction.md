@@ -152,7 +152,7 @@ In headless runs, `driver::stdio::TextState` writes `Compacting the conversation
 ## Out of Scope
 
 - **Partial and range compaction.** Claude Code's message-selector rewind adds a selector UI, a dual-direction summarizer, and a transcript splice for a case `/compact` already covers.
-- **Compaction hooks.** Hooks belong to a general surface tracked in [#157](https://github.com/hakula139/oxide-code/issues/157), with command hooks in [#159](https://github.com/hakula139/oxide-code/issues/159) and the `pre_compact` event in [#168](https://github.com/hakula139/oxide-code/issues/168).
+- **Compaction hooks.** Hooks belong to a general surface tracked in [#157](https://github.com/hakulab/oxide-code/issues/157), with command hooks in [#159](https://github.com/hakulab/oxide-code/issues/159) and the `pre_compact` event in [#168](https://github.com/hakulab/oxide-code/issues/168).
 
 ## Sources
 

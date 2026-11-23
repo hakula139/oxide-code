@@ -182,11 +182,11 @@ The server sees request elements in this order:
 [tool definitions] → [system blocks...] → [messages...]
 ```
 
-On 2026-04-23, a third-party gateway rejected agentic requests whose static system block carried `scope: "global"` after tool definitions, with HTTP 400 ([#23](https://github.com/hakula139/oxide-code/pull/23)):
+On 2026-04-23, a third-party gateway rejected agentic requests whose static system block carried `scope: "global"` after tool definitions, with HTTP 400 ([#23](https://github.com/hakulab/oxide-code/pull/23)):
 
 > `cache_control.scope: "global"` is only valid when every preceding block is also globally scoped. A block with `scope: "global"` was found after content with a narrower cache scope.
 
-Other servers accept the same layout. The Anthropic API accepted `scope: "global"` after tool definitions in [#123](https://github.com/hakula139/oxide-code/issues/123)'s live run on 2026-10-17 with oxide-code at 01b4823, and so did the relay gateway probed that day (see [Third-Party Gateway Validation](#third-party-gateway-validation)).
+Other servers accept the same layout. The Anthropic API accepted `scope: "global"` after tool definitions in [#123](https://github.com/hakulab/oxide-code/issues/123)'s live run on 2026-10-17 with oxide-code at 01b4823, and so did the relay gateway probed that day (see [Third-Party Gateway Validation](#third-party-gateway-validation)).
 
 Claude Code 2.1.301, as read on 2026-10-17, sends `scope: "global"` and the `cch` placeholder only when the base URL is `api.anthropic.com`, while the 2.1.87 source checked only the provider, which still reads as first-party when `ANTHROPIC_BASE_URL` points at a gateway.
 
@@ -251,7 +251,7 @@ The `cch` hash is the primary technical enforcement, and both its algorithm (xxH
 oxide-code attaches the attestation block to every request under every auth mode, as Claude Code does on its turns and side queries in both the 2.1.87 source and the 2.1.301 bundle, and `CLAUDE_CODE_ATTRIBUTION_HEADER=0` drops it everywhere. A relay gateway checks its version and fingerprint (see [Third-Party Gateway Validation](#third-party-gateway-validation)).
 
 - **`cch` by destination.** Requests to the Anthropic API carry a valid `cch` hash. Since 2.1.181, Claude Code sends custom base URLs the block without `cch`, so a gateway that caches on the request body sees a stable prefix, and oxide-code matches that.
-- **Version-specific constants.** The fingerprint salt and xxHash64 seed may change with Claude Code releases. The 2.1.301 bundle keeps the salt and character indices and changes the message selection, as [Fingerprint](#fingerprint-3-char-version-suffix) describes. Its seed lives in the native Bun HTTP stack outside the JavaScript bundle, and a scan of the 2.1.301 binary did not find it ([#123](https://github.com/hakula139/oxide-code/issues/123#issuecomment-6210505896)).
+- **Version-specific constants.** The fingerprint salt and xxHash64 seed may change with Claude Code releases. The 2.1.301 bundle keeps the salt and character indices and changes the message selection, as [Fingerprint](#fingerprint-3-char-version-suffix) describes. Its seed lives in the native Bun HTTP stack outside the JavaScript bundle, and a scan of the 2.1.301 binary did not find it ([#123](https://github.com/hakulab/oxide-code/issues/123#issuecomment-6210505896)).
 - **Verification.** On 2026-10-16, the Anthropic API accepted oxide-code's requests carrying a `cch` computed with the seed above, which shows that the API accepts the hash but not that it verifies it.
 
 ## Third-Party Gateway Validation

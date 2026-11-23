@@ -48,7 +48,7 @@ rustPlatform.buildRustPackage {
 
   meta = {
     description = "Terminal-based AI coding assistant written in Rust";
-    homepage = "https://github.com/hakula139/oxide-code";
+    homepage = "https://github.com/hakulab/oxide-code";
     license = lib.licenses.mit;
     mainProgram = "ox";
   };
