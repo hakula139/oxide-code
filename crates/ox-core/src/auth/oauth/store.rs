@@ -36,16 +36,16 @@ struct OAuthCredential {
 }
 
 impl OAuthCredential {
-    fn expires_at_ms(&self) -> u64 {
-        u64::try_from(self.expires_at).unwrap_or(0)
-    }
-
     fn into_token(self) -> Token {
         Token {
             expires_at_ms: self.expires_at_ms(),
             access_token: self.access_token,
             unsaved: None,
         }
+    }
+
+    fn expires_at_ms(&self) -> u64 {
+        u64::try_from(self.expires_at).unwrap_or(0)
     }
 }
 

@@ -109,10 +109,6 @@ pub const MODELS: &[ModelInfo] = &[
     },
 ];
 
-fn lookup(id: &str) -> Option<&'static ModelInfo> {
-    MODELS.iter().find(|info| info.id == id)
-}
-
 /// The catalog row to suggest for an unknown `id` that carries a `[1m]` suffix or starts with
 /// `claude-`: the row the ID names once the suffix is dropped, else the row of the family it names.
 pub(crate) fn replacement_for(id: &str) -> Option<&'static ModelInfo> {
@@ -138,6 +134,10 @@ pub(crate) fn lacks_progress_updates(id: &str) -> bool {
 /// The catalog rates for `id`, or `None` for an ID outside the catalog.
 pub(crate) fn cost_rates(id: &str) -> Option<TokenCostRates> {
     lookup(id).map(|info| info.cost_rates)
+}
+
+fn lookup(id: &str) -> Option<&'static ModelInfo> {
+    MODELS.iter().find(|info| info.id == id)
 }
 
 // ── ModelSpec ──

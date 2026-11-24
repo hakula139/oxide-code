@@ -201,7 +201,7 @@ pub struct ThemeConfig {
 pub struct ConfigCheck {
     /// The config files read, in load order.
     pub files: Vec<PathBuf>,
-    /// Startup notices, such as an unsupported model.
+    /// Startup notices.
     pub notices: Vec<String>,
     pub theme: ThemeConfig,
 }
@@ -1065,11 +1065,14 @@ mod tests {
             );
             assert_eq!(config.status_line, StatusLineSegment::DEFAULT);
             assert_auth(&config, AuthSource::ApiKeyEnv, "sk-default");
-            assert!(config.gateway.custom_headers.is_empty());
+            assert_eq!(
+                config.gateway.custom_headers,
+                reqwest::header::HeaderMap::new(),
+            );
             assert!(config.gateway.attribution);
             assert!(config.gateway.structured_outputs);
             assert_eq!(config.theme.base, DEFAULT_THEME);
-            assert!(config.theme.overrides.is_empty());
+            assert_eq!(config.theme.overrides, toml::Table::new());
             assert_eq!(config.permission.mode(), Mode::Auto);
             assert_eq!(config.permission_auto.model.id(), "claude-haiku-5-5");
             assert_eq!(config.permission_auto.instructions, [] as [&str; 0]);
