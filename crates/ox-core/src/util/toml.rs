@@ -77,6 +77,7 @@ mod tests {
     use std::collections::HashMap;
 
     use indoc::indoc;
+    use serde::Deserialize;
 
     use super::*;
 
@@ -136,8 +137,6 @@ mod tests {
     }
 
     mod redacted_message {
-        use serde::Deserialize;
-
         use super::*;
 
         #[expect(

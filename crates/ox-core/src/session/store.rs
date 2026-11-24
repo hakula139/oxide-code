@@ -282,13 +282,13 @@ pub(crate) struct UsageRecord {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Barrier;
+    use std::thread;
+
     use super::*;
     use crate::session::store::testing::{isolated_store, seed_test_session};
 
     mod open_in {
-        use std::sync::Barrier;
-        use std::thread;
-
         use super::*;
 
         #[test]

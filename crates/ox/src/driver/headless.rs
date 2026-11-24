@@ -168,7 +168,7 @@ mod tests {
             });
             let mut notice = Vec::new();
 
-            let text = read_input(reader, &mut notice, Duration::from_secs(3)).await;
+            let text = read_input(reader, &mut notice, STDIN_NOTICE_DELAY).await;
 
             assert_eq!(text.unwrap(), "+fix\n");
             assert_eq!(
@@ -187,7 +187,7 @@ mod tests {
             ] {
                 let mut notice = Vec::new();
 
-                let text = read_input(input, &mut notice, Duration::from_secs(3)).await;
+                let text = read_input(input, &mut notice, STDIN_NOTICE_DELAY).await;
 
                 assert_eq!(
                     (text.unwrap().as_str(), notice.as_slice()),
@@ -378,11 +378,7 @@ mod tests {
         #[tokio::test]
         async fn reports_the_signal_that_stops_the_run_in_each_format() {
             with_pinned_home(async {
-                for format in [
-                    OutputFormat::Text,
-                    OutputFormat::Json,
-                    OutputFormat::StreamJson,
-                ] {
+                for &format in OutputFormat::value_variants() {
                     let server = MockServer::start().await;
                     mount_stalled_reply_once(&server).await;
                     let dir = tempfile::tempdir().unwrap();

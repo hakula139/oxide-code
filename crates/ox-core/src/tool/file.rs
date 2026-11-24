@@ -28,51 +28,6 @@ pub(super) async fn tracker_key(path: &Path) -> PathBuf {
     )
 }
 
-// ── File Target Validation ──
-
-/// What a file tool does with its target, which its refusals name.
-#[derive(Debug, Clone, Copy, Display)]
-#[strum(serialize_all = "lowercase")]
-pub(super) enum FileVerb {
-    Read,
-    Edit,
-    Write,
-}
-
-/// Rejects targets the [`FileTracker`] cannot gate by their metadata before an open, phrasing each
-/// refusal for `verb`. Blocks, so callers run it on the blocking pool.
-fn validate_file_target(path: &Path, verb: FileVerb) -> Result<(), String> {
-    let metadata =
-        std::fs::metadata(path).map_err(|e| format!("Failed to access {}: {e}", path.display()))?;
-    validate_regular_file(&metadata, MAX_TRACKED_FILE_SIZE)
-        .map_err(|error| file_read_error(path, error, verb))
-}
-
-fn file_read_error(path: &Path, error: FileReadError, verb: FileVerb) -> String {
-    match error {
-        FileReadError::Io(error) => format!("Failed to read {}: {error}", path.display()),
-        FileReadError::Directory => match verb {
-            FileVerb::Read => format!(
-                "{} is a directory. Use the glob tool to list directory contents.",
-                path.display()
-            ),
-            FileVerb::Edit | FileVerb::Write => {
-                format!("{} is a directory. Refusing to {verb}.", path.display())
-            }
-        },
-        FileReadError::NonRegular => format!(
-            "{} is not a regular file (fifo, socket, or device). Refusing to {verb}.",
-            path.display()
-        ),
-        FileReadError::TooLarge { size, max } => {
-            let (size, max) = (format_size(size), format_size(max));
-            format!(
-                "File is too large ({size}, max {max}). Use the bash tool to {verb} large files.",
-            )
-        }
-    }
-}
-
 // ── Text Rules ──
 
 const BINARY_CHECK_SIZE: usize = 8192;
@@ -162,6 +117,51 @@ pub(super) async fn create_file(
         Ok((key, bytes))
     })
     .await?
+}
+
+// ── File Target Validation ──
+
+/// What a file tool does with its target, which its refusals name.
+#[derive(Debug, Clone, Copy, Display)]
+#[strum(serialize_all = "lowercase")]
+pub(super) enum FileVerb {
+    Read,
+    Edit,
+    Write,
+}
+
+/// Rejects targets the [`FileTracker`] cannot gate by their metadata before an open, phrasing each
+/// refusal for `verb`. Blocks, so callers run it on the blocking pool.
+fn validate_file_target(path: &Path, verb: FileVerb) -> Result<(), String> {
+    let metadata =
+        std::fs::metadata(path).map_err(|e| format!("Failed to access {}: {e}", path.display()))?;
+    validate_regular_file(&metadata, MAX_TRACKED_FILE_SIZE)
+        .map_err(|error| file_read_error(path, error, verb))
+}
+
+fn file_read_error(path: &Path, error: FileReadError, verb: FileVerb) -> String {
+    match error {
+        FileReadError::Io(error) => format!("Failed to read {}: {error}", path.display()),
+        FileReadError::Directory => match verb {
+            FileVerb::Read => format!(
+                "{} is a directory. Use the glob tool to list directory contents.",
+                path.display()
+            ),
+            FileVerb::Edit | FileVerb::Write => {
+                format!("{} is a directory. Refusing to {verb}.", path.display())
+            }
+        },
+        FileReadError::NonRegular => format!(
+            "{} is not a regular file (fifo, socket, or device). Refusing to {verb}.",
+            path.display()
+        ),
+        FileReadError::TooLarge { size, max } => {
+            let (size, max) = (format_size(size), format_size(max));
+            format!(
+                "File is too large ({size}, max {max}). Use the bash tool to {verb} large files.",
+            )
+        }
+    }
 }
 
 #[cfg(test)]
