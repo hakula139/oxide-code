@@ -27,11 +27,11 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [ cargo-about ];
 
   preBuild = ''
-    cargo about generate \
+    cargo about generate licenses \
       --locked \
       --manifest-path crates/ox/Cargo.toml \
       --target ${stdenv.hostPlatform.rust.rustcTarget} \
-      --name about licenses \
+      --name about \
       -o THIRD-PARTY-NOTICES \
       --offline
   '';

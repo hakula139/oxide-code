@@ -1,5 +1,6 @@
 ---
 source: crates/ox-tui/src/slash/help.rs
+assertion_line: 98
 expression: "render_modal(&mut modal, 100, u16::MAX)"
 ---
 [
@@ -32,6 +33,7 @@ expression: "render_modal(&mut modal, 100, u16::MAX)"
     "Tab / Shift+Tab                   Switch the permission mode",
     "Esc                               Stop the running turn",
     "Ctrl+O                            Expand or collapse long output",
+    "Ctrl+R                            Search prompt history",
     "Ctrl+C twice                      Exit, even with a draft",
     "Ctrl+D twice                      Exit with an empty input",
     "//                                Send text that starts with a slash",

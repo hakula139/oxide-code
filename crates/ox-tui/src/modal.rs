@@ -327,11 +327,8 @@ pub(crate) mod testing {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
     use super::*;
-    use crate::testing::buffer_rows;
+    use crate::testing::{buffer_rows, render_backend};
 
     /// Renders `modal` at `width` and the height it requests.
     pub(crate) fn rendered_text(modal: &mut dyn Modal, width: u16) -> String {
@@ -362,11 +359,7 @@ pub(crate) mod testing {
         height: u16,
         render: impl FnOnce(&mut Frame<'_>, Rect, &Theme),
     ) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| render(frame, Rect::new(0, 0, width, height), &Theme::default()))
-            .unwrap();
-        buffer_rows(terminal.backend().buffer())
+        buffer_rows(render_backend(width, height, render).buffer())
     }
 
     /// Emits a fixed action on a sentinel key for exercising `ModalStack`.
@@ -633,8 +626,8 @@ mod tests {
             );
 
             for (mut modal, hint) in [
-                (question, "After 3s: use the recommended answer, or skip"),
-                (approval, "After 3s: deny the call"),
+                (question, "After 3 s: use the recommended answer, or skip"),
+                (approval, "After 3 s: deny the call"),
             ] {
                 let rows = render_rows(&mut *modal, 70, 15);
                 assert!(rows.iter().any(|row| row.contains(hint)), "{rows:?}");

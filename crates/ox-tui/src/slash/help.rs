@@ -3,7 +3,7 @@
 use ox_core::command;
 
 use super::registry::{BUILT_INS, SlashCommand, SlashOutcome};
-use crate::action::TOGGLE_EXPANDED;
+use crate::action::{SEARCH_PROMPTS, TOGGLE_EXPANDED};
 use crate::keymap::{CTRL_C, CTRL_D};
 use crate::modal::kv_overview::{KvOverview, KvSection};
 use crate::session_info::LiveSessionInfo;
@@ -50,6 +50,10 @@ fn build_modal() -> KvOverview {
                 (
                     TOGGLE_EXPANDED.to_string(),
                     "Expand or collapse long output".to_owned(),
+                ),
+                (
+                    SEARCH_PROMPTS.to_string(),
+                    "Search prompt history".to_owned(),
                 ),
                 (
                     format!("{CTRL_C} twice"),

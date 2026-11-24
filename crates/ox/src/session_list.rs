@@ -10,8 +10,7 @@ use unicode_width::UnicodeWidthStr as _;
 
 use ox_core::session::display::{DisplayTitle, id_prefix};
 use ox_core::session::store::SessionStore;
-use ox_core::session::store::listing::{ArchiveState, SessionInfo};
-use ox_core::session::store::listing::{ListScope, ProjectScope};
+use ox_core::session::store::listing::{ArchiveState, ListScope, ProjectScope, SessionInfo};
 use ox_core::util;
 use ox_core::util::path::tildify;
 use ox_core::util::text::{escape_line, pad_to_width};

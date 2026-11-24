@@ -19,8 +19,9 @@ use ox_core::session::display::{
 };
 use ox_core::session::saved::{ArchiveUpdate, SavedError};
 use ox_core::session::store::SessionStore;
-use ox_core::session::store::listing::{ArchiveState, SessionInfo};
-use ox_core::session::store::listing::{ListScope, ProjectScope, SessionWalk};
+use ox_core::session::store::listing::{
+    ArchiveState, ListScope, ProjectScope, SessionInfo, SessionWalk,
+};
 use ox_core::util::path::tildify;
 use ox_core::util::text::{
     center_truncate_to_width, compact_count, escape_line, pad_start_to_width, pad_to_width, plural,
@@ -39,8 +40,8 @@ use crate::modal::chrome::{
     COLUMN_GAP, FOOTER_HEIGHT, above, height_above, render_footer, render_footer_text,
 };
 use crate::modal::line_editor::LineEditor;
-use crate::modal::pages::{Loaded, ModalPage, Pages};
-use crate::modal::searchable_list::{LoadState, SearchableItem, SearchableList};
+use crate::modal::pages::{ModalPage, PageBudget, Pages};
+use crate::modal::searchable_list::{SearchableItem, SearchableList};
 use crate::modal::{EngineUpdate, Modal, ModalAction, ModalKey, UpdateReply};
 use crate::session_info::LiveSessionInfo;
 use crate::theme::Theme;
@@ -58,7 +59,10 @@ const VIEWPORT_HEIGHT: u16 = 12;
 const PAGE_SIZE: usize = 30;
 /// Rows left below the cursor at which the picker loads the next page of sessions.
 const LOAD_AHEAD: usize = VIEWPORT_HEIGHT as usize;
-const LOADER_STOPPED: &str = "Failed to load sessions: the page loader stopped";
+const PAGE_BUDGET: PageBudget = PageBudget {
+    threshold: LOAD_AHEAD,
+    limit: PAGE_SIZE,
+};
 
 /// Narrowest title a row keeps before it drops a column besides the time.
 const TITLE_FLOOR: usize = 24;
@@ -423,42 +427,19 @@ impl ResumePicker {
     /// top. Rows arrive as pages load.
     fn reload(&mut self) {
         self.listed_at = now_local();
-        self.pages.replace(self.store.walk(self.scope));
         self.load_error = None;
-        self.list.replace_items(Vec::new());
-        self.list.set_load_state(LoadState::Loading);
-        self.load_ahead();
+        self.pages.reload(
+            self.store.walk(self.scope),
+            &mut self.list,
+            &self.events,
+            PAGE_BUDGET,
+        );
     }
 
     /// Requests the next page while fewer than [`LOAD_AHEAD`] rows pass the filter below the
     /// cursor, so scrolling reaches the end and a search covers every session in scope.
     fn load_ahead(&mut self) {
-        if self.list.rows_below_cursor() < LOAD_AHEAD {
-            self.pages.request(&self.events, PAGE_SIZE);
-        }
-    }
-
-    /// Appends a loaded page and asks for the next one when needed.
-    fn append_page(&mut self, page: Vec<SessionInfo>) {
-        let live_id = self.live_session_id.as_str();
-        let rows = page
-            .into_iter()
-            .filter(|info| info.session_id != live_id)
-            .map(|info| {
-                SessionRow::from_info(
-                    info,
-                    self.listed_at,
-                    self.scope.projects == ProjectScope::Every,
-                )
-            })
-            .collect();
-        self.list.append_items(rows);
-        self.load_ahead();
-        self.list.set_load_state(if self.pages.has_more() {
-            LoadState::Loading
-        } else {
-            LoadState::Complete
-        });
+        self.pages.load_ahead(&self.list, &self.events, PAGE_BUDGET);
     }
 
     fn run(&mut self, action: PickerAction) -> ModalKey {
@@ -613,32 +594,11 @@ impl ResumePicker {
             self.load_ahead();
         }
     }
-
-    /// Shows what a page brought, ending the listing on a failure.
-    fn page_loaded(&mut self, loaded: Loaded<SessionInfo>) {
-        match loaded {
-            Loaded::Page(page) => self.append_page(page),
-            Loaded::Failed(err) => {
-                tracing::warn!(
-                    error = %format_args!("{err:#}"),
-                    "resume picker failed to list sessions"
-                );
-                self.load_error = Some(format!("Failed to load sessions: {err:#}"));
-                self.list.set_load_state(LoadState::Failed);
-            }
-            Loaded::Stopped => {
-                self.load_error = Some(LOADER_STOPPED.to_owned());
-                self.list.set_load_state(LoadState::Failed);
-            }
-        }
-    }
 }
 
 impl Modal for ResumePicker {
-    fn height(&mut self, width: u16, max_height: u16) -> u16 {
-        height_above(max_height, FOOTER_HEIGHT, |room| {
-            self.list.height(width, room)
-        })
+    fn height(&mut self, _width: u16, max_height: u16) -> u16 {
+        height_above(max_height, FOOTER_HEIGHT, |room| self.list.height(room))
     }
 
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
@@ -703,15 +663,28 @@ impl Modal for ResumePicker {
         let ModalPage::Sessions(page) = page else {
             return Some(page);
         };
-        match self.pages.take(page) {
-            Ok(loaded) => {
-                self.page_loaded(loaded);
+        let live_id = self.live_session_id.as_str();
+        let listed_at = self.listed_at;
+        let show_project = self.scope.projects == ProjectScope::Every;
+        match self.pages.apply_page(
+            page,
+            &mut self.list,
+            &self.events,
+            PAGE_BUDGET,
+            "sessions",
+            |items| {
+                items
+                    .into_iter()
+                    .filter(|info| info.session_id != live_id)
+                    .map(|info| SessionRow::from_info(info, listed_at, show_project))
+                    .collect()
+            },
+        ) {
+            Ok(error) => {
+                self.load_error = error;
                 None
             }
-            Err(page) => {
-                self.load_ahead();
-                Some(ModalPage::Sessions(page))
-            }
+            Err(page) => Some(ModalPage::Sessions(page)),
         }
     }
 
@@ -743,16 +716,21 @@ impl Modal for ResumePicker {
 }
 
 #[cfg(test)]
+impl crate::modal::pages::testing::PagedModal for ResumePicker {
+    fn pages_busy(&self) -> bool {
+        self.pages.is_busy()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::ops::{Deref, DerefMut};
     use std::time::Duration;
 
     use crossterm::event::KeyModifiers;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use time::macros::datetime;
-    use tokio::sync::mpsc;
 
     use ox_core::protocol::OpEnd;
     use ox_core::protocol::testing::op_id;
@@ -766,15 +744,15 @@ mod tests {
 
     use super::Column::{Branch, Id, Msgs, Project, Title, When};
     use super::*;
-    use crate::app_event::AppEvent;
     use crate::modal::ModalStack;
     use crate::modal::acceptance::TYPE_AHEAD_GUARD;
     use crate::modal::chrome::HINT_SEPARATOR;
     use crate::modal::pages::PageEnd;
+    use crate::modal::pages::testing::PageHarness;
+    use crate::modal::searchable_list::LoadState;
     use crate::modal::testing::{
         ScriptedModal, render_modal, render_rows, render_rows_with, rendered_text,
     };
-    use crate::session_info::testing::test_session_info;
     use crate::slash::registry::testing::run_execute;
 
     fn archive(picker: &mut ResumePicker) -> ModalKey {
@@ -869,80 +847,11 @@ mod tests {
         ids
     }
 
-    /// A picker and the channel its page workers report to, which stands in for the App.
-    struct Harness {
-        picker: ResumePicker,
-        inbox: mpsc::UnboundedReceiver<AppEvent>,
-    }
-
-    impl Harness {
-        /// `open` beside the live session `live_session_id`, listing from `store`.
-        fn new(
-            store: SessionStore,
-            live_session_id: &str,
-            open: impl FnOnce(&LiveSessionInfo) -> ResumePicker,
-        ) -> Self {
-            let (app_events, inbox) = mpsc::unbounded_channel();
-            let info = LiveSessionInfo {
-                store,
-                app_events,
-                session_id: live_session_id.to_owned(),
-                ..test_session_info()
-            };
-            Self {
-                picker: open(&info),
-                inbox,
-            }
-        }
-
-        /// The next page a worker sent, waiting for it.
-        fn next_page(&mut self) -> ModalPage {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                if let Ok(event) = self.inbox.try_recv() {
-                    assert!(
-                        matches!(event, AppEvent::Page(_)),
-                        "expected a sessions page"
-                    );
-                    if let AppEvent::Page(page) = event {
-                        return page;
-                    }
-                }
-                assert!(Instant::now() < deadline, "the page never arrived");
-                std::thread::yield_now();
-            }
-        }
-
-        /// Hands the picker every page it asks for, waiting on each worker. A page from a listing
-        /// the picker reloaded since goes nowhere, as in the App.
-        fn settle(&mut self) {
-            while matches!(
-                self.picker.pages,
-                Pages::Loading(_) | Pages::Reloading { .. }
-            ) {
-                let page = self.next_page();
-                _ = self.picker.on_page(page);
-            }
-        }
-    }
-
-    impl Deref for Harness {
-        type Target = ResumePicker;
-
-        fn deref(&self) -> &ResumePicker {
-            &self.picker
-        }
-    }
-
-    impl DerefMut for Harness {
-        fn deref_mut(&mut self) -> &mut ResumePicker {
-            &mut self.picker
-        }
-    }
+    type Harness = PageHarness<ResumePicker>;
 
     /// The `/resume` picker beside the live session `live_session_id`, before any page loads.
     fn unsettled(store: SessionStore, live_session_id: &str) -> Harness {
-        Harness::new(store, live_session_id, ResumePicker::new)
+        PageHarness::new(store, Some(live_session_id), ResumePicker::new)
     }
 
     /// [`unsettled`] once every page it asks for has loaded.
@@ -958,7 +867,7 @@ mod tests {
         live_session_id: &str,
         projects: ProjectScope,
     ) -> Harness {
-        let mut picker = Harness::new(store, live_session_id, |info| {
+        let mut picker = PageHarness::new(store, Some(live_session_id), |info| {
             ResumePicker::at_startup(info, projects)
         });
         picker.settle();
@@ -2433,8 +2342,9 @@ mod tests {
                     ("error".to_owned(), "disk I/O error".to_owned()),
                     (
                         "message".to_owned(),
-                        "resume picker failed to list sessions".to_owned(),
+                        "picker failed to load page".to_owned()
                     ),
+                    ("subject".to_owned(), "sessions".to_owned()),
                 ])]
             );
         }
@@ -2448,10 +2358,11 @@ mod tests {
             let unclaimed = picker.on_page(page);
 
             assert!(unclaimed.is_none());
-            assert_eq!(picker.load_error.as_deref(), Some(LOADER_STOPPED));
+            let stopped = "Failed to load sessions: the page loader stopped";
+            assert_eq!(picker.load_error.as_deref(), Some(stopped));
             assert_eq!(
                 footer_row(&mut picker, 80),
-                format!("{MODAL_ERROR_PREFIX}{LOADER_STOPPED}"),
+                format!("{MODAL_ERROR_PREFIX}{stopped}"),
             );
             assert!(!picker.pages.has_more());
         }

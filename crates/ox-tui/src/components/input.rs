@@ -19,9 +19,9 @@ use ox_core::util::text::trim_blank_edges;
 use self::popup::{PopupState, SlashPopup, popup_state};
 use crate::action::Action;
 use crate::cursor::place_clamped;
-use crate::glyphs::{USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
+use crate::glyphs::{INLINE_SEPARATOR, USER_PROMPT_PREFIX, USER_PROMPT_PREFIX_WIDTH};
 use crate::grapheme;
-use crate::keymap::{KeyChord, hint};
+use crate::keymap::{CTRL_END, CTRL_HOME, KeyChord, hint};
 use crate::modal::chrome::KEY_UP_DOWN;
 use crate::saturating_u16;
 use crate::slash::arg_placeholder_for;
@@ -132,7 +132,11 @@ impl InputArea {
         };
         let mut line = Line::default();
         for hint in hints {
-            let separator = if line.spans.is_empty() { "  " } else { " · " };
+            let separator = if line.spans.is_empty() {
+                "  "
+            } else {
+                INLINE_SEPARATOR
+            };
             let span = Span::raw(format!("{separator}{hint}"));
             if line.width() + span.width() > usize::from(width) {
                 break;
@@ -220,12 +224,12 @@ impl InputArea {
     // ── Key Routing ──
 
     fn handle_key(&mut self, key: &KeyEvent) -> InputOutcome {
-        match (key.code, key.modifiers) {
-            (KeyCode::BackTab, _) => {
+        match key.code {
+            KeyCode::BackTab => {
                 return InputOutcome::Action(Action::CycleMode(Direction::Backward));
             }
-            (KeyCode::PageUp | KeyCode::PageDown, _)
-            | (KeyCode::Home | KeyCode::End, KeyModifiers::CONTROL) => {
+            KeyCode::PageUp | KeyCode::PageDown => return InputOutcome::Ignored,
+            _ if CTRL_HOME.matches(key) || CTRL_END.matches(key) => {
                 return InputOutcome::Ignored;
             }
             _ => {}
@@ -322,7 +326,6 @@ impl InputArea {
 
     fn popup_complete_to_buffer(&mut self, completion: &str) {
         self.set_text(&format!("{completion} "));
-        self.refresh_popup();
     }
 
     fn refresh_popup(&mut self) {
@@ -374,7 +377,6 @@ impl InputArea {
     /// Empties the buffer and closes the popup, returning the action that submits `text`.
     fn clear_and_submit(&mut self, text: String) -> Action {
         self.set_text("");
-        self.popup.set_state(None);
         Action::Submit(text)
     }
 }
@@ -386,13 +388,10 @@ mod tests {
     use ratatui::layout::Position;
 
     use super::*;
+    use crate::testing::{key_event as key, render_backend};
 
     fn test_input() -> InputArea {
         InputArea::new()
-    }
-
-    fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
-        Event::Key(KeyEvent::new(code, modifiers))
     }
 
     fn type_text(input: &mut InputArea, text: &str) {
@@ -408,13 +407,9 @@ mod tests {
     }
 
     fn render_in_state(input: &InputArea, width: u16, height: u16, busy: bool) -> TestBackend {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| {
-                input.render(frame, frame.area(), busy, &Theme::default());
-            })
-            .unwrap();
-        terminal.backend().clone()
+        render_backend(width, height, |frame, area, theme| {
+            input.render(frame, area, busy, theme);
+        })
     }
 
     mod height {
@@ -485,6 +480,8 @@ mod tests {
                 key(KeyCode::PageDown, KeyModifiers::NONE),
                 key(KeyCode::Home, KeyModifiers::CONTROL),
                 key(KeyCode::End, KeyModifiers::CONTROL),
+                key(KeyCode::Home, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+                key(KeyCode::End, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
             ] {
                 assert_eq!(
                     input.handle_event(&event),

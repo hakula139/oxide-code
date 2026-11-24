@@ -94,16 +94,16 @@ impl Modal for ConfirmDeleteSessionModal {
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> ModalKey {
+        if self.acceptance.guard() {
+            return ModalKey::Consumed;
+        }
         // The modal stack handles Esc and Ctrl+C.
         match event.code {
             KeyCode::Char('y' | 'Y') if !self.pending && self.acceptance.accepts(event) => {
                 self.confirm()
             }
             KeyCode::Char('n' | 'N') => ModalKey::Cancelled,
-            _ => {
-                self.acceptance.guard();
-                ModalKey::Consumed
-            }
+            _ => ModalKey::Consumed,
         }
     }
 
@@ -367,10 +367,41 @@ mod tests {
             }
         }
 
-        #[test]
-        fn cancel_keys_close_the_modal_before_rendering() {
+        #[tokio::test(start_paused = true)]
+        async fn buffered_n_and_modified_keys_extend_the_guard_instead_of_cancelling() {
             for event in [
                 KeyEvent::from(KeyCode::Char('n')),
+                KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT),
+                KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            ] {
+                let mut stack = ModalStack::default();
+                stack.push(Box::new(modal(0xab, "Fix auth flow")));
+                tokio::time::advance(TYPE_AHEAD_GUARD / 2).await;
+
+                assert!(stack.handle_key(&event).is_none(), "{event:?}");
+                assert!(stack.is_active(), "{event:?} must not cancel while guarded");
+
+                tokio::time::advance(TYPE_AHEAD_GUARD / 2).await;
+                assert!(
+                    stack
+                        .handle_key(&KeyEvent::from(KeyCode::Char('n')))
+                        .is_none()
+                );
+                assert!(stack.is_active(), "{event:?} must extend the guard");
+
+                tokio::time::advance(TYPE_AHEAD_GUARD).await;
+                assert!(
+                    stack
+                        .handle_key(&KeyEvent::from(KeyCode::Char('n')))
+                        .is_none()
+                );
+                assert!(!stack.is_active(), "n cancels once the guard lapses");
+            }
+        }
+
+        #[test]
+        fn esc_and_ctrl_c_close_the_modal_before_rendering() {
+            for event in [
                 KeyEvent::from(KeyCode::Esc),
                 KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             ] {

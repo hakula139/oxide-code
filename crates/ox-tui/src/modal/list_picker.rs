@@ -122,14 +122,14 @@ impl<T: PickerItem> ListPicker<T> {
     }
 
     /// Header plus one row per item, within `max_height`.
-    pub(crate) fn height(&self, _width: u16, max_height: u16) -> u16 {
+    pub(crate) fn height(&self, max_height: u16) -> u16 {
         let rows = saturating_u16(self.items.len());
         self.header.height().saturating_add(rows).min(max_height)
     }
 
     /// [`Self::height`] plus the [`FOOTER_HEIGHT`] footer rows, within `max_height`.
-    pub(crate) fn height_with_footer(&self, width: u16, max_height: u16) -> u16 {
-        height_above(max_height, FOOTER_HEIGHT, |room| self.height(width, room))
+    pub(crate) fn height_with_footer(&self, max_height: u16) -> u16 {
+        height_above(max_height, FOOTER_HEIGHT, |room| self.height(room))
     }
 
     /// Renders the list above a footer of `hints` at the bottom of `area`.
@@ -385,7 +385,7 @@ mod tests {
             // Title (1) + blank (1) + items.
             let p = picker(vec![FakeItem::new("a"), FakeItem::new("b")]);
 
-            assert_eq!(p.height(80, 40), 4);
+            assert_eq!(p.height(40), 4);
         }
 
         #[test]
@@ -393,14 +393,14 @@ mod tests {
             // Title (1) + description (1) + blank (1) = 3 header rows + items.
             let p = picker(vec![FakeItem::new("a")]).with_description("a small picker");
 
-            assert_eq!(p.height(80, 40), 4);
+            assert_eq!(p.height(40), 4);
         }
 
         #[test]
         fn caps_long_lists_at_the_max() {
             let items = (0..20).map(|_| FakeItem::new("x")).collect();
 
-            assert_eq!(picker(items).height(80, 7), 7);
+            assert_eq!(picker(items).height(7), 7);
         }
     }
 
@@ -412,9 +412,9 @@ mod tests {
             let short = picker(vec![FakeItem::new("a"), FakeItem::new("b")]);
             let long = picker((0..20).map(|_| FakeItem::new("x")).collect());
 
-            assert_eq!(short.height_with_footer(80, 40), 4 + FOOTER_HEIGHT);
-            assert_eq!(long.height_with_footer(80, 7), 7);
-            assert_eq!(long.height_with_footer(80, 1), 1);
+            assert_eq!(short.height_with_footer(40), 4 + FOOTER_HEIGHT);
+            assert_eq!(long.height_with_footer(7), 7);
+            assert_eq!(long.height_with_footer(1), 1);
         }
     }
 
@@ -452,7 +452,7 @@ mod tests {
             width: u16,
             max_height: u16,
         ) -> Vec<String> {
-            let height = picker.height(width, max_height);
+            let height = picker.height(max_height);
             render_rows_with(width, height, |frame, area, theme| {
                 picker.render(frame, area, theme);
             })

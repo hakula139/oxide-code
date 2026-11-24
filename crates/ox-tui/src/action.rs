@@ -69,6 +69,9 @@ pub(crate) enum AppAction {
 /// Ctrl+O toggles the expanded chat view.
 pub(crate) const TOGGLE_EXPANDED: KeyChord = KeyChord::ctrl('o');
 
+/// Ctrl+R opens prompt history search.
+pub(crate) const SEARCH_PROMPTS: KeyChord = KeyChord::ctrl('r');
+
 /// The app's key actions, which take their keys before the input box sees them.
 pub(crate) const APP_KEYMAP: Keymap<AppAction, ()> = Keymap::new(&[
     KeyAction {
@@ -78,7 +81,7 @@ pub(crate) const APP_KEYMAP: Keymap<AppAction, ()> = Keymap::new(&[
     },
     KeyAction {
         action: AppAction::SearchPrompts,
-        key: KeyChord::ctrl('r'),
+        key: SEARCH_PROMPTS,
         effect: |()| Some("search prompts"),
     },
 ]);

@@ -238,7 +238,7 @@ impl<T: SearchableItem> SearchableList<T> {
     }
 
     /// Chrome plus up to `max_visible` whole items, within `max_height`. Caller adds the footer.
-    pub(crate) fn height(&self, _width: u16, max_height: u16) -> u16 {
+    pub(crate) fn height(&self, max_height: u16) -> u16 {
         let chrome = self.chrome_height();
         let rows = self.visible_rows(max_height);
         chrome
@@ -378,7 +378,7 @@ mod tests {
 
     /// The three item rows of a `numbered(_, 3)` list at width 20.
     fn shown(l: &mut SearchableList<FakeItem>) -> Vec<String> {
-        let height = l.height(20, 40);
+        let height = l.height(40);
         render_rows(l, 20, height)[4..7]
             .iter()
             .map(|row| row.trim_end().to_owned())
@@ -745,7 +745,7 @@ mod tests {
         #[test]
         fn steps_by_the_rendered_page_and_clamps_at_last_visible_row() {
             let mut l = numbered(20, 5);
-            let height = l.height(20, 40);
+            let height = l.height(40);
             render_rows(&mut l, 20, height);
 
             l.page_down();
@@ -762,7 +762,7 @@ mod tests {
         #[test]
         fn shrinks_its_step_to_a_shorter_render() {
             let mut l = numbered(20, 5);
-            let height = l.height(20, 6);
+            let height = l.height(6);
             render_rows(&mut l, 20, height);
 
             l.page_down();
@@ -781,7 +781,7 @@ mod tests {
         #[test]
         fn clamps_at_zero() {
             let mut l = numbered(10, 5);
-            let height = l.height(20, 40);
+            let height = l.height(40);
             render_rows(&mut l, 20, height);
             l.page_down();
 
@@ -797,7 +797,7 @@ mod tests {
 
         #[test]
         fn keeps_the_full_viewport_when_it_fits() {
-            assert_eq!(list(vec![FakeItem::new("a")]).height(40, 40), 4 + 5);
+            assert_eq!(list(vec![FakeItem::new("a")]).height(40), 4 + 5);
         }
 
         #[test]
@@ -805,11 +805,11 @@ mod tests {
             let l = SearchableList::new("Pick", vec![FakeItem::<3> { haystack: "tall" }], 6);
 
             assert_eq!(
-                l.height(40, 12),
+                l.height(12),
                 4 + 6,
                 "two whole 3-row items, never a partial one"
             );
-            assert_eq!(l.height(40, 3), 3, "chrome alone is clipped to the max");
+            assert_eq!(l.height(3), 3, "chrome alone is clipped to the max");
         }
     }
 
@@ -817,7 +817,7 @@ mod tests {
         use super::*;
 
         fn first_row(l: &mut SearchableList<FakeItem>) -> String {
-            let height = l.height(40, 40);
+            let height = l.height(40);
             render_rows(l, 40, height)[4].trim_end().to_owned()
         }
 
@@ -828,7 +828,7 @@ mod tests {
                 l.select_next();
             }
 
-            let height = l.height(20, 7);
+            let height = l.height(7);
             let rows = render_rows(&mut l, 20, height);
 
             assert_eq!(rows.len(), 7);
@@ -842,7 +842,7 @@ mod tests {
         fn at_minimum_width_does_not_panic() {
             let mut l = list(vec![FakeItem::new("a long-ish entry"), FakeItem::new("b")]);
             let theme = Theme::default();
-            let h = l.height(20, 40);
+            let h = l.height(40);
             let mut terminal = Terminal::new(TestBackend::new(20, h)).unwrap();
 
             terminal
@@ -857,7 +857,7 @@ mod tests {
             for (query, x) in [("", 2), ("ab", 4)] {
                 let mut l = list(vec![FakeItem::new("alpha")]);
                 l.set_query(query);
-                let h = l.height(40, 40);
+                let h = l.height(40);
                 let mut terminal = Terminal::new(TestBackend::new(40, h)).unwrap();
 
                 terminal
@@ -874,7 +874,7 @@ mod tests {
             let mut l = list(vec![FakeItem::new("alpha"), FakeItem::new("beta")]);
             l.set_query("zzz");
 
-            let height = l.height(40, 40);
+            let height = l.height(40);
             let rows = render_rows(&mut l, 40, height);
 
             let rows: Vec<&str> = rows.iter().map(|row| row.trim_end()).collect();

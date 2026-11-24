@@ -3,11 +3,12 @@
 
 use std::ops::Range;
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 
 use super::ChatView;
 use super::selection::Selection;
 use super::stack::{Anchor, SlotTops, Stack};
+use crate::keymap::{CTRL_END, CTRL_HOME};
 
 /// Rows one wheel notch scrolls, the common terminal default.
 const WHEEL_SCROLL_ROWS: usize = 3;
@@ -55,20 +56,12 @@ impl ChatView {
                 code: KeyCode::PageDown,
                 ..
             }) => self.scroll_down(page),
-            Event::Key(KeyEvent {
-                code: KeyCode::Home,
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) => {
+            Event::Key(key) if CTRL_HOME.matches(key) => {
                 self.scroll_offset = 0;
                 self.pending_scroll = 0;
                 self.auto_scroll = false;
             }
-            Event::Key(KeyEvent {
-                code: KeyCode::End,
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) => self.jump_to_bottom(),
+            Event::Key(key) if CTRL_END.matches(key) => self.jump_to_bottom(),
             _ => {}
         }
     }
@@ -184,34 +177,20 @@ fn rows_between(slot: &Range<usize>, row: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 
     use super::*;
+    use crate::testing::{
+        key_event as modified_key, mouse_event as mouse_scroll, plain_key as key_event,
+    };
     use crate::theme::Theme;
 
     fn test_chat() -> ChatView {
         ChatView::new(&Theme::default(), true)
     }
 
-    fn key_event(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
-    }
-
-    fn ctrl_key_event(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL))
-    }
-
     mod handle_event {
         use super::*;
-
-        fn mouse_scroll(kind: MouseEventKind) -> Event {
-            Event::Mouse(MouseEvent {
-                kind,
-                column: 0,
-                row: 0,
-                modifiers: KeyModifiers::NONE,
-            })
-        }
 
         #[test]
         fn arrows_scroll_one_row_and_wheel_notches_three() {
@@ -251,19 +230,28 @@ mod tests {
 
         #[test]
         fn ctrl_home_jumps_to_the_top_and_ctrl_end_follows_the_tail() {
-            let mut chat = test_chat();
-            chat.scroll_offset = 50;
-            chat.handle_event(&key_event(KeyCode::Up));
-            chat.handle_event(&ctrl_key_event(KeyCode::Home));
-            assert_eq!((chat.scroll_offset, chat.pending_scroll), (0, 0));
-            assert!(!chat.auto_scroll);
+            for modifiers in [
+                KeyModifiers::CONTROL,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ] {
+                let mut chat = test_chat();
+                chat.scroll_offset = 50;
+                chat.handle_event(&key_event(KeyCode::Up));
+                chat.handle_event(&modified_key(KeyCode::Home, modifiers));
+                assert_eq!(
+                    (chat.scroll_offset, chat.pending_scroll),
+                    (0, 0),
+                    "{modifiers:?}"
+                );
+                assert!(!chat.auto_scroll, "{modifiers:?}");
 
-            chat.new_content_since_pause = 3;
-            chat.handle_event(&key_event(KeyCode::Up));
-            chat.handle_event(&ctrl_key_event(KeyCode::End));
-            assert_eq!(chat.pending_scroll, 0);
-            assert!(chat.auto_scroll);
-            assert_eq!(chat.new_content_since_pause(), 0);
+                chat.new_content_since_pause = 3;
+                chat.handle_event(&key_event(KeyCode::Up));
+                chat.handle_event(&modified_key(KeyCode::End, modifiers));
+                assert_eq!(chat.pending_scroll, 0, "{modifiers:?}");
+                assert!(chat.auto_scroll, "{modifiers:?}");
+                assert_eq!(chat.new_content_since_pause(), 0, "{modifiers:?}");
+            }
         }
 
         #[test]
