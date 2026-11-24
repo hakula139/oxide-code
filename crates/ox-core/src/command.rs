@@ -6,11 +6,12 @@ mod parser;
 pub use self::parser::{Parsed, parse_slash, split_slash, unescape_literal};
 
 use std::path::Path;
+use std::str::FromStr;
 
 use indoc::formatdoc;
+use strum::VariantArray;
 
-use crate::model::{Effort, MODELS, ModelInfo};
-use crate::permission::Mode;
+use crate::model::{MODELS, ModelInfo};
 use crate::protocol::{ConfigPick, Op, SessionRef};
 use crate::session::display::fit_title;
 use crate::util::variant;
@@ -116,28 +117,23 @@ fn compact(args: &str) -> Op {
 
 /// `/effort <level>`, case-insensitive.
 fn effort(arg: &str) -> Result<Op, String> {
-    let usage = format!("/effort <{}>", variant::names_joined::<Effort>("|"));
-    let arg = required(arg, "level", &usage)?;
-    let pick = arg.to_ascii_lowercase().parse().map_err(|_| {
-        format!(
-            "Unknown effort: `{arg}`. Valid: {}.",
-            variant::names::<Effort>()
-        )
-    })?;
-    Ok(Op::SetModel(ConfigPick::Effort(pick)))
+    parse_variant("effort", "level", arg).map(|pick| Op::SetModel(ConfigPick::Effort(pick)))
 }
 
 /// `/mode <mode>`, case-insensitive.
 fn mode(arg: &str) -> Result<Op, String> {
-    let usage = format!("/mode <{}>", variant::names_joined::<Mode>("|"));
-    let arg = required(arg, "mode", &usage)?;
-    let mode = arg.to_ascii_lowercase().parse::<Mode>().map_err(|_| {
-        format!(
-            "Unknown mode: `{arg}`. Valid: {}.",
-            variant::names::<Mode>()
-        )
-    })?;
-    Ok(Op::SetMode(mode))
+    parse_variant("mode", "mode", arg).map(Op::SetMode)
+}
+
+fn parse_variant<T>(cmd: &str, what: &str, arg: &str) -> Result<T, String>
+where
+    T: FromStr + VariantArray + Copy + Into<&'static str>,
+{
+    let usage = format!("/{cmd} <{}>", variant::names_joined::<T>("|"));
+    let arg = required(arg, what, &usage)?;
+    arg.to_ascii_lowercase()
+        .parse()
+        .map_err(|_| format!("Unknown {cmd}: `{arg}`. Valid: {}.", variant::names::<T>()))
 }
 
 /// `/model <id>`. Matches an exact catalog ID, then a unique substring of one, so family names such
@@ -224,6 +220,8 @@ mod tests {
     use indoc::indoc;
 
     use super::*;
+    use crate::model::Effort;
+    use crate::permission::Mode;
     use crate::protocol::testing::model_pick;
     use crate::session::display::MAX_TITLE_WIDTH;
 

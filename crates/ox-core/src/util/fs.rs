@@ -385,6 +385,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::util::fs::testing::symlink_file;
 
     #[cfg(unix)]
     fn mode(path: &Path) -> u32 {
@@ -427,7 +428,6 @@ mod tests {
 
     mod read_regular_file {
         use super::*;
-        use crate::util::fs::testing::symlink_file;
 
         #[test]
         fn reads_empty_and_exact_limit_files() {

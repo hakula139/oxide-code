@@ -310,29 +310,15 @@ mod tests {
         use super::*;
 
         #[test]
-        fn rewrites_home_prefix_to_tilde() {
+        fn rewrites_only_paths_at_or_under_home() {
             temp_env::with_var(HOME_VAR, Some("/tmp/oxide-home"), || {
-                assert_eq!(
-                    tildify(&PathBuf::from("/tmp/oxide-home/work/project")),
-                    "~/work/project",
-                );
-            });
-        }
-
-        #[test]
-        fn preserves_paths_outside_home() {
-            temp_env::with_var(HOME_VAR, Some("/tmp/oxide-home"), || {
-                assert_eq!(
-                    tildify(&PathBuf::from("/tmp/not-home/session")),
-                    "/tmp/not-home/session",
-                );
-            });
-        }
-
-        #[test]
-        fn renders_home_itself_as_a_bare_tilde() {
-            temp_env::with_var(HOME_VAR, Some("/tmp/oxide-home"), || {
-                assert_eq!(tildify(&PathBuf::from("/tmp/oxide-home")), "~");
+                for (input, expected) in [
+                    ("/tmp/oxide-home/work/project", "~/work/project"),
+                    ("/tmp/oxide-home", "~"),
+                    ("/tmp/not-home/session", "/tmp/not-home/session"),
+                ] {
+                    assert_eq!(tildify(Path::new(input)), expected, "{input}");
+                }
             });
         }
     }
@@ -341,21 +327,17 @@ mod tests {
         use super::*;
 
         #[test]
-        fn rewrites_leading_tilde_slash_to_home() {
-            temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
-                assert_eq!(
-                    expand_user("~/work/project").unwrap(),
-                    PathBuf::from("/tmp/oxide-fake-home/work/project")
-                );
-            });
-        }
-
-        #[test]
-        fn collapses_redundant_slashes_after_tilde() {
+        fn expands_only_leading_tilde_and_collapses_slashes() {
             temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
                 for (raw, expected) in [
+                    ("~/work/project", "/tmp/oxide-fake-home/work/project"),
                     ("~//foo", "/tmp/oxide-fake-home/foo"),
                     ("~///foo/bar", "/tmp/oxide-fake-home/foo/bar"),
+                    ("~", "/tmp/oxide-fake-home"),
+                    ("/etc/ssl/cert.pem", "/etc/ssl/cert.pem"),
+                    ("./certs/ca.pem", "./certs/ca.pem"),
+                    ("", ""),
+                    ("~alice/foo", "~alice/foo"),
                 ] {
                     assert_eq!(
                         expand_user(raw).unwrap(),
@@ -364,31 +346,6 @@ mod tests {
                     );
                 }
             });
-        }
-
-        #[test]
-        fn bare_tilde_resolves_to_home() {
-            temp_env::with_var(HOME_VAR, Some("/tmp/oxide-fake-home"), || {
-                assert_eq!(
-                    expand_user("~").unwrap(),
-                    PathBuf::from("/tmp/oxide-fake-home")
-                );
-            });
-        }
-
-        #[test]
-        fn leaves_absolute_and_relative_paths_untouched() {
-            for raw in ["/etc/ssl/cert.pem", "./certs/ca.pem", ""] {
-                assert_eq!(expand_user(raw).unwrap(), PathBuf::from(raw), "{raw:?}");
-            }
-        }
-
-        #[test]
-        fn does_not_handle_per_user_home() {
-            assert_eq!(
-                expand_user("~alice/foo").unwrap(),
-                PathBuf::from("~alice/foo")
-            );
         }
     }
 

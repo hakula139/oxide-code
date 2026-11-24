@@ -164,17 +164,17 @@ fn unquote_word(text: &str, leading: bool) -> Option<(String, bool)> {
     Some((value, glob))
 }
 
-fn is_identifier(name: &str) -> bool {
-    name.starts_with(|c: char| c == '_' || c.is_ascii_alphabetic())
-        && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
-}
-
 fn tilde_at(word: &str) -> Option<usize> {
     if word.starts_with('~') {
         return Some(0);
     }
     let (name, value) = word.split_once('=')?;
     (is_identifier(name) && value.starts_with('~')).then_some(name.len() + 1)
+}
+
+fn is_identifier(name: &str) -> bool {
+    name.starts_with(|c: char| c == '_' || c.is_ascii_alphabetic())
+        && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 /// A double-quoted string's value: a backslash escapes only `$`, `` ` ``, `"`, `\`, and newlines.

@@ -529,6 +529,7 @@ pub(super) fn resume(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     use time::macros::datetime;
@@ -1519,8 +1520,6 @@ mod tests {
     }
 
     mod session_format {
-        use std::collections::BTreeMap;
-
         use super::*;
 
         /// Writes a session holding every row kind, content block, and saved text origin, with

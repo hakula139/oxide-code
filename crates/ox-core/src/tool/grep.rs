@@ -534,14 +534,6 @@ impl<F: FnMut(Line<'_>) -> bool> Sink for LineSink<'_, F> {
     }
 }
 
-/// A reported line's text without its line ending.
-fn line_text(bytes: &[u8]) -> &str {
-    let line = bytes
-        .strip_suffix(b"\n")
-        .map_or(bytes, |line| line.strip_suffix(b"\r").unwrap_or(line));
-    str::from_utf8(line).expect("the searched text is UTF-8 split at `\\n`")
-}
-
 // ── Content Mode ──
 
 fn format_content(
@@ -608,6 +600,14 @@ fn format_matches(rows: SearchRows) -> SearchOutput {
             truncated,
         })),
     }
+}
+
+/// A reported line's text without its line ending.
+fn line_text(bytes: &[u8]) -> &str {
+    let line = bytes
+        .strip_suffix(b"\n")
+        .map_or(bytes, |line| line.strip_suffix(b"\r").unwrap_or(line));
+    str::from_utf8(line).expect("the searched text is UTF-8 split at `\\n`")
 }
 
 /// Caps a line at `max_chars` characters, appending `... [N chars]` with the original length so the
@@ -1455,13 +1455,41 @@ mod tests {
         }
 
         #[test]
-        fn unmatched_pattern_reports_no_matches() {
+        fn unmatched_pattern_reports_no_matches_in_each_mode() {
             let dir = canonical_tempdir();
             fs::write(dir.path().join("test.txt"), "hello world\n").unwrap();
 
-            let result = grep_files(&params("nonexistent", dir.path())).unwrap();
-            assert_eq!(result.content, "No matches found");
-            assert_eq!(result.title, "No matches found");
+            for (case, mode, expected_content, expected_title) in [
+                (
+                    "content",
+                    OutputMode::Content,
+                    "No matches found",
+                    "No matches found",
+                ),
+                (
+                    "files_with_matches",
+                    OutputMode::FilesWithMatches,
+                    "No files found",
+                    "No matches found",
+                ),
+                (
+                    "count",
+                    OutputMode::Count,
+                    "No matches found",
+                    "No matches found",
+                ),
+            ] {
+                let mut p = params("nonexistent", dir.path());
+                p.output_mode = mode;
+
+                let result = grep_files(&p).unwrap();
+
+                assert_eq!(
+                    (result.content.as_str(), result.title.as_str()),
+                    (expected_content, expected_title),
+                    "{case}"
+                );
+            }
         }
 
         #[test]
@@ -1740,39 +1768,46 @@ mod tests {
         }
 
         #[test]
-        fn files_with_matches_reports_no_files_without_a_match() {
-            let dir = canonical_tempdir();
-            fs::write(dir.path().join("a.rs"), "fn foo() {}\n").unwrap();
+        fn count_mode_reports_occurrences_and_titles_with_summary() {
+            for (case, files, pattern, expected_header, expected_counts) in [
+                (
+                    "singular",
+                    &[("a.txt", "match once\n")][..],
+                    "match",
+                    "Found 1 total occurrence across 1 file",
+                    &["a.txt:1"][..],
+                ),
+                (
+                    "multiple in one file",
+                    &[("test.txt", "aaa\nbbb\naaa\n")],
+                    "aaa",
+                    "Found 2 total occurrences across 1 file",
+                    &["test.txt:2"],
+                ),
+                (
+                    "multiple files",
+                    &[("a.txt", "match\n"), ("b.txt", "match\n")],
+                    "match",
+                    "Found 2 total occurrences across 2 files",
+                    &["a.txt:1", "b.txt:1"],
+                ),
+            ] {
+                let dir = canonical_tempdir();
+                for (name, body) in files {
+                    fs::write(dir.path().join(name), body).unwrap();
+                }
 
-            let mut p = params("nonexistent", dir.path());
-            p.output_mode = OutputMode::FilesWithMatches;
-            let result = grep_files(&p).unwrap();
+                let mut p = params(pattern, dir.path());
+                p.output_mode = OutputMode::Count;
+                let SearchOutput { content, title, .. } = grep_files(&p).unwrap();
 
-            assert_eq!(result.content, "No files found");
-            assert_eq!(result.title, "No matches found");
-        }
-
-        #[test]
-        fn count_mode_reports_occurrences() {
-            let dir = canonical_tempdir();
-            fs::write(
-                dir.path().join("test.txt"),
-                indoc! {"
-                    aaa
-                    bbb
-                    aaa
-                "},
-            )
-            .unwrap();
-
-            let mut p = params("aaa", dir.path());
-            p.output_mode = OutputMode::Count;
-            let result = grep_files(&p).unwrap().content;
-
-            assert_eq!(
-                result,
-                "Found 2 total occurrences across 1 file\ntest.txt:2"
-            );
+                let (header, counts) = content.split_once('\n').unwrap();
+                let mut counts: Vec<_> = counts.lines().collect();
+                counts.sort_unstable();
+                assert_eq!(title, expected_header, "{case}");
+                assert_eq!(header, expected_header, "{case}");
+                assert_eq!(counts, *expected_counts, "{case}");
+            }
         }
 
         #[test]
@@ -1797,51 +1832,6 @@ mod tests {
             assert_eq!(counts.len(), 2);
             assert!(counts.is_subset(&all), "{counts:?}");
             assert_eq!(footer, "(Results limited to 2 files)");
-        }
-
-        #[test]
-        fn count_mode_summary_uses_singular_words_for_one() {
-            let dir = canonical_tempdir();
-            fs::write(dir.path().join("a.txt"), "match once\n").unwrap();
-
-            let mut p = params("match", dir.path());
-            p.output_mode = OutputMode::Count;
-            let result = grep_files(&p).unwrap().content;
-
-            assert_eq!(result, "Found 1 total occurrence across 1 file\na.txt:1");
-        }
-
-        #[test]
-        fn count_mode_titles_and_leads_with_the_summary() {
-            let dir = canonical_tempdir();
-            fs::write(dir.path().join("a.txt"), "match\n").unwrap();
-            fs::write(dir.path().join("b.txt"), "match\n").unwrap();
-
-            let mut p = params("match", dir.path());
-            p.output_mode = OutputMode::Count;
-            let SearchOutput {
-                content: result,
-                title,
-                ..
-            } = grep_files(&p).unwrap();
-
-            let (header, counts) = result.split_once('\n').unwrap();
-            let counts: HashSet<_> = counts.lines().collect();
-            assert_eq!(title, "Found 2 total occurrences across 2 files");
-            assert_eq!(header, title);
-            assert_eq!(counts, HashSet::from(["a.txt:1", "b.txt:1"]));
-        }
-
-        #[test]
-        fn count_mode_without_matches_reports_no_matches() {
-            let dir = canonical_tempdir();
-            fs::write(dir.path().join("test.txt"), "other\n").unwrap();
-
-            let mut p = params("absent", dir.path());
-            p.output_mode = OutputMode::Count;
-            let result = grep_files(&p).unwrap();
-            assert_eq!(result.content, "No matches found");
-            assert_eq!(result.title, "No matches found");
         }
     }
 

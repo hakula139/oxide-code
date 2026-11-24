@@ -1286,7 +1286,7 @@ mod tests {
 
         #[test]
         fn fits_overflowing_output_under_the_dispatcher_cap() {
-            // Each invalid byte, such as `0xFF`, decodes as the three bytes of U+FFFD.
+            // Each invalid byte decodes as the three bytes of U+FFFD.
             let cases = [
                 (b'a', 10 << 20, 0),
                 (b'a', 600 << 10, 5),
@@ -1485,7 +1485,7 @@ mod tests {
         mod drain {
             use super::*;
 
-            #[tokio::test]
+            #[tokio::test(start_paused = true)]
             async fn cut_short_keeps_what_already_arrived() {
                 let dir = tempfile::tempdir().unwrap();
                 let (mut writer, mut reader) = tokio::io::duplex(64);

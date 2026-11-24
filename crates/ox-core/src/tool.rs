@@ -549,7 +549,7 @@ pub(crate) mod local_testing {
         }
     }
 
-    /// Where a spill of call `toolu_test` in [`ctx`] in `cwd` with `suffix`, such as `.txt`, goes.
+    /// Where a spill of call `toolu_test` in [`ctx`] in `cwd` with `suffix` goes.
     pub(super) fn spill_path(cwd: &Path, suffix: &str) -> PathBuf {
         cwd.join("session")
             .join("tool-results")

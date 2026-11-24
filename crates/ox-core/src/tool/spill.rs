@@ -122,7 +122,7 @@ impl Spills {
         }
     }
 
-    /// The spill into the file named by the call's ID followed by `suffix`, such as `.output.txt`.
+    /// The spill into the file named by the call's ID followed by `suffix`.
     pub(super) fn file(&self, suffix: &str) -> Spill {
         Spill {
             path: self.dir.join(format!("{}{suffix}", self.stem)),
