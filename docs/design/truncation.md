@@ -15,7 +15,7 @@ The dispatcher caps every tool output at `MAX_OUTPUT_BYTES = 128 KiB`, including
 
 ## Per-Tool View-Shape Caps
 
-- **`bash`.** A bounded head-and-tail streaming capture spills oversized output. A [shared pipe](bash.md#design-decisions) preserves stdout and stderr arrival order. Each background-shell read drains the output captured since the previous read.
+- **`bash`.** A bounded head-and-tail streaming capture spills oversized output. A shared pipe ([**Share one pipe between stdout and stderr**](bash.md#design-decisions)) preserves stdout and stderr arrival order. Each background-shell read drains the output captured since the previous read.
 - **`glob`.** The view holds the newest matches with a total match count.
 - **`grep`.** Each output mode keeps a bounded prefix. Count mode continues reading for exact totals, while content and file-list modes stop when the view fills.
 - **`read`.** The view holds complete rows within a line and byte budget, refusing a row that cannot fit.
@@ -33,10 +33,10 @@ The dispatcher caps every tool output at `MAX_OUTPUT_BYTES = 128 KiB`, including
 
 - `crates/ox-core/src/file_tracker.rs`: `MAX_TRACKED_FILE_SIZE`.
 - `crates/ox-core/src/session/store.rs`: `SessionStore::artifact_dir` and `SessionStore::delete`.
-- `crates/ox-core/src/tool/bash.rs`: `OUTPUT_BUDGET`, `ShellTree::spawn()`, `PipeCapture`, `render_pipe()`, `ends_within()`.
+- `crates/ox-core/src/tool/bash.rs`: `OUTPUT_BUDGET`, `ShellTree::spawn`, `PipeCapture`, `render_pipe`, `ends_within`.
 - `crates/ox-core/src/tool/bash/background.rs`: `ShellOutput::take`, the per-read capture of a background shell.
 - `crates/ox-core/src/tool/glob.rs`: `MAX_RESULTS`, the `GlobFiles` view's total.
-- `crates/ox-core/src/tool/grep.rs`: `DEFAULT_HEAD_LIMIT`, `MAX_LINE_CHARS`, `truncate_line()`, and `MAX_WALK_FILE_SIZE`.
+- `crates/ox-core/src/tool/grep.rs`: `DEFAULT_HEAD_LIMIT`, `MAX_LINE_CHARS`, `truncate_line`, and `MAX_WALK_FILE_SIZE`.
 - `crates/ox-core/src/tool/read.rs`: `DEFAULT_LINE_LIMIT`, `OUTPUT_BUDGET`.
-- `crates/ox-core/src/tool/search.rs`: `SearchRows`, the shared row and byte cap, `newest_first()`, `MAX_NOTE_PATHS`, and `push_path_note()`.
-- `crates/ox-core/src/tool/spill.rs`: `run_capped`, `cap_output()`, `MAX_OUTPUT_BYTES`, `LINE_SNAP_BYTES`, `whole_line_head()`, `whole_line_tail()`, `Spill`, `MAX_SPILL_BYTES`, `SPILL_DIR`.
+- `crates/ox-core/src/tool/search.rs`: `SearchRows`, the shared row and byte cap, `newest_first`, `MAX_NOTE_PATHS`, and `push_path_note`.
+- `crates/ox-core/src/tool/spill.rs`: `run_capped`, `cap_output`, `MAX_OUTPUT_BYTES`, `LINE_SNAP_BYTES`, `whole_line_head`, `whole_line_tail`, `Spill`, `MAX_SPILL_BYTES`, `SPILL_DIR`.

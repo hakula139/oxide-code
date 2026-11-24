@@ -128,22 +128,22 @@ The lock serves delete alone, since two processes holding one session open is th
 
 A commit that moves the head first compares `head_id` with its base, the head this process last committed or loaded. Rows are immutable, so a matching head means the active branch is exactly the one this process holds in memory, and the commit lands in place. A different head means another process moved it since, so the commit forks. The check runs under `BEGIN IMMEDIATE` with the writes that follow, and it needs no owner row, lease, or clock.
 
-| Sequence on session S                                     | Result                                               |
-| --------------------------------------------------------- | ---------------------------------------------------- |
-| A and B open S, only B writes                             | B continues S                                        |
-| A and B open S, B writes, then A writes                   | A forks to S', and S keeps B's line                  |
-| A writes, B opens S and writes, then A writes again       | A forks, since B wrote after A's last view           |
-| B writes and exits, then A writes from its older view     | A forks                                              |
-| B renames or archives S, then A writes                    | A continues S, since metadata does not move the head |
-| B rewinds S to exactly the head A last saw, then A writes | A continues S, since that head names A's branch      |
+| Sequence on session S                                     | Result                                                |
+| --------------------------------------------------------- | ----------------------------------------------------- |
+| A and B open S, only B writes                             | B continues S                                         |
+| A and B open S, B writes, then A writes                   | A forks to S', and S keeps B's line                   |
+| A writes, B opens S and writes, then A writes again       | A forks because B wrote after A's last view           |
+| B writes and exits, then A writes from its older view     | A forks                                               |
+| B renames or archives S, then A writes                    | A continues S because metadata does not move the head |
+| B rewinds S to exactly the head A last saw, then A writes | A continues S, as that head names A's branch          |
 
 In the same transaction, the forking process takes the fork's liveness lock, inserts the fork's row with `forked_from` set to S and the title and manual flag copied from S, copies its base chain back to the nearest NULL parent with the message IDs unchanged, and writes its records there. It then adopts the fork's title and manual flag as the commit left them and releases S's lock. Pre-compaction rows, other branches, and usage stay in S, so each request is counted once, in the session that made it. Keeping the message IDs keeps the process's chain tip and rewind checkpoints valid in the fork.
 
-The handle's shared state holds the live session ID and artifact directory, so `session_id()` and `artifact_dir()` follow the fork from the next request and tool call. New spills land under the fork, while spill paths in copied tool results still name S's directory. The report of the forking write carries `Fork { from, to }`, and the engine emits `Event::SessionForked`. The TUI shows `Another ox process wrote to session {from8}, so this conversation continues as session {to8}` and moves its status bar to the fork, the stdio drivers print the notice to stderr, and the headless result reports the fork's ID. Listings label the fork `fork of {from8}` beside its title. File snapshots at finish describe the files as of the head, so they are written only while the session's head still equals the process's base.
+The handle's shared state holds the live session ID and artifact directory, so `session_id()` and `artifact_dir()` follow the fork from the next request and tool call. New spills land under the fork, while spill paths in copied tool results still name S's directory. The report of the forking write carries `Fork { from, to }`, and the engine emits `Event::SessionForked`. The TUI moves its status bar to the fork, the headless driver prints the fork notice to stderr and reports the fork's ID in its result, and [Several Processes on One Session](../guide/sessions.md#several-processes-on-one-session) covers the user-facing notices and labels. File snapshots at finish describe the files as of the head, so they are written only while the session's head still equals the process's base.
 
 ### Export and Import
 
-`ox export <id-prefix>` writes a session as JSONL to stdout: a `session` record, then every `message` record in commit order, branches and pre-compaction messages included, then every `usage` record, with RFC 3339 timestamps. `ox -r <file>` imports an export and resumes the session that holds its head. Import checks that the input starts with a `session` record of a valid ID and a supported format and that each parent precedes its children, and its errors name the line. Rows already present are kept once.
+`ox export` writes a session as JSONL to stdout: a `session` record, then every `message` record in commit order (branches and pre-compaction messages included), then every `usage` record, with RFC 3339 timestamps. `ox -r <file>` imports an export and resumes the session that holds its head, as [Moving a Session Between Machines](../guide/sessions.md#moving-a-session-between-machines) describes. Import checks that the input starts with a `session` record of a valid ID and a supported format and that each parent precedes its children, naming the line on error. Rows already present are kept once.
 
 An export carries every message its session ever had, so the head lands by which messages each side holds, a lookup that compaction roots and rewinds cannot hide the way they cut the chain:
 
@@ -175,41 +175,36 @@ On resume, the loader returns every usage row of the session, abandoned branches
 
 ## Listing
 
-- **Scope.** `ox --list`, bare `ox -c`, and the `/resume` picker list the current project's sessions, and `--all` widens to every project. A prefix lookup that matches nothing in the current project searches every project.
-- **Query.** A page is one indexed query ordered by `updated_at` and then ID, newest first, and the picker's next page continues after the last row through a keyset cursor, so pages never overlap. Sessions of a newer content format stay hidden. The picker reads pages on a worker thread.
-- **Prefix lookup.** A prefix holding a character no session ID holds matches nothing, so GLOB metacharacters never reach SQL, and the lookup uses the primary key.
-- **Archive view.** `--list` and the `/resume` picker show unarchived sessions, or only archived ones with `--list --archived` and the picker's Ctrl+A.
+[Listing Sessions](../guide/sessions.md#listing-sessions) covers the CLI flags, columns, and archive views.
 
-Listing rows show an untitled session as `(untitled)` and follow a fork's title with `(fork of {from8})`. `Msgs` counts the active branch's messages since its last compaction, and under `--all` a `Project` column shows the tildified project root. Titles are truncated to the terminal width with a trailing `...` before the fork label, which stays whole. Control characters in titles and project paths, line breaks included, are escaped, so a row stays on one line and cannot change the terminal's state.
+- **Query.** Each page is one indexed query ordered by `updated_at` and then ID, newest first, and the picker's next page continues after the last row through a keyset cursor so pages never overlap. Sessions of a newer content format stay hidden. The picker reads pages on a worker thread.
+- **Prefix lookup.** A prefix holding a character no session ID holds matches nothing, so GLOB metacharacters never reach SQL, and the lookup uses the primary key.
+- **Display safety.** Control characters in titles and project paths, line breaks included, are escaped so each row stays on one line and cannot change the terminal's state.
 
 ## Design Decisions
 
 1. **One store.** SQLite holds every session and JSONL is only interchange, so no second copy can drift and no read path reconciles two stores.
-2. **Bundled SQLite.** Every supported platform gets the WAL-reset fix, which multi-process use needs.
+2. **Bundled SQLite.** Every supported platform gets the WAL-reset fix that multi-process use requires.
 3. **JSON payload columns.** Message content, context, compaction info, tool metadata, and usage keep their serde types, so their evolution rules stay as they are and only searchable or sortable fields become columns.
 4. **Immutable rows and a head pointer.** Rewind, compaction, and fork move the head, history stays for export, and the head names its chain exactly, which makes the head check a complete fork detector.
-5. **Lazy fork by head check.** A session forks only after two processes both wrote to it, never on open, and the check needs no owner, lease, or clock. Codex refuses a second writer at open and oh-my-pi gives the first writer a lease, and both decide before anyone writes.
+5. **Lazy fork by head check.** A session forks only when a second process writes after another moved the head, needing no owner, lease, or clock. Codex refuses a second writer at open and oh-my-pi gives the first writer a lease, both deciding before anyone writes.
 6. **Import by membership.** An export holds every message, so whether it saw the local head is a lookup that compaction and rewind leave exact, and reusing a related fork keeps repeated imports of a diverged session on one fork.
 7. **Messages keyed by session and ID.** A fork or diverged import copies rows with their UUIDs, so live checkpoints stay valid without remapping.
 8. **Usage keyed by request and never copied.** Each request is stored once, so totals across sessions stay exact.
 9. **Liveness locks for delete only.** Kernel-held locks vanish with their process, so delete safety needs no stale-lock recovery.
-10. **No retry.** Without torn writes, the failures left are not transient, so a failed commit stops persistence with one report.
-11. **Writes under a lock.** Every caller needs its write's checkpoint, title seed, and report before it goes on, so a write channel would buy no pipelining. A lock taken on a blocking thread keeps one write at a time, and without a writer task there is no path for a writer that is gone. Codex queues its rollout writes without an ack, which suits a loop that never waits on disk, and pi appends in the caller, the shape this lock keeps off the async runtime.
+10. **No retry.** Without torn writes, the remaining failures are persistent, so a failed commit stops persistence with one report.
+11. **Writes under a lock.** Every caller needs its write's checkpoint, title seed, and report before continuing, so a write channel would buy no pipelining. Taking the lock on a blocking thread serializes writes without a separate writer task. Codex queues its rollout writes without an ack, which suits a loop that never waits on disk, and pi appends in the caller, the shape this lock keeps off the async runtime.
 12. **Derived title latch and a persisted manual flag.** The title opportunity follows from the chain, and `title_manual` alone gates every automatic title, so no second copy can disagree with either.
 13. **Fork labels from `forked_from`.** The fork keeps the user's title unchanged, and the label tells the two rows apart.
-14. **Search views preserve native result rows.** A result's `tool_metadata` records the call's title and, when the tool sets one, a `result_view`: either the structured view or a marker that the result reads as plain text. Grep in content mode, Glob, and Edit store their structured view, so complete filenames and line numbers survive even when a path contains colons, newlines, or trailing whitespace, and paths keep their search-time spelling on replay. Search results with notes, and output capped into a spill file, store the text marker, so their warnings and spill locations render with the result text, and errors always render their error text. Read and Tasks store no view and derive it on every render, from the result text and the call's input respectively, since storing it would repeat the file content or the task list. A result without a stored view uses the tool's own derivation.
+14. **Search views preserve native result rows.** A result's `tool_metadata` records the call's title and, when the tool sets one, a `result_view`: either the structured view or a marker that the result reads as plain text. Grep in content mode, Glob, and Edit store their structured view, so complete filenames and line numbers survive even when a path contains colons, newlines, or trailing whitespace, and paths keep their search-time spelling on replay. Search results with notes, and output capped into a spill file, store the text marker, so their warnings and spill locations render with the result text, and errors always render their error text. Read and Tasks store no view and derive it on every render, from the result text and the call's input respectively, because storing it would repeat the file content or the task list. A result without a stored view uses the tool's own derivation.
 
 ## Out of Scope
 
-- **Rewind history** ([#293](https://github.com/hakulab/oxide-code/issues/293)). Abandoned rows already stay in the store, so browsing them needs no format change.
-- **Subagent sessions** ([#136](https://github.com/hakulab/oxide-code/issues/136), [#285](https://github.com/hakulab/oxide-code/issues/285)). A parent session column would arrive as an additive revision.
+- **Rewind history.** Abandoned rows already stay in the store, so browsing them needs no format change ([#293](https://github.com/hakulab/oxide-code/issues/293)).
+- **Subagent sessions.** A parent session column would arrive as an additive revision ([#136](https://github.com/hakulab/oxide-code/issues/136), [#285](https://github.com/hakulab/oxide-code/issues/285)).
 
 ## Sources
 
-- `crates/ox-core/src/engine/history.rs`: the resumed transcript, whose tool results take their views from `ToolRegistry::result_view`.
-- `crates/ox-core/src/engine/post_compact.rs`: the synthetic post-compact root.
-- `crates/ox-core/src/engine/turn.rs`: `agent_turn`, which records each tool round with one `record_round` write.
-- `crates/ox-core/src/engine/usage.rs`: `UsageLedger::for_session`, which sums the session cost from the resumed usage rows.
 - `crates/ox-core/src/message.rs`: the message and content-block types that the message rows store.
 - `crates/ox-core/src/session/display.rs`: the session ID and title formatting that listings use, including the fork label.
 - `crates/ox-core/src/session/handle.rs`: `SessionHandle`, which commits each write under the state's lock, `WriteReport`, and `Fork`, and the session-format tests.
@@ -225,5 +220,3 @@ Listing rows show an untitled session as `(untitled)` and follow a fork's title 
 - `crates/ox-core/src/session/store/prompt_history.rs`: the batched prompt-history walk.
 - `crates/ox-core/src/session/store/schema.rs`: the pragmas, the schema, and its revisions.
 - `crates/ox-core/src/session/title_generator.rs`: the background AI title generator.
-- `crates/ox-core/src/tool.rs`: `ToolMetadata`, the fields a result's `tool_metadata` records.
-- `crates/ox/src/session_list.rs`: the `ox --list` table.

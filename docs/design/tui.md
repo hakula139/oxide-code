@@ -49,13 +49,13 @@ A resize, theme swap, or view toggle invalidates every cached block, so the chat
 - **Render near the viewport.** A frame renders the stale blocks within a viewport height of the rows it paints, nearest the anchored row first, and places the paint again after each one. It paints once every block in that range is current at the frame's width, theme, and view. Under auto-scroll, the range extends up from the tail.
 - **Estimate the rest.** A farther block keeps its last render as its height estimate until it comes into range, and a block that has never rendered counts as one blank row. An estimate above the range shifts every row in it equally, so the painted rows and the bottom clamp stay exact.
 - **Anchor on a block.** While scrolled up, a frame names the previous paint's top row by its block and its row within that block. When the block changes height, the row keeps its relative position, so the rows the user was reading stay in place as blocks above them render at a new width. Rows in a live reply are named by their distance from the last committed block, which keeps them in place when the reply commits. After the view toggles or a click expands a block, the row keeps its index in its block, since expanding or collapsing changes only what follows a block's head. Under auto-scroll, the paint stays on the tail, and a paused paint that the change leaves at the bottom follows the tail again.
-- **Apply scrolls at render.** Scroll keys and the wheel add to a pending delta that the next frame applies to the anchored row. The render range spans the anchored row and the new top, so a burst of `PageUp` presses between frames lands on the same row as presses one frame apart. `Ctrl+Home` jumps to row 0, and scrolling down to the bottom re-arms auto-scroll.
+- **Apply scrolls at render.** Scroll keys and the wheel add to a pending delta that the next frame applies to the anchored row. The render range spans the anchored row and the new top, so a burst of PageUp presses between frames lands on the same row as presses one frame apart. Ctrl+Home jumps to row 0, and scrolling down to the bottom re-arms auto-scroll.
 
 ## Compact and Expanded Views
 
-The chat opens in the compact view, and **Ctrl+O** switches between it and the expanded view:
+The chat opens in the compact view, and Ctrl+O switches between it and the expanded view:
 
-- **Compact.** A tool body caps its rows, five for most tools, and cuts each row at 512 bytes. An edit's diff shows up to twenty lines with a `⋮` row between hunks. A longer first hunk keeps its first and last ten lines around its footer, and the hunks that no longer fit collapse into one footer. A task list shows five tasks, starting just before the one in progress, and a list of edit locations shows eight. The hidden rows collapse into a `dim` overflow footer, such as `... +3 lines · Ctrl+O to expand`, which counts `files`, `tasks`, or `hunks` for those lists, and Grep and Glob footers add `(limit reached)` when the tool's own cap also cut the results. A diff that reached its 2000-line cap ends in a plain `... +N lines past the diff limit` row in either view, since expanding cannot show those lines. Committed thinking shows only its `Thought` header. A click on a footer or header expands that block alone, as [Mouse Interactions](mouse.md#expanding-a-block) describes.
+- **Compact.** Tool bodies cap their visible rows and per-row byte width, edit diffs collapse long or overflow hunks with `⋮` markers, task lists window around the in-progress task, and edit-location lists show a short prefix (see [Sources](#sources) for the per-block caps). Hidden rows collapse into a `dim` overflow footer, such as `... +3 lines · Ctrl+O to expand`, which counts `files`, `tasks`, or `hunks` for those lists, and Grep and Glob footers add `(limit reached)` when the tool's own cap also cut the results. A diff that reached the diff line cap ends in a plain `... +N lines past the diff limit` row in either view, since expanding cannot show those lines. Committed thinking shows only its `Thought` header. A click on a footer or header expands that block alone, as [Mouse Interactions](mouse.md#expanding-a-block) describes.
 - **Expanded.** Every tool body and thinking block renders in full. A toggle in either direction drops the expansions made by clicks.
 
 Thinking that is still streaming shows its body in both views under the spinner and `Thinking`. A progress note the model wrote before a tool call shows as prose only while `show_thinking` is off, since otherwise the thinking block holds the same text.
@@ -75,7 +75,7 @@ An open code block stays in the tail until the next block starts. Its highlighte
 
 A table renders as a box in the `table_border` slot, with one cell of padding inside each border and the header row in the `table_header` slot, a bold accent by default. A rule with `├ ┼ ┤` junctions separates every pair of rows. Inside a list item or blockquote, every row carries the item indent or the `│` bar, and the table fits in the width that remains.
 
-Columns keep their natural widths when the table fits. Otherwise each column gets the width of its longest word, up to 30 columns so a long path or URL still wraps, and the remaining width goes to the columns in proportion to how far each falls short of its natural width. Cells word-wrap within their columns. When even those minimum widths don't fit, each body row stacks into `header: value` lines, with a `table_border` rule between rows.
+Columns keep their natural widths when the table fits. Otherwise each column gets the width of its longest word, up to a per-column cap (see [Sources](#sources)) so a long path or URL still wraps, and the remaining width goes to the columns in proportion to how far each falls short of its natural width. Cells word-wrap within their columns. When even those minimum widths don't fit, each body row stacks into `header: value` lines, with a `table_border` rule between rows.
 
 A `<br>` in a cell starts a new line in that cell, since a GFM cell has no other line break.
 
@@ -85,16 +85,7 @@ While the chat holds nothing, streaming included, and `show_welcome` is on, `App
 
 The starters sample the built-in commands a new session can run bare, each with its registry description, and the tip samples `TIP_POOL`, offering the pull request tip only when the configured status line includes the `pull-request` segment. Both draws seed `fastrand` with the xxh64 hash of the session ID, so a session keeps its picks while each new session draws again.
 
-The body lines pad to one shared width, since `Paragraph::alignment(Center)` centers each line on its own and lines of different widths would start at different columns. The layout steps down by width:
-
-| Cols  | Identity                    | Environment                       | Cwd                         | Starters and tip |
-| ----- | --------------------------- | --------------------------------- | --------------------------- | ---------------- |
-| ≥60   | ribbon `━━━━ oxide-code...` | model, effort, and auth source    | tildified, end-truncated    | shown            |
-| 40-59 | wordmark `oxide-code v...`  | model and effort                  | tildified, end-truncated    | shown            |
-| 25-39 | wordmark                    | model and effort level, no suffix | tildified, center-truncated | hidden           |
-| <25   | suppressed                  | suppressed                        | suppressed                  | suppressed       |
-
-A chat region shorter than 13 rows hides the starters and the tip at any width.
+The body lines pad to one shared width, since `Paragraph::alignment(Center)` centers each line on its own and lines of different widths would start at different columns. The layout steps down across coarse width tiers (see [Sources](#sources)). At ≥ 60 columns it shows the full ribbon, environment, working directory, starters, and tip. Narrower panes drop to a wordmark, trim the environment line, and hide starters and the tip (as does a short chat region), and at < 25 columns the welcome is suppressed.
 
 ## Design Decisions
 
@@ -103,7 +94,7 @@ A chat region shorter than 13 rows hides the starters and the tip at any width.
 3. **Synchronized output by default.** A terminal that supports mode 2026 presents each frame at once, so a large repaint never shows half drawn, and a terminal without it ignores the mode.
 4. **Render throttling at ~60 FPS, and a sleeping idle loop.** Tokens can stream faster than a terminal can repaint, so the tick batches them into one frame, which keeps the event loop free for input. Background work reports on one channel, so its result wakes the loop as an event and nothing polls for it. The tick runs every frame while a redraw is pending, and otherwise only at the earliest deadline a component reports beside its `tick`, such as the spinner's next frame or an expiring notice, so an idle session wakes about once every 5 s for the branch probe while the roster shows the branch.
 5. **Block-based markdown commit with a stable-prefix cache.** Re-parsing a whole reply on every frame costs more as the reply grows, so complete blocks render once and each frame re-parses only the tail.
-6. **Custom pulldown-cmark + syntect renderer.** Uses Codex's `pending_marker` pattern for correct list handling.
+6. **Custom pulldown-cmark + syntect renderer.** Uses Codex's `pending_markers` pattern for correct list handling.
 7. **Two-tier tool display.** An inline summary with a per-tool icon keeps a long tool loop scannable, while the output body, which the compact view caps, shows what a reader needs to judge the call.
 8. **Per-block render cache with viewport-scoped rendering.** Rendering markdown and highlighting code for a whole long session on each resize or theme swap would stall the frame, so only the blocks near the viewport render, and anchoring the scroll offset on a block keeps the rows the user is reading in place while farther blocks catch up.
 9. **A rule between every table row.** Without one, the continuation lines of a wrapped row leave blank cells that read as spacing, so the single-line rows around it seem to run together. Claude Code and oh-my-pi rule off every row of their boxed tables, as Codex does in its borderless ones.
@@ -132,7 +123,11 @@ A chat region shorter than 13 rows hides the starters and the tip at any width.
 - `crates/ox-tui/src/components/chat.rs`: `ChatView` and the compact and expanded views.
 - `crates/ox-tui/src/components/chat/blocks.rs`: `ChatBlock` and `RenderCtx`, the render contract of a chat block.
 - `crates/ox-tui/src/components/chat/blocks/live_markdown.rs`: `LiveMarkdown`, the text of a section that grows while it streams, with its stable-prefix cache.
+- `crates/ox-tui/src/components/chat/blocks/rows.rs`: `MAX_ROW_BYTES`, the compact-view per-row byte cap.
 - `crates/ox-tui/src/components/chat/blocks/streaming.rs`: `StreamingAssistant`, the streaming reply over its cache.
+- `crates/ox-tui/src/components/chat/blocks/tool.rs`: `ToolCallBlock`, `ToolResultBlock`, and `MAX_TOOL_OUTPUT_LINES`, the compact-view tool-output row cap.
+- `crates/ox-tui/src/components/chat/blocks/tool/diff.rs`: `MAX_DIFF_BODY_LINES` and `MAX_LOCATIONS_DISPLAYED`, the compact-view diff body and edit-location caps.
+- `crates/ox-tui/src/components/chat/blocks/tool/tasks.rs`: `render`, which windows task lists around the in-progress task under `MAX_TOOL_OUTPUT_LINES`.
 - `crates/ox-tui/src/components/chat/scroll.rs`: `ChatView::place`, the anchored placement each frame paints, and the auto-scroll that follows the tail.
 - `crates/ox-tui/src/components/chat/stack.rs`: `CachedBlock`, `SlotTops`, and `Stack`, the block cache and the row anchors.
 - `crates/ox-tui/src/components/welcome.rs`: `paint`, `Picks`, `NOT_STARTERS`, `TIP_POOL`, and the width ladder.

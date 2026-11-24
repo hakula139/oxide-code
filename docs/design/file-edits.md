@@ -1,8 +1,6 @@
 # File Edits
 
-`edit` and `write` change a file only while the session knows its current content, from a Read or its own earlier write, and they replace that content while keeping the file's metadata, hard links, and ownership. A session-scoped tracker records what each Read showed and what each write left, every existing file is rewritten in place through the handle that was checked, and a new file is created with an exclusive open.
-
-Companion docs: [Permissions](permissions.md).
+`edit` and `write` change a file only while the session knows its current content, from a Read or its own earlier write, and they replace that content while keeping the file's metadata, hard links, and ownership. A session-scoped tracker records what each Read showed and what each write left, every existing file is rewritten in place through the handle that was checked, and a new file is created with an exclusive open. [Permissions](permissions.md) covers path resolution and approval gating before these checks run.
 
 ## Tracking
 

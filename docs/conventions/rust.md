@@ -46,17 +46,17 @@ Follow the shared [Rust](https://github.com/hakulab/plugins/blob/main/plugins/ha
 ## Modules
 
 - Keep each file focused on one primary type or concern. Split it when it starts mixing several.
-- Avoid `pub use` re-exports that obscure where items are defined. If a module re-exports some items, re-export all related items so callers can use consistent paths.
+- A parent module may `pub use` items from private child modules to present a flat facade, re-exporting every related item so callers see one consistent path. Avoid `pub use` re-exports across public modules that obscure where items are defined.
 - Put helper functions after their callers within each section so the file reads from top to bottom.
-- Keep `#[cfg(unix)]`, `#[cfg(windows)]`, and `#[cfg(target_os = "macos")]` variants together in the modules they belong to, rather than splitting them into per-platform files.
+- Keep `#[cfg(unix)]`, `#[cfg(windows)]`, and `#[cfg(target_os = "macos")]` variants together in the modules they belong to.
 
 ## Layout
 
 - List derives in the order `Debug`, `Clone`, `Copy`, `Default`, `PartialEq`, `Eq`, `PartialOrd`, `Ord`, `Hash`, followed by `Serialize`, `Deserialize`, and then other crates' derives, such as `thiserror::Error`. Give parallel types the same set.
 - Separate distinct groups of items with `// ── Section Name ──` banners using U+2500. Tests group by function in child modules, as described in [Testing](testing.md#grouping-and-naming).
-- Leave one blank line between top-level items. Closely related one-line `const` or `static` items may be grouped when they share a theme, such as the OAuth client constants. Leave one blank line after the group before unrelated items.
+- Leave one blank line between top-level items. Closely related one-line `const` or `static` items may be grouped when they share a theme, with one blank line after the group before unrelated items.
 - Leave one blank line before and after each banner.
-- Put a single-line computation directly above its early-return guard, with no blank line between them. For a multi-line `let` binding, such as an async chain or builder, leave a blank line before the guard.
+- Put a single-line computation directly above its early-return guard, with no blank line between them. For a multi-line `let` binding, leave a blank line before the guard.
 - Open a module with its `//!` doc, then its `mod` declarations, its re-exports at any visibility as a group of their own, and its `use` groups.
 - rustfmt sorts imports within each group, putting `self` before `super` before `crate`, but does not move imports between groups. Authors and reviewers must maintain the grouping.
 - Write `use` declarations, re-exports included, with `self::` for a module's children and `super::` for its parent and siblings, following `config/*`. Use `crate::` for more distant modules and test modules, which already glob-import their parent.
@@ -64,7 +64,7 @@ Follow the shared [Rust](https://github.com/hakulab/plugins/blob/main/plugins/ha
 ## Strings
 
 - When continuing an escaped literal with `\`, keep the space between joined words before the `\`, since the continuation drops the next line's leading whitespace. Start each continued line one column past the opening quote and realign it by hand when rustfmt moves the literal.
-- Use the multiline text macros whenever prose or a structured document, such as a prompt, message, Markdown, diff, or file fixture, spans a paragraph break or three or more lines. This applies to production code and tests. Inline text used once, and name a constant only when shared or very large. For CRLF protocol text such as an HTTP request, end each line with `\r` and let the source line break supply the `\n`.
+- Use the multiline text macros whenever prose or a structured document spans a paragraph break or three or more lines. This applies to production code and tests. Inline text used once, and name a constant only when shared or very large. For CRLF protocol text such as an HTTP request, end each line with `\r` and let the source line break supply the `\n`.
 - In a multiline `indoc!` or `formatdoc!`, `}` begins its own line at the indentation of the line that opens the macro, which is `"}` when the text ends in a newline. rustfmt lays out a multiline `writedoc!(writer, "...")` like a function call, so the writer, the literal, and the closing `)` each start their own line.
 - Keep `\n` escapes for separators, separators around a single line, a single trailing newline, tiny non-prose fixtures, and tests or operations concerned with the newlines themselves. One- or two-line fixtures without paragraph breaks may stay inline when clear. Keep content whose meaning depends on trailing spaces or whitespace-only lines in an escaped literal, since the trailing-whitespace hook strips them.
 - Build an interpolated list or section without a trailing newline, joining its items with `join`, so the template that interpolates it owns the line breaks around it.

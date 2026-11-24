@@ -36,8 +36,11 @@ If token write-back fails, the session warns and retains the rotated access and 
 ## Design Decisions
 
 1. **oxide-code keeps its own credential store.** Claude Code stores its login in the macOS Keychain item `Claude Code-credentials` or in `.credentials.json` in its config directory, and its `/logout` deletes that store. The directory is `~/.claude` unless `CLAUDE_CONFIG_DIR` moves it, in which case the Keychain item name gains `-` and the first 8 hex digits of the SHA-256 of the variable's value, and oxide-code reads the same variable to find the same store. oxide-code stores its own login only in its own file, which its `/logout` deletes, so signing out of one tool leaves the other signed in. Refreshing a Claude Code login still writes the rotated tokens back to Claude Code's store because the refresh invalidates the old refresh token.
+
 2. **One file on every platform, in Claude Code's JSON shape.** Codex and pi both store their logins in an `auth.json` file with mode `0600`, which needs neither a Keychain prompt nor platform-specific code. The file holds the same `claudeAiOauth` document as Claude Code's credentials file, so one parser, refresh path, and write-back serve both stores. Write-back keeps the fields it does not parse, so Claude Code's credential file stays intact. The file is written atomically with mode `0600` in a `0700` directory, like the `user-id` file beside it, and stores the token in plaintext at rest, as Claude Code's file store does.
+
 3. **The oxide-code login takes precedence over the Claude Code login.** Signing in with `/login` is a choice made in oxide-code, so that login outranks one inherited from Claude Code. If an oxide-code login exists but fails, such as one that expired without a refresh token, the search ends with its own recovery step, so a broken login never quietly yields to the Claude Code account. An explicit credential still outranks both stored logins, and `/login` explains when it keeps the session on another credential. Like the Claude Code login, the oxide-code login is sent only to first-party base URLs.
+
 4. **The flow matches Claude Code's login.** It uses Claude Code's client ID, the Claude.ai authorize URL `https://claude.ai/oauth/authorize` that Claude Code's `claude.com/cai` URL redirects to, the token URL `https://platform.claude.com/v1/oauth/token`, and the scopes Claude Code requests at sign-in, so the tokens refresh and authorize like a Claude Code login.
 
    - **PKCE.** The verifier and `state` are 32 bytes from the OS random source, base64url-encoded, and the challenge is the base64url SHA-256 of the verifier (`S256`).
@@ -65,16 +68,6 @@ If token write-back fails, the session warns and retains the rotated access and 
 - `crates/ox-core/src/auth/oauth/login.rs`: PKCE, the loopback listener, the pasted code, and code exchange.
 - `crates/ox-core/src/auth/oauth/store.rs`: credential stores, refresh, and write-back.
 - `crates/ox-core/src/auth/oauth/token.rs`: the session's `Token`, its expiry checks, and the token endpoint requests that issue it.
-- `crates/ox-core/src/client.rs`: `Request`, which carries the credential each conversation request sends.
-- `crates/ox-core/src/client/anthropic.rs`: `Client::finish_reloads`, which waits for the reloads in flight.
-- `crates/ox-core/src/client/anthropic/transport.rs`: `MessagesRequest`, which carries the credential into every attempt, and `post_messages`, which resends a request after a 401.
-- `crates/ox-core/src/config.rs`: `Config::resolve_auth`, which loads the credential or starts a TUI session signed out.
 - `crates/ox-core/src/config/credentials.rs`: `AuthState`, resolution order, and the fallback that keeps stored logins off gateways.
-- `crates/ox-core/src/engine.rs`: `Engine::finalize`, which waits at exit for the reloads in flight.
-- `crates/ox-core/src/engine/login.rs`: `SignIn`, the credential requests send or whether a signed-out session loads the stored login again, `Engine::ensure_signed_in`, which retries a stored login after a transient sign-out, and `Engine::login` and `Engine::logout`, which swap the credential.
-- `crates/ox-core/src/protocol.rs`: `Op::Login`, `Op::LoginCode`, `Op::Logout`, `Event::LoginStarted`, `Event::SignedIn`, `Event::LoginRestored`, and `Event::SignedOut`.
-- `crates/ox-core/src/util/path.rs`: `claude_config_var` and `claude_dir`, which follow `CLAUDE_CONFIG_DIR` to Claude Code's config directory.
-- `crates/ox-tui/src/app/dispatch.rs`: `App::handle_submit_prompt`, which sends the pasted code.
-- `crates/ox-tui/src/app/events.rs`: browser launch and sign-in messages.
-- `crates/ox-tui/src/app/operation.rs`: `Activity::SigningIn`, the status line while the browser is out, and `Activity::SigningOut`.
+- `crates/ox-core/src/engine/login.rs`: `SignIn`, `Engine::ensure_signed_in`, `Engine::login`, and `Engine::logout`.
 - `crates/ox-tui/src/slash/login.rs`: `LoginCmd` and `LogoutCmd`.
