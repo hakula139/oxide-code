@@ -276,7 +276,7 @@ fn normalize_arch(arch: &str) -> &'static str {
 enum RequestKind {
     /// A conversation turn, streamed with `context_management` and the agentic betas.
     Agentic,
-    /// A side request such as a session title, sent without streaming or agentic betas.
+    /// A non-streaming side request sent without agentic betas.
     SideQuery,
 }
 

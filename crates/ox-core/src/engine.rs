@@ -616,9 +616,9 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::local_testing::{
-        EchoTool, TITLE_MODEL, finished_session, greeting_title, inert_mailbox, login_urls,
-        mount_title, next_matching, service_log, submit, system_prompt, texts,
-        tool_heavy_transcript, tracked_paths, turn_events, write_unreadable_instructions,
+        EchoTool, ResponseGate, TITLE_MODEL, finished_session, gated_response, greeting_title,
+        inert_mailbox, login_urls, mount_title, next_matching, service_log, submit, system_prompt,
+        texts, tool_heavy_transcript, tracked_paths, turn_events, write_unreadable_instructions,
     };
     use super::sessions::format_drift_warning;
     use super::testing::{
@@ -2770,15 +2770,17 @@ mod tests {
             mount_heavy_call_once(server, "tasks", &input).await;
         }
 
-        /// Answers the next Messages request with `text` after `delay`, so an op sent meanwhile
-        /// reaches the engine mid-request.
-        async fn mount_delayed_reply_once(server: &MockServer, text: &str, delay: Duration) {
+        /// Answers the next Messages request with `text` once the returned gate releases it, so an
+        /// op sent meanwhile reaches the engine mid-request.
+        async fn mount_gated_reply_once(server: &MockServer, text: &str) -> ResponseGate {
+            let (responder, gate) = gated_response(sse_response(text_stream_body("", text)));
             Mock::given(method("POST"))
                 .and(path("/v1/messages"))
-                .respond_with(sse_response(text_stream_body("", text)).set_delay(delay))
+                .respond_with(responder)
                 .up_to_n_times(1)
                 .mount(server)
                 .await;
+            gate
         }
 
         /// Engine past the compaction floor that compacts at 50,000 tokens, with the `tasks` tool,
@@ -3796,16 +3798,16 @@ mod tests {
                 let read = dir.path().join("read.txt");
                 std::fs::write(&read, "read").unwrap();
                 seed_full_read(&engine.transcript.file_tracker, &read);
-                let summary_delay = Duration::from_millis(200);
-                mount_delayed_reply_once(&server, "mid-turn summary", summary_delay).await;
+                let gate = mount_gated_reply_once(&server, "mid-turn summary").await;
                 mount_refusal_once(&server, 1_000).await;
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = OpSender::channel(1);
                 let mut mailbox = Mailbox::new(&mut ops);
                 let queue = async {
-                    until_requested(&server, 2).await;
+                    gate.arrived.await.unwrap();
                     let prompt = Op::Queue("also check the docs".to_owned());
                     ops_tx.submit(prompt).await.unwrap();
+                    _ = gate.release.send(());
                 };
 
                 let (end, ()) = tokio::join!(
@@ -3971,13 +3973,14 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let store = test_store(dir.path());
                 let mut engine = mid_turn_engine(&server, &store, dir.path()).await;
-                mount_delayed_reply_once(&server, "   ", Duration::from_millis(200)).await;
+                let gate = mount_gated_reply_once(&server, "   ").await;
                 let sink = CapturingSink::default();
                 let (ops_tx, mut ops) = OpSender::channel(1);
                 let mut mailbox = Mailbox::new(&mut ops);
                 let switch = async {
-                    until_requested(&server, 2).await;
+                    gate.arrived.await.unwrap();
                     ops_tx.submit(Op::SetMode(Mode::Plan)).await.unwrap();
+                    _ = gate.release.send(());
                 };
 
                 let (end, ()) = tokio::join!(

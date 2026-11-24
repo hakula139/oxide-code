@@ -159,243 +159,175 @@ mod tests {
             }
         }
 
-        #[test]
-        fn swap_both_none_omits_effort_clause() {
-            let opus = ModelSpec::resolve("claude-opus-5-5");
-            let custom = ModelSpec::resolve("custom-model");
-
-            let s = config_changed(
-                &settings(&opus, None),
-                &settings(&custom, None),
-                &model_pick(custom.id(), None),
-            );
-
-            assert_eq!(
-                s,
-                format!("Switched to custom-model (custom-model). {CUSTOM_NOTICE}")
-            );
-        }
-
-        #[test]
-        fn swap_to_a_model_without_levels_surfaces_requested_effort() {
-            // The user needs to know the requested level didn't apply, or else a silent drop reads
-            // as a landed config change.
-            let opus = ModelSpec::resolve("claude-opus-5-5");
-            let custom = ModelSpec::resolve("custom-model");
-
-            let s = config_changed(
-                &settings(&opus, None),
-                &settings(&custom, None),
-                &model_pick(custom.id(), Some(Effort::High)),
-            );
-
-            assert_eq!(
-                s,
-                format!(
-                    "Switched to custom-model (custom-model). \
-                     Effort unchanged (model has no effort levels, asked for high). \
-                     {CUSTOM_NOTICE}"
-                ),
-            );
-        }
-
-        #[test]
-        fn swap_clears_effort_when_new_model_drops_it() {
-            let opus = ModelSpec::resolve("claude-opus-5-5");
-            let custom = ModelSpec::resolve("custom-model");
-
-            let s = config_changed(
-                &settings(&opus, Some(Effort::Xhigh)),
-                &settings(&custom, None),
-                &model_pick(custom.id(), None),
-            );
-
-            assert_eq!(
-                s,
-                format!(
-                    "Switched to custom-model (custom-model). \
-                     Effort cleared (model has no effort levels). \
-                     {CUSTOM_NOTICE}"
-                )
-            );
-        }
-
-        #[test]
-        fn swap_marks_default_when_previous_was_none() {
-            // None → Some means the new model's default kicked in. Distinguishing this from "user's
-            // pick survived" keeps the user from thinking they chose this level.
-            let custom = ModelSpec::resolve("custom-model");
-            let opus = ModelSpec::resolve("claude-opus-5-5");
-
-            let s = config_changed(
-                &settings(&custom, None),
-                &settings(&opus, Some(Effort::Medium)),
-                &model_pick(opus.id(), None),
-            );
-
-            assert_eq!(
-                s,
-                "Switched to Claude Opus 5.5 (claude-opus-5-5) · effort medium (model default)"
-            );
-        }
-
-        #[test]
-        fn swap_reports_carried_or_picked_effort_plainly() {
-            let sonnet = ModelSpec::resolve("claude-sonnet-5-5");
-            let opus = ModelSpec::resolve("claude-opus-5-5");
-            for (prev, requested, new) in [
-                (Effort::High, None, Effort::High),
-                (Effort::Medium, Some(Effort::Max), Effort::Max),
-            ] {
-                let s = config_changed(
-                    &settings(&sonnet, Some(prev)),
-                    &settings(&opus, Some(new)),
-                    &model_pick(opus.id(), requested),
-                );
-
-                assert_eq!(
-                    s,
-                    format!("Switched to Claude Opus 5.5 (claude-opus-5-5) · effort {new}"),
-                );
+        fn settings_with_threshold(
+            model: &ModelSpec,
+            effort: Option<Effort>,
+            threshold_tokens: u32,
+        ) -> ConfigSettings {
+            ConfigSettings {
+                auto_compaction: AutoCompactionConfig {
+                    enabled: true,
+                    threshold_tokens: Some(threshold_tokens),
+                },
+                ..settings(model, effort)
             }
         }
 
         #[test]
-        fn model_pick_of_the_active_model_reads_as_using_it() {
-            let opus = ModelSpec::resolve("claude-opus-5-5");
-
-            let s = config_changed(
-                &settings(&opus, Some(Effort::High)),
-                &settings(&opus, Some(Effort::High)),
-                &model_pick(opus.id(), None),
-            );
-
-            assert_eq!(s, "Using Claude Opus 5.5 (claude-opus-5-5) · effort high");
-        }
-
-        #[test]
-        fn effort_explicit_pick_matches_resolution() {
-            let opus = ModelSpec::resolve("claude-opus-5-5");
-
-            let s = config_changed(
-                &settings(&opus, Some(Effort::High)),
-                &settings(&opus, Some(Effort::Xhigh)),
-                &ConfigPick::Effort(Effort::Xhigh),
-            );
-
-            assert_eq!(s, "Effort set to xhigh");
-        }
-
-        #[test]
-        fn effort_pick_on_a_model_without_levels_surfaces_loss() {
-            let custom = ModelSpec::resolve("custom-model");
-
-            let s = config_changed(
-                &settings(&custom, None),
-                &settings(&custom, None),
-                &ConfigPick::Effort(Effort::High),
-            );
-
-            assert_eq!(
-                s,
-                "Effort unchanged (model has no effort levels, asked for high)"
-            );
-        }
-
-        #[test]
-        fn model_swap_appends_the_near_miss_hint() {
-            let opus = ModelSpec::resolve("claude-opus-5-5");
-            let typo = ModelSpec::resolve("claude-opus-5-5-20261001");
-
-            let s = config_changed(
-                &settings(&opus, Some(Effort::High)),
-                &settings(&typo, Some(Effort::High)),
-                &model_pick(typo.id(), None),
-            );
-
-            assert_eq!(
-                s,
-                "Switched to claude-opus-5-5-20261001 (claude-opus-5-5-20261001) · effort high. \
-                 `claude-opus-5-5-20261001` is not a supported model, \
-                 so requests go without thinking, effort, and context management, \
-                 and cost tracking stays off. \
-                 Auto-compaction requires an explicit token threshold. \
-                 Did you mean `claude-opus-5-5` (Claude Opus 5.5)?",
-            );
-        }
-
-        #[test]
-        fn effort_pick_skips_the_model_warning() {
-            let typo = ModelSpec::resolve("claude-opus-5-5-20261001");
-
-            let s = config_changed(
-                &settings(&typo, None),
-                &settings(&typo, None),
-                &ConfigPick::Effort(Effort::High),
-            );
-
-            assert_eq!(
-                s,
-                "Effort unchanged (model has no effort levels, asked for high)"
-            );
-        }
-
-        #[test]
-        fn model_swap_mentions_compaction_threshold_change() {
+        fn formats_model_swap_effort_notices() {
             let opus = ModelSpec::resolve("claude-opus-5-5");
             let sonnet = ModelSpec::resolve("claude-sonnet-5-5");
-            let after = ConfigSettings {
-                auto_compaction: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(WINDOW_1M_THRESHOLD),
-                },
-                ..settings(&sonnet, Some(Effort::High))
-            };
-
-            let s = config_changed(
-                &settings(&opus, Some(Effort::High)),
-                &after,
-                &model_pick(sonnet.id(), None),
-            );
-
-            assert_eq!(
-                s,
-                format!(
-                    "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort high. \
-                     Auto-compaction at {} tokens.",
-                    compact_count(WINDOW_1M_THRESHOLD),
+            let custom = ModelSpec::resolve("custom-model");
+            let cases = [
+                (
+                    "both_none",
+                    settings(&opus, None),
+                    settings(&custom, None),
+                    model_pick(custom.id(), None),
+                    format!("Switched to custom-model (custom-model). {CUSTOM_NOTICE}"),
                 ),
-            );
+                (
+                    "requested_effort_dropped",
+                    settings(&opus, None),
+                    settings(&custom, None),
+                    model_pick(custom.id(), Some(Effort::High)),
+                    format!(
+                        "Switched to custom-model (custom-model). \
+                         Effort unchanged (model has no effort levels, asked for high). \
+                         {CUSTOM_NOTICE}"
+                    ),
+                ),
+                (
+                    "effort_cleared",
+                    settings(&opus, Some(Effort::Xhigh)),
+                    settings(&custom, None),
+                    model_pick(custom.id(), None),
+                    format!(
+                        "Switched to custom-model (custom-model). \
+                         Effort cleared (model has no effort levels). \
+                         {CUSTOM_NOTICE}"
+                    ),
+                ),
+                (
+                    // None → Some distinguishes the model default from a carried user pick.
+                    "model_default",
+                    settings(&custom, None),
+                    settings(&opus, Some(Effort::Medium)),
+                    model_pick(opus.id(), None),
+                    "Switched to Claude Opus 5.5 (claude-opus-5-5) · effort medium (model default)"
+                        .to_owned(),
+                ),
+                (
+                    "carried_effort",
+                    settings(&sonnet, Some(Effort::High)),
+                    settings(&opus, Some(Effort::High)),
+                    model_pick(opus.id(), None),
+                    "Switched to Claude Opus 5.5 (claude-opus-5-5) · effort high".to_owned(),
+                ),
+                (
+                    "explicit_effort",
+                    settings(&sonnet, Some(Effort::Medium)),
+                    settings(&opus, Some(Effort::Max)),
+                    model_pick(opus.id(), Some(Effort::Max)),
+                    "Switched to Claude Opus 5.5 (claude-opus-5-5) · effort max".to_owned(),
+                ),
+                (
+                    "same_model",
+                    settings(&opus, Some(Effort::High)),
+                    settings(&opus, Some(Effort::High)),
+                    model_pick(opus.id(), None),
+                    "Using Claude Opus 5.5 (claude-opus-5-5) · effort high".to_owned(),
+                ),
+            ];
+
+            for (case, before, after, pick, expected) in cases {
+                assert_eq!(config_changed(&before, &after, &pick), expected, "{case}");
+            }
         }
 
         #[test]
-        fn model_swap_reports_lost_effort_and_compaction_change() {
+        fn formats_model_swap_warning_and_compaction_notices() {
+            let opus = ModelSpec::resolve("claude-opus-5-5");
+            let sonnet = ModelSpec::resolve("claude-sonnet-5-5");
+            let custom = ModelSpec::resolve("custom-model");
+            let typo = ModelSpec::resolve("claude-opus-5-5-20261001");
+            let cases = [
+                (
+                    "near_miss_hint",
+                    settings(&opus, Some(Effort::High)),
+                    settings(&typo, Some(Effort::High)),
+                    model_pick(typo.id(), None),
+                    "Switched to claude-opus-5-5-20261001 (claude-opus-5-5-20261001) · effort high. \
+                     `claude-opus-5-5-20261001` is not a supported model, \
+                     so requests go without thinking, effort, and context management, \
+                     and cost tracking stays off. \
+                     Auto-compaction requires an explicit token threshold. \
+                     Did you mean `claude-opus-5-5` (Claude Opus 5.5)?"
+                        .to_owned(),
+                ),
+                (
+                    "compaction_threshold_change",
+                    settings(&opus, Some(Effort::High)),
+                    settings_with_threshold(&sonnet, Some(Effort::High), WINDOW_1M_THRESHOLD),
+                    model_pick(sonnet.id(), None),
+                    format!(
+                        "Switched to Claude Sonnet 5.5 (claude-sonnet-5-5) · effort high. \
+                         Auto-compaction at {} tokens.",
+                        compact_count(WINDOW_1M_THRESHOLD),
+                    ),
+                ),
+                (
+                    "lost_effort_and_compaction_change",
+                    settings(&opus, Some(Effort::High)),
+                    settings_with_threshold(&custom, None, WINDOW_1M_THRESHOLD),
+                    model_pick(custom.id(), Some(Effort::Max)),
+                    format!(
+                        "Switched to custom-model (custom-model). \
+                         Effort unchanged (model has no effort levels, asked for max). \
+                         Auto-compaction at {} tokens. \
+                         {CUSTOM_NOTICE}",
+                        compact_count(WINDOW_1M_THRESHOLD),
+                    ),
+                ),
+            ];
+
+            for (case, before, after, pick, expected) in cases {
+                assert_eq!(config_changed(&before, &after, &pick), expected, "{case}");
+            }
+        }
+
+        #[test]
+        fn formats_effort_pick_notices() {
             let opus = ModelSpec::resolve("claude-opus-5-5");
             let custom = ModelSpec::resolve("custom-model");
-            let after = ConfigSettings {
-                auto_compaction: AutoCompactionConfig {
-                    enabled: true,
-                    threshold_tokens: Some(WINDOW_1M_THRESHOLD),
-                },
-                ..settings(&custom, None)
-            };
-
-            let s = config_changed(
-                &settings(&opus, Some(Effort::High)),
-                &after,
-                &model_pick(custom.id(), Some(Effort::Max)),
-            );
-
-            assert_eq!(
-                s,
-                format!(
-                    "Switched to custom-model (custom-model). \
-                     Effort unchanged (model has no effort levels, asked for max). \
-                     Auto-compaction at {} tokens. \
-                     {CUSTOM_NOTICE}",
-                    compact_count(WINDOW_1M_THRESHOLD),
+            let typo = ModelSpec::resolve("claude-opus-5-5-20261001");
+            let cases = [
+                (
+                    "explicit_pick",
+                    settings(&opus, Some(Effort::High)),
+                    settings(&opus, Some(Effort::Xhigh)),
+                    ConfigPick::Effort(Effort::Xhigh),
+                    "Effort set to xhigh",
                 ),
-            );
+                (
+                    "model_without_levels",
+                    settings(&custom, None),
+                    settings(&custom, None),
+                    ConfigPick::Effort(Effort::High),
+                    "Effort unchanged (model has no effort levels, asked for high)",
+                ),
+                (
+                    "unknown_model_skips_warning",
+                    settings(&typo, None),
+                    settings(&typo, None),
+                    ConfigPick::Effort(Effort::High),
+                    "Effort unchanged (model has no effort levels, asked for high)",
+                ),
+            ];
+
+            for (case, before, after, pick, expected) in cases {
+                assert_eq!(config_changed(&before, &after, &pick), expected, "{case}");
+            }
         }
     }
 

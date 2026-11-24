@@ -96,18 +96,6 @@ impl AuthSource {
         }
     }
 
-    /// The env var, config key, or store the credential was read from.
-    fn origin(self) -> &'static str {
-        match self {
-            Self::AuthTokenEnv => "ANTHROPIC_AUTH_TOKEN",
-            Self::ApiKeyEnv => "ANTHROPIC_API_KEY",
-            Self::OAuthTokenEnv => "CLAUDE_CODE_OAUTH_TOKEN",
-            Self::ClientBearer | Self::ClientApiKey | Self::ClientOAuth => "client.auth",
-            Self::OxLogin => Login::Ox.name(),
-            Self::ClaudeCodeLogin => Login::ClaudeCode.name(),
-        }
-    }
-
     /// Recovery step shown when the API rejects the credential with HTTP 401.
     pub(crate) const fn rejection_hint(self) -> &'static str {
         match self {
@@ -122,6 +110,18 @@ impl AuthSource {
             }
             Self::OxLogin => Login::Ox.sign_in_step(),
             Self::ClaudeCodeLogin => Login::ClaudeCode.sign_in_step(),
+        }
+    }
+
+    /// The env var, config key, or store the credential was read from.
+    fn origin(self) -> &'static str {
+        match self {
+            Self::AuthTokenEnv => "ANTHROPIC_AUTH_TOKEN",
+            Self::ApiKeyEnv => "ANTHROPIC_API_KEY",
+            Self::OAuthTokenEnv => "CLAUDE_CODE_OAUTH_TOKEN",
+            Self::ClientBearer | Self::ClientApiKey | Self::ClientOAuth => "client.auth",
+            Self::OxLogin => Login::Ox.name(),
+            Self::ClaudeCodeLogin => Login::ClaudeCode.name(),
         }
     }
 }

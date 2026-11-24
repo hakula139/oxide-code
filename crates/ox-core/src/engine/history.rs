@@ -394,7 +394,7 @@ mod tests {
                 role: Role::User,
                 content: vec![ContentBlock::text("  \n  ")],
             }];
-            assert_eq!(walk(&messages), Vec::<Interaction>::new());
+            assert_eq!(walk(&messages), [] as [Interaction; 0]);
         }
 
         #[test]

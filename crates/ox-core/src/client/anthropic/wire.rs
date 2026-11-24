@@ -979,92 +979,71 @@ mod tests {
         use super::*;
 
         #[test]
-        fn content_block_start_carries_its_text_block() {
-            let json = r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
-
-            let event: StreamEvent = serde_json::from_str(json).unwrap();
-
-            assert_eq!(
-                event,
-                StreamEvent::ContentBlockStart {
-                    index: 0,
-                    content_block: ContentBlockInfo::Text {
-                        text: String::new(),
+        fn deserializes_variants() {
+            let cases = [
+                (
+                    "content_block_start",
+                    r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+                    StreamEvent::ContentBlockStart {
+                        index: 0,
+                        content_block: ContentBlockInfo::Text {
+                            text: String::new(),
+                        },
                     },
-                }
-            );
-        }
-
-        #[test]
-        fn content_block_stop_drops_its_index() {
-            let event: StreamEvent =
-                serde_json::from_str(r#"{"type":"content_block_stop","index":2}"#).unwrap();
-
-            assert_eq!(event, StreamEvent::ContentBlockStop);
-        }
-
-        #[test]
-        fn message_delta_carries_the_stop_reason_and_usage() {
-            let json = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}"#;
-
-            let event: StreamEvent = serde_json::from_str(json).unwrap();
-
-            assert_eq!(
-                event,
-                StreamEvent::MessageDelta {
-                    delta: MessageDeltaBody {
-                        stop_reason: Some(StopReason::EndTurn),
-                        stop_details: None,
+                ),
+                (
+                    "content_block_stop",
+                    r#"{"type":"content_block_stop","index":2}"#,
+                    StreamEvent::ContentBlockStop,
+                ),
+                (
+                    "message_delta_end_turn",
+                    r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}"#,
+                    StreamEvent::MessageDelta {
+                        delta: MessageDeltaBody {
+                            stop_reason: Some(StopReason::EndTurn),
+                            stop_details: None,
+                        },
+                        usage: Some(TokenUsage::new(0, 42)),
                     },
-                    usage: Some(TokenUsage::new(0, 42)),
-                }
-            );
-        }
-
-        #[test]
-        fn message_delta_refusal_carries_stop_details() {
-            let json = r#"{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber","explanation":"Exploit development"}},"usage":{"output_tokens":3}}"#;
-
-            let event: StreamEvent = serde_json::from_str(json).unwrap();
-
-            assert_eq!(
-                event,
-                StreamEvent::MessageDelta {
-                    delta: MessageDeltaBody {
-                        stop_reason: Some(StopReason::Refusal),
-                        stop_details: Some(StopDetails {
-                            category: Some("cyber".to_owned()),
-                            explanation: Some("Exploit development".to_owned()),
-                        }),
+                ),
+                (
+                    "message_delta_refusal",
+                    r#"{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber","explanation":"Exploit development"}},"usage":{"output_tokens":3}}"#,
+                    StreamEvent::MessageDelta {
+                        delta: MessageDeltaBody {
+                            stop_reason: Some(StopReason::Refusal),
+                            stop_details: Some(StopDetails {
+                                category: Some("cyber".to_owned()),
+                                explanation: Some("Exploit development".to_owned()),
+                            }),
+                        },
+                        usage: Some(TokenUsage::new(0, 3)),
                     },
-                    usage: Some(TokenUsage::new(0, 3)),
-                }
-            );
-        }
-
-        #[test]
-        fn message_delta_unknown_stop_reason_keeps_usage() {
-            let json = r#"{"type":"message_delta","delta":{"stop_reason":"some_future_reason","stop_details":null},"usage":{"output_tokens":7}}"#;
-
-            let event: StreamEvent = serde_json::from_str(json).unwrap();
-
-            assert_eq!(
-                event,
-                StreamEvent::MessageDelta {
-                    delta: MessageDeltaBody {
-                        stop_reason: Some(StopReason::Unknown),
-                        stop_details: None,
+                ),
+                (
+                    "message_delta_unknown_stop_reason",
+                    r#"{"type":"message_delta","delta":{"stop_reason":"some_future_reason","stop_details":null},"usage":{"output_tokens":7}}"#,
+                    StreamEvent::MessageDelta {
+                        delta: MessageDeltaBody {
+                            stop_reason: Some(StopReason::Unknown),
+                            stop_details: None,
+                        },
+                        usage: Some(TokenUsage::new(0, 7)),
                     },
-                    usage: Some(TokenUsage::new(0, 7)),
-                }
-            );
-        }
+                ),
+                (
+                    "message_stop",
+                    r#"{"type":"message_stop"}"#,
+                    StreamEvent::MessageStop,
+                ),
+            ];
 
-        #[test]
-        fn message_stop_parses_from_its_type_alone() {
-            let event: StreamEvent = serde_json::from_str(r#"{"type":"message_stop"}"#).unwrap();
+            for (case, json, expected) in cases {
+                let event: StreamEvent = serde_json::from_str(json).unwrap();
 
-            assert_eq!(event, StreamEvent::MessageStop);
+                assert_eq!(event, expected, "{case}");
+            }
         }
     }
 
@@ -1072,120 +1051,79 @@ mod tests {
         use super::*;
 
         #[test]
-        fn text_keeps_its_text() {
-            let info: ContentBlockInfo =
-                serde_json::from_str(r#"{"type":"text","text":"Hello world"}"#).unwrap();
+        fn deserializes_variants() {
+            let cases = [
+                (
+                    "text",
+                    r#"{"type":"text","text":"Hello world"}"#,
+                    ContentBlockInfo::Text {
+                        text: "Hello world".to_owned(),
+                    },
+                ),
+                (
+                    "tool_use",
+                    r#"{"type":"tool_use","id":"toolu_01","name":"bash"}"#,
+                    ContentBlockInfo::ToolUse {
+                        id: "toolu_01".to_owned(),
+                        name: "bash".to_owned(),
+                        input: json!({}),
+                    },
+                ),
+                (
+                    "server_tool_use",
+                    r#"{"type":"server_tool_use","id":"stu_01","name":"advisor"}"#,
+                    ContentBlockInfo::ServerToolUse {
+                        id: "stu_01".to_owned(),
+                        name: "advisor".to_owned(),
+                        input: json!({}),
+                    },
+                ),
+                (
+                    "thinking",
+                    r#"{"type":"thinking","thinking":"Let me analyze this","signature":"sig_xyz"}"#,
+                    ContentBlockInfo::Thinking {
+                        thinking: "Let me analyze this".to_owned(),
+                        signature: "sig_xyz".to_owned(),
+                    },
+                ),
+                (
+                    "redacted_thinking",
+                    r#"{"type":"redacted_thinking","data":"base64data=="}"#,
+                    ContentBlockInfo::RedactedThinking {
+                        data: "base64data==".to_owned(),
+                    },
+                ),
+                (
+                    "server_tool_result",
+                    r#"{"type":"advisor_tool_result","tool_use_id":"stu_1","content":{"type":"advisor_redacted_result","encrypted_content":"opaque"}}"#,
+                    ContentBlockInfo::ServerToolResult {
+                        r#type: "advisor_tool_result".to_owned(),
+                        tool_use_id: "stu_1".to_owned(),
+                        fields: serde_json::Map::from_iter([(
+                            "content".to_owned(),
+                            json!({"type": "advisor_redacted_result", "encrypted_content": "opaque"}),
+                        )]),
+                    },
+                ),
+                (
+                    "mcp_tool_result",
+                    r#"{"type":"mcp_tool_result","tool_use_id":"m1","content":[]}"#,
+                    ContentBlockInfo::McpToolResult {},
+                ),
+                (
+                    "unknown",
+                    r#"{"type":"some_future_block","data":"opaque"}"#,
+                    ContentBlockInfo::Unknown {
+                        r#type: "some_future_block".to_owned(),
+                    },
+                ),
+            ];
 
-            assert_eq!(
-                info,
-                ContentBlockInfo::Text {
-                    text: "Hello world".to_owned(),
-                }
-            );
-        }
+            for (case, json, expected) in cases {
+                let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
 
-        #[test]
-        fn tool_use_keeps_its_id_and_name() {
-            let info: ContentBlockInfo =
-                serde_json::from_str(r#"{"type":"tool_use","id":"toolu_01","name":"bash"}"#)
-                    .unwrap();
-
-            assert_eq!(
-                info,
-                ContentBlockInfo::ToolUse {
-                    id: "toolu_01".to_owned(),
-                    name: "bash".to_owned(),
-                    input: json!({}),
-                }
-            );
-        }
-
-        #[test]
-        fn server_tool_use_keeps_its_id_and_name() {
-            let info: ContentBlockInfo = serde_json::from_str(
-                r#"{"type":"server_tool_use","id":"stu_01","name":"advisor"}"#,
-            )
-            .unwrap();
-
-            assert_eq!(
-                info,
-                ContentBlockInfo::ServerToolUse {
-                    id: "stu_01".to_owned(),
-                    name: "advisor".to_owned(),
-                    input: json!({}),
-                }
-            );
-        }
-
-        #[test]
-        fn thinking_keeps_its_text_and_signature() {
-            let json =
-                r#"{"type":"thinking","thinking":"Let me analyze this","signature":"sig_xyz"}"#;
-
-            let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
-
-            assert_eq!(
-                info,
-                ContentBlockInfo::Thinking {
-                    thinking: "Let me analyze this".to_owned(),
-                    signature: "sig_xyz".to_owned(),
-                }
-            );
-        }
-
-        #[test]
-        fn redacted_thinking_keeps_its_data() {
-            let info: ContentBlockInfo =
-                serde_json::from_str(r#"{"type":"redacted_thinking","data":"base64data=="}"#)
-                    .unwrap();
-
-            assert_eq!(
-                info,
-                ContentBlockInfo::RedactedThinking {
-                    data: "base64data==".to_owned(),
-                }
-            );
-        }
-
-        #[test]
-        fn server_tool_result_keeps_its_type_and_fields() {
-            let json = r#"{"type":"advisor_tool_result","tool_use_id":"stu_1","content":{"type":"advisor_redacted_result","encrypted_content":"opaque"}}"#;
-
-            let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
-
-            assert_eq!(
-                info,
-                ContentBlockInfo::ServerToolResult {
-                    r#type: "advisor_tool_result".to_owned(),
-                    tool_use_id: "stu_1".to_owned(),
-                    fields: serde_json::Map::from_iter([(
-                        "content".to_owned(),
-                        json!({"type": "advisor_redacted_result", "encrypted_content": "opaque"}),
-                    )]),
-                }
-            );
-        }
-
-        #[test]
-        fn mcp_tool_result_is_no_server_tool_result() {
-            let json = r#"{"type":"mcp_tool_result","tool_use_id":"m1","content":[]}"#;
-
-            let info: ContentBlockInfo = serde_json::from_str(json).unwrap();
-
-            assert_eq!(info, ContentBlockInfo::McpToolResult {});
-        }
-
-        #[test]
-        fn unknown_block_keeps_its_type() {
-            let info: ContentBlockInfo =
-                serde_json::from_str(r#"{"type":"some_future_block","data":"opaque"}"#).unwrap();
-
-            assert_eq!(
-                info,
-                ContentBlockInfo::Unknown {
-                    r#type: "some_future_block".to_owned()
-                }
-            );
+                assert_eq!(info, expected, "{case}");
+            }
         }
 
         #[test]
@@ -1214,67 +1152,48 @@ mod tests {
         use super::*;
 
         #[test]
-        fn text_delta_keeps_its_text() {
-            let delta: Delta =
-                serde_json::from_str(r#"{"type":"text_delta","text":"Hello"}"#).unwrap();
+        fn deserializes_variants() {
+            let cases = [
+                (
+                    "text_delta",
+                    r#"{"type":"text_delta","text":"Hello"}"#,
+                    Delta::TextDelta {
+                        text: "Hello".to_owned(),
+                    },
+                ),
+                (
+                    "input_json_delta",
+                    r#"{"type":"input_json_delta","partial_json":"{\"key\":"}"#,
+                    Delta::InputJsonDelta {
+                        partial_json: r#"{"key":"#.to_owned(),
+                    },
+                ),
+                (
+                    "thinking_delta",
+                    r#"{"type":"thinking_delta","thinking":"partial reasoning"}"#,
+                    Delta::ThinkingDelta {
+                        thinking: "partial reasoning".to_owned(),
+                    },
+                ),
+                (
+                    "signature_delta",
+                    r#"{"type":"signature_delta","signature":"sig_abc123"}"#,
+                    Delta::SignatureDelta {
+                        signature: "sig_abc123".to_owned(),
+                    },
+                ),
+                (
+                    "unknown",
+                    r#"{"type":"some_future_delta","data":"opaque"}"#,
+                    Delta::Unknown,
+                ),
+            ];
 
-            assert_eq!(
-                delta,
-                Delta::TextDelta {
-                    text: "Hello".to_owned(),
-                }
-            );
-        }
+            for (case, json, expected) in cases {
+                let delta: Delta = serde_json::from_str(json).unwrap();
 
-        #[test]
-        fn input_json_delta_keeps_the_partial_json() {
-            let delta: Delta =
-                serde_json::from_str(r#"{"type":"input_json_delta","partial_json":"{\"key\":"}"#)
-                    .unwrap();
-
-            assert_eq!(
-                delta,
-                Delta::InputJsonDelta {
-                    partial_json: r#"{"key":"#.to_owned(),
-                }
-            );
-        }
-
-        #[test]
-        fn thinking_delta_keeps_its_text() {
-            let delta: Delta =
-                serde_json::from_str(r#"{"type":"thinking_delta","thinking":"partial reasoning"}"#)
-                    .unwrap();
-
-            assert_eq!(
-                delta,
-                Delta::ThinkingDelta {
-                    thinking: "partial reasoning".to_owned(),
-                }
-            );
-        }
-
-        #[test]
-        fn signature_delta_keeps_the_signature() {
-            let delta: Delta =
-                serde_json::from_str(r#"{"type":"signature_delta","signature":"sig_abc123"}"#)
-                    .unwrap();
-
-            assert_eq!(
-                delta,
-                Delta::SignatureDelta {
-                    signature: "sig_abc123".to_owned(),
-                }
-            );
-        }
-
-        #[test]
-        fn unknown_type_parses_for_forward_compat() {
-            let json = r#"{"type":"some_future_delta","data":"opaque"}"#;
-
-            let delta: Delta = serde_json::from_str(json).unwrap();
-
-            assert_eq!(delta, Delta::Unknown);
+                assert_eq!(delta, expected, "{case}");
+            }
         }
     }
 }

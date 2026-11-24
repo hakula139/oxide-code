@@ -242,7 +242,7 @@ fn authorize_url(redirect_uri: &str, challenge: &str, state: &str) -> String {
 /// What a request to the listener carried.
 #[derive(Debug)]
 enum Callback {
-    /// A request for some other path, such as a favicon.
+    /// A request for some other path.
     Elsewhere,
     /// A callback without this sign-in's `state`, which the listener refuses and keeps waiting.
     Foreign,
@@ -251,8 +251,7 @@ enum Callback {
     Rejected(anyhow::Error),
 }
 
-/// Reads a request up to the end of its headers and returns its target, such as
-/// `/callback?code=...`.
+/// Reads a request up to the end of its headers and returns its request target.
 async fn read_request_target(mut stream: TcpStream) -> (TcpStream, Result<String>) {
     let mut buf = Vec::new();
     let result = async {

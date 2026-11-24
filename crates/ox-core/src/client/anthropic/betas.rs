@@ -207,7 +207,7 @@ mod tests {
 
             assert_eq!(
                 compute_betas(&haiku, None, AuthKind::ApiKey, SideQuery),
-                Vec::<&str>::new(),
+                [] as [&str; 0],
             );
             assert_eq!(
                 compute_betas(&haiku, None, AuthKind::OAuth, SideQuery),

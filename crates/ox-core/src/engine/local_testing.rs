@@ -2,12 +2,12 @@
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::json;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use wiremock::matchers::{body_partial_json, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use super::abort::{Mailbox, TurnAbort};
 use super::classifier::ClassifierContext;
@@ -68,6 +68,48 @@ pub(super) async fn turn_events(events: &mut mpsc::UnboundedReceiver<Event>) -> 
             return seen;
         }
     }
+}
+
+/// Synchronization handles for [`gated_response`]: `arrived` resolves once the mock receives the
+/// request, and sending on (or dropping) `release` lets the mock send its response.
+pub(super) struct ResponseGate {
+    pub(super) arrived: oneshot::Receiver<()>,
+    pub(super) release: std::sync::mpsc::Sender<()>,
+}
+
+struct GatedResponse {
+    template: ResponseTemplate,
+    arrived: Mutex<Option<oneshot::Sender<()>>>,
+    release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl Respond for GatedResponse {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        if let Some(arrived) = self.arrived.lock().unwrap().take() {
+            _ = arrived.send(());
+        }
+        if let Some(release) = self.release.lock().unwrap().take() {
+            _ = release.recv();
+        }
+        self.template.clone()
+    }
+}
+
+/// Wraps `template` in a responder that pauses after receiving a request until its [`ResponseGate`]
+/// releases it, so tests can submit mid-request ops without wall-clock delays.
+///
+/// Wiremock invokes [`Respond::respond`] while holding its server write lock, so callers must not
+/// query or mount on `server`, send concurrent requests while gated, or drop `server` before
+/// releasing or dropping the gate.
+pub(super) fn gated_response(template: ResponseTemplate) -> (impl Respond, ResponseGate) {
+    let (arrived_tx, arrived) = oneshot::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    let responder = GatedResponse {
+        template,
+        arrived: Mutex::new(Some(arrived_tx)),
+        release: Mutex::new(Some(release_rx)),
+    };
+    (responder, ResponseGate { arrived, release })
 }
 
 /// Answers each title request with `response`. Mount it before the reply that answers turns.

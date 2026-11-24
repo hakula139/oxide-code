@@ -64,11 +64,25 @@ mod tests {
     mod compute_fingerprint {
         use super::*;
 
-        // Indices 4, 7, and 20 of "Say 'hello'..." select `'`, `l`, and `i`.
         #[test]
-        fn matches_a_known_vector() {
-            let fp = compute_fingerprint("Say 'hello' and nothing else.", "2.1.37");
-            assert_eq!(fp, "9e7");
+        fn matches_known_vectors() {
+            for (case, message, version, expected) in [
+                // Indices 4, 7, and 20 select `'`, `l`, and `i`.
+                ("ascii", "Say 'hello' and nothing else.", "2.1.37", "9e7"),
+                // Index 4 is `o`, and 7 and 20 are out of bounds.
+                ("partial_bounds", "Hello", "2.1.37", "a74"),
+                // 📦 takes two UTF-16 code units, putting the `t` of "to" at index 20.
+                ("utf16_units", "Rename the 📦 crate to 🦀", "2.1.296", "0bf"),
+                // Index 4 holds the high surrogate of 🦀, hashed as U+FFFD.
+                (
+                    "split_surrogate",
+                    "Fix 🦀 the parser, then test it",
+                    "2.1.296",
+                    "070",
+                ),
+            ] {
+                assert_eq!(compute_fingerprint(message, version), expected, "{case}");
+            }
         }
 
         #[test]
@@ -87,26 +101,6 @@ mod tests {
             let short = compute_fingerprint("Hi", "2.1.87");
             let empty = compute_fingerprint("", "2.1.87");
             assert_eq!(short, empty, "both should pad all positions with '0'");
-        }
-
-        #[test]
-        fn pads_only_out_of_bounds_indices() {
-            // Index 4 of "Hello" is `o`, and 7 and 20 are out of bounds.
-            assert_eq!(compute_fingerprint("Hello", "2.1.37"), "a74");
-        }
-
-        #[test]
-        fn counts_utf16_code_units() {
-            // 📦 takes two code units, which puts the `t` of "to" at index 20.
-            let fp = compute_fingerprint("Rename the 📦 crate to 🦀", "2.1.296");
-            assert_eq!(fp, "0bf");
-        }
-
-        #[test]
-        fn hashes_a_split_surrogate_pair_as_replacement_character() {
-            // Index 4 holds the high surrogate of 🦀.
-            let fp = compute_fingerprint("Fix 🦀 the parser, then test it", "2.1.296");
-            assert_eq!(fp, "070");
         }
     }
 

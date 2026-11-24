@@ -765,7 +765,7 @@ mod tests {
         fn finds_a_boundary_straddling_two_searches() {
             let mut decoder = FrameDecoder::new(MAX_SSE_FRAME_BYTES);
             decoder.push(b"data: a\n");
-            assert_eq!(drain_frames(&mut decoder), Vec::<String>::new());
+            assert_eq!(drain_frames(&mut decoder), [] as [String; 0]);
             decoder.push(b"\ndata: b");
             assert_eq!(drain_frames(&mut decoder), ["data: a"]);
             decoder.push(b"\n\n");
@@ -776,7 +776,7 @@ mod tests {
         fn fails_once_an_unterminated_frame_outgrows_its_cap() {
             let mut decoder = FrameDecoder::new(8);
             decoder.push(b"data: ab");
-            assert_eq!(drain_frames(&mut decoder), Vec::<String>::new());
+            assert_eq!(drain_frames(&mut decoder), [] as [String; 0]);
 
             decoder.push(b"c");
             let err = decoder
@@ -791,112 +791,85 @@ mod tests {
         use super::*;
 
         #[test]
-        fn text_delta_keeps_its_block_index_and_text() {
-            let frame = indoc! {r#"
-                event: content_block_delta
-                data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
-            "#};
-
-            let event = parse_sse_frame(frame.as_bytes()).unwrap().unwrap();
-
-            assert_eq!(
-                event,
-                StreamEvent::ContentBlockDelta {
-                    index: 0,
-                    delta: Delta::TextDelta {
-                        text: "Hello".to_owned(),
+        fn decodes_valid_events() {
+            let cases = [
+                (
+                    "text_delta",
+                    indoc! {r#"
+                        event: content_block_delta
+                        data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
+                    "#},
+                    StreamEvent::ContentBlockDelta {
+                        index: 0,
+                        delta: Delta::TextDelta {
+                            text: "Hello".to_owned(),
+                        },
                     },
-                }
-            );
-        }
-
-        #[test]
-        fn ping_parses_from_its_data_line() {
-            let frame = indoc! {r#"
-                event: ping
-                data: {"type":"ping"}
-            "#};
-
-            let event = parse_sse_frame(frame.as_bytes()).unwrap().unwrap();
-
-            assert_eq!(event, StreamEvent::Ping);
-        }
-
-        #[test]
-        fn message_start_carries_the_initial_usage() {
-            let frame = indoc! {r#"
-                event: message_start
-                data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5-5","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":1}}}
-            "#};
-
-            let event = parse_sse_frame(frame.as_bytes()).unwrap().unwrap();
-
-            assert_eq!(
-                event,
-                StreamEvent::MessageStart {
-                    message: MessageResponse {
-                        usage: Some(TokenUsage::new(25, 1)),
+                ),
+                (
+                    "ping",
+                    indoc! {r#"
+                        event: ping
+                        data: {"type":"ping"}
+                    "#},
+                    StreamEvent::Ping,
+                ),
+                (
+                    "message_start",
+                    indoc! {r#"
+                        event: message_start
+                        data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5-5","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":1}}}
+                    "#},
+                    StreamEvent::MessageStart {
+                        message: MessageResponse {
+                            usage: Some(TokenUsage::new(25, 1)),
+                        },
                     },
-                }
-            );
-        }
-
-        #[test]
-        fn error_event_carries_the_api_error() {
-            let frame = indoc! {r#"
-                event: error
-                data: {"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}
-            "#};
-
-            let event = parse_sse_frame(frame.as_bytes()).unwrap().unwrap();
-
-            assert_eq!(
-                event,
-                StreamEvent::Error {
-                    error: ApiError {
-                        error_type: "rate_limit_error".to_owned(),
-                        message: "Too many requests".to_owned(),
+                ),
+                (
+                    "error",
+                    indoc! {r#"
+                        event: error
+                        data: {"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}
+                    "#},
+                    StreamEvent::Error {
+                        error: ApiError {
+                            error_type: "rate_limit_error".to_owned(),
+                            message: "Too many requests".to_owned(),
+                        },
                     },
-                }
-            );
-        }
+                ),
+                (
+                    "unknown_event",
+                    indoc! {r#"
+                        event: some_future_event
+                        data: {"type":"some_future_event","payload":"data"}
+                    "#},
+                    StreamEvent::Unknown,
+                ),
+                (
+                    // `data:` lines join with `\n`, which JSON reads as whitespace.
+                    "multiline_data",
+                    indoc! {r#"
+                        event: ping
+                        data: {"type":
+                        data: "ping"}
+                    "#},
+                    StreamEvent::Ping,
+                ),
+                (
+                    // Some gateways emit `data:payload` with no leading space.
+                    "no_space_after_colon",
+                    r#"data:{"type":"ping"}"#,
+                    StreamEvent::Ping,
+                ),
+            ];
 
-        #[test]
-        fn unknown_event_type_parses_for_forward_compat() {
-            let frame = indoc! {r#"
-                event: some_future_event
-                data: {"type":"some_future_event","payload":"data"}
-            "#};
+            for (case, frame, expected) in cases {
+                let event = parse_sse_frame(frame.as_bytes()).unwrap().unwrap();
 
-            let event = parse_sse_frame(frame.as_bytes()).unwrap().unwrap();
-
-            assert_eq!(event, StreamEvent::Unknown);
-        }
-
-        #[test]
-        fn concatenates_multiple_data_lines_with_newline() {
-            // `data:` lines join with `\n`, which JSON reads as whitespace, so this round-trips.
-            let frame = indoc! {r#"
-                event: ping
-                data: {"type":
-                data: "ping"}
-            "#};
-
-            let event = parse_sse_frame(frame.as_bytes()).unwrap().unwrap();
-
-            assert_eq!(event, StreamEvent::Ping);
-        }
-
-        #[test]
-        fn accepts_data_prefix_without_space() {
-            // Some gateways emit `data:payload` (no leading space).
-            let frame = indoc! {r#"
-                data:{"type":"ping"}
-            "#};
-
-            let event = parse_sse_frame(frame.as_bytes()).unwrap().unwrap();
-
-            assert_eq!(event, StreamEvent::Ping);
+                assert_eq!(event, expected, "{case}");
+            }
         }
 
         #[test]

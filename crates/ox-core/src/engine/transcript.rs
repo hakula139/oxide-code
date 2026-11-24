@@ -168,10 +168,6 @@ impl LiveTranscript {
 
     /// Returns the transcript and the session to the open turn's rollback point, dropping what the
     /// turn added after it, and closes the turn. Returns the session's write report.
-    ///
-    /// # Panics
-    ///
-    /// Panics when no turn is open.
     pub(super) async fn roll_back(&mut self) -> WriteReport {
         let RollbackPoint {
             transcript: start,
