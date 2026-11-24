@@ -9,6 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr as _;
 
+use ox_core::protocol::PromptDeadline;
 use ox_core::util::text::truncate_to_width;
 
 use crate::theme::Theme;
@@ -18,12 +19,23 @@ use crate::theme::Theme;
 pub(crate) const HINT_SEPARATOR: &str = "  ·  ";
 pub(crate) const KEY_UP_DOWN: &str = "Up / Down";
 pub(crate) const KEY_LEFT_RIGHT: &str = "Left / Right";
+pub(crate) const KEY_PAGE_UP_DOWN: &str = "PageUp / PageDown";
 
 /// Footer hints for pickers that commit on Enter.
 pub(crate) const CONFIRM_HINTS: [&str; 2] = ["Enter to confirm", "Esc to cancel"];
 
 /// Rows [`render_footer`] occupies: a blank gap above the hint line.
 pub(crate) const FOOTER_HEIGHT: u16 = 2;
+
+/// Blank columns between two text columns of a modal row.
+pub(crate) const COLUMN_GAP: usize = 2;
+
+// ── Helpers ──
+
+/// Formats an interaction deadline banner with SI unit spacing.
+pub(crate) fn format_deadline(deadline: PromptDeadline) -> String {
+    format!("After {} s: {}", deadline.timeout_seconds, deadline.action)
+}
 
 /// The height of a body sized by `body` within the rows `max_height` leaves above `below` fixed
 /// rows, plus those rows, within `max_height`.
@@ -38,9 +50,6 @@ pub(crate) fn above(area: Rect, below: u16) -> Rect {
         ..area
     }
 }
-
-/// Blank columns between two text columns of a modal row.
-pub(crate) const COLUMN_GAP: usize = 2;
 
 // ── Header ──
 

@@ -1,11 +1,24 @@
 //! Test-only input and render fixtures shared across the TUI's test modules.
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use ratatui::backend::TestBackend;
 use ratatui::buffer::{Buffer, CellWidth as _};
+use ratatui::layout::Rect;
+use ratatui::{Frame, Terminal};
+
+use crate::theme::Theme;
 
 /// Returns the crossterm `Event` the event loop receives for `code` pressed with `modifiers`.
 pub(crate) fn key_event(code: KeyCode, modifiers: KeyModifiers) -> Event {
     Event::Key(KeyEvent::new(code, modifiers))
+}
+
+pub(crate) fn plain_key(code: KeyCode) -> Event {
+    key_event(code, KeyModifiers::NONE)
+}
+
+pub(crate) fn ctrl_key(code: KeyCode) -> Event {
+    key_event(code, KeyModifiers::CONTROL)
 }
 
 pub(crate) fn mouse_event(kind: MouseEventKind) -> Event {
@@ -19,6 +32,19 @@ pub(crate) fn mouse_event_at(kind: MouseEventKind, column: u16, row: u16) -> Eve
         row,
         modifiers: KeyModifiers::NONE,
     })
+}
+
+/// Draws into a `width` x `height` [`TestBackend`] with the default theme and returns it.
+pub(crate) fn render_backend(
+    width: u16,
+    height: u16,
+    render: impl FnOnce(&mut Frame<'_>, Rect, &Theme),
+) -> TestBackend {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| render(frame, Rect::new(0, 0, width, height), &Theme::default()))
+        .unwrap();
+    terminal.backend().clone()
 }
 
 /// Returns each row of `buffer` as displayed, skipping the placeholder cells a wide symbol covers.

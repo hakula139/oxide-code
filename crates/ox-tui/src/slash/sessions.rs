@@ -10,6 +10,8 @@ use ox_core::session::saved::{ArchiveUpdate, SavedError};
 use ox_core::session::store::listing::ArchiveState;
 use ox_core::util::text::{capitalize_first, plural};
 
+use crate::glyphs::INLINE_SEPARATOR;
+
 // ── Messages ──
 
 pub(crate) const CLEAR_THEN_DELETE_HINT: &str = "Run `/clear` to start a new one, then delete it.";
@@ -67,8 +69,6 @@ pub(crate) fn delete_lookup_error(error: &SavedError) -> String {
 
 // ── Metadata ──
 
-const SEPARATOR: &str = " · ";
-
 /// `{id_prefix} · {when} · {N msgs} · {branch} · {project}`, omitting each trailing component whose
 /// input is zero or `None`. `when` is relative to `now`, and a date is in its offset.
 pub(super) fn format_metadata_line(
@@ -81,17 +81,17 @@ pub(super) fn format_metadata_line(
 ) -> String {
     let when = format_relative_time(last_active_at.to_offset(now.offset()), now);
     let prefix = id_prefix(session_id);
-    let mut meta = format!("{prefix}{SEPARATOR}{when}");
+    let mut meta = format!("{prefix}{INLINE_SEPARATOR}{when}");
     if message_count > 0 {
         let unit = plural(message_count, "msg", "msgs");
-        _ = write!(meta, "{SEPARATOR}{message_count} {unit}");
+        _ = write!(meta, "{INLINE_SEPARATOR}{message_count} {unit}");
     }
     if let Some(branch) = git_branch {
-        meta.push_str(SEPARATOR);
+        meta.push_str(INLINE_SEPARATOR);
         meta.push_str(branch);
     }
     if let Some(p) = project {
-        meta.push_str(SEPARATOR);
+        meta.push_str(INLINE_SEPARATOR);
         meta.push_str(p);
     }
     meta

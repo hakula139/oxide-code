@@ -5,7 +5,7 @@ use std::path::Path;
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::UnicodeWidthStr as _;
 
 use ox_core::client::{RateLimitWindow, RateLimits};
 use ox_core::config::StatusLineSegment;
@@ -65,7 +65,7 @@ impl StatusLine {
         width: u16,
     ) -> RenderedStatusLine {
         let sep = theme.separator_span();
-        let sep_width = UnicodeWidthStr::width(sep.content.as_ref());
+        let sep_width = sep.width();
         let mut rendered = self
             .segments
             .iter()
@@ -270,7 +270,7 @@ impl RenderedSegment {
     }
 
     fn width(&self) -> usize {
-        UnicodeWidthStr::width(self.span.content.as_ref())
+        self.span.width()
     }
 }
 

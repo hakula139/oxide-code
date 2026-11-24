@@ -38,7 +38,7 @@ pub(super) fn parse_color(input: &str) -> Result<Color> {
 
 fn parse_hex(hex: &str) -> Result<Color> {
     if hex.len() != 6 {
-        bail!("expected 6-digit hex (e.g., #cdd6f4)");
+        bail!("expected 6-digit hex, such as #cdd6f4");
     }
     if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         bail!("non-hex characters in color");
@@ -51,7 +51,7 @@ fn parse_hex(hex: &str) -> Result<Color> {
 fn parse_indexed(s: &str) -> Result<Color> {
     let n: u8 = s
         .parse()
-        .map_err(|_| anyhow!("expected 0-255 (e.g., ansi:174)"))?;
+        .map_err(|_| anyhow!("expected 0-255, such as ansi:174"))?;
     Ok(Color::Indexed(n))
 }
 
@@ -147,14 +147,14 @@ mod tests {
             let bad_hex =
                 |input: &str, reason: &str| format!("invalid hex color {input:?}: {reason}");
             let bad_index = |input: &str| {
-                format!("invalid indexed color {input:?}: expected 0-255 (e.g., ansi:174)")
+                format!("invalid indexed color {input:?}: expected 0-255, such as ansi:174")
             };
 
             for (input, expected) in [
                 ("", "empty color value".to_owned()),
                 (
                     "#fff",
-                    bad_hex("#fff", "expected 6-digit hex (e.g., #cdd6f4)"),
+                    bad_hex("#fff", "expected 6-digit hex, such as #cdd6f4"),
                 ),
                 ("#zzzzzz", bad_hex("#zzzzzz", "non-hex characters in color")),
                 ("#+abcde", bad_hex("#+abcde", "non-hex characters in color")),

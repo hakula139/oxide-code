@@ -28,8 +28,9 @@ use ox_core::session::display::archive_notice;
 use ox_core::session::handle::ResumedSession;
 use ox_core::session::resolver::{SessionTarget, export_session, resolve_session};
 use ox_core::session::store::SessionStore;
-use ox_core::session::store::listing::ArchiveState;
-use ox_core::session::store::listing::{DEFAULT_SESSION_LIST_LIMIT, ListScope, ProjectScope};
+use ox_core::session::store::listing::{
+    ArchiveState, DEFAULT_SESSION_LIST_LIMIT, ListScope, ProjectScope,
+};
 use ox_core::util;
 use ox_core::util::path::tildify;
 use ox_core::util::tls::PlatformTrust;

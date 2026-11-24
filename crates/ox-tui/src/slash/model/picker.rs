@@ -160,10 +160,8 @@ impl ModelEffortPicker {
 }
 
 impl Modal for ModelEffortPicker {
-    fn height(&mut self, width: u16, max_height: u16) -> u16 {
-        height_above(max_height, BELOW_LIST_HEIGHT, |room| {
-            self.list.height(width, room)
-        })
+    fn height(&mut self, _width: u16, max_height: u16) -> u16 {
+        height_above(max_height, BELOW_LIST_HEIGHT, |room| self.list.height(room))
     }
 
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {

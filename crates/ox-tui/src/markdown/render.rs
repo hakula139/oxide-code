@@ -846,7 +846,7 @@ fn fit_column_widths(columns: &[ColumnWidth], width: usize) -> Option<Vec<usize>
     Some(col_widths)
 }
 
-/// Builds a horizontal rule line: e.g. `┌───┬───┐` or `├───┼───┤`.
+/// Builds a horizontal rule line, such as `┌───┬───┐` or `├───┼───┤`.
 fn build_horizontal_rule(col_widths: &[usize], style: Style, rule: TableRule) -> Line<'static> {
     let mut buf = String::new();
     buf.push(rule.left);
@@ -2059,47 +2059,45 @@ mod tests {
         }
 
         #[test]
-        fn paragraph_wraps_at_width() {
-            assert_eq!(
-                rendered_text_at_width("one two three four five six", 15),
-                ["one two three ", "four five six"],
-            );
-        }
-
-        #[test]
-        fn heading_wraps_at_width() {
-            assert_eq!(
-                rendered_text_at_width("# one two three four five six", 15),
-                ["# one two three", "four five six"],
-            );
-        }
-
-        #[test]
-        fn blockquote_wraps_with_marker_on_continuations() {
-            assert_eq!(
-                rendered_text_at_width("> one two three four five six seven eight", 15),
-                ["│ one two three", "│ four five six", "│ seven eight"],
-            );
-        }
-
-        #[test]
-        fn nested_blockquote_wraps_with_nested_markers() {
-            assert_eq!(
-                rendered_text_at_width("> > one two three four five six seven eight", 20),
-                [
-                    "│ │ one two three ",
-                    "│ │ four five six ",
-                    "│ │ seven eight"
-                ],
-            );
-        }
-
-        #[test]
-        fn tight_list_item_wraps_without_repeating_marker() {
-            assert_eq!(
-                rendered_text_at_width("- one two three four five six seven eight", 15),
-                ["- one two three", "  four five six", "  seven eight"],
-            );
+        fn wraps_blocks_at_width_preserving_prefixes() {
+            let cases: &[(&str, usize, &[&str])] = &[
+                (
+                    "one two three four five six",
+                    15,
+                    &["one two three ", "four five six"],
+                ),
+                (
+                    "# one two three four five six",
+                    15,
+                    &["# one two three", "four five six"],
+                ),
+                (
+                    "> one two three four five six seven eight",
+                    15,
+                    &["│ one two three", "│ four five six", "│ seven eight"],
+                ),
+                (
+                    "> > one two three four five six seven eight",
+                    20,
+                    &[
+                        "│ │ one two three ",
+                        "│ │ four five six ",
+                        "│ │ seven eight",
+                    ],
+                ),
+                (
+                    "- one two three four five six seven eight",
+                    15,
+                    &["- one two three", "  four five six", "  seven eight"],
+                ),
+            ];
+            for &(markdown, width, expected) in cases {
+                assert_eq!(
+                    rendered_text_at_width(markdown, width),
+                    expected,
+                    "{markdown}"
+                );
+            }
         }
 
         #[test]

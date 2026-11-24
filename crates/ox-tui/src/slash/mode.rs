@@ -124,8 +124,8 @@ impl ModePicker {
 }
 
 impl Modal for ModePicker {
-    fn height(&mut self, width: u16, max_height: u16) -> u16 {
-        self.list.height_with_footer(width, max_height)
+    fn height(&mut self, _width: u16, max_height: u16) -> u16 {
+        self.list.height_with_footer(max_height)
     }
 
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {

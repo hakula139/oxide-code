@@ -13,6 +13,9 @@ pub(crate) const CTRL_C: KeyChord = KeyChord::ctrl('c');
 /// Ctrl+D, which deletes forward or exits from an empty input.
 pub(crate) const CTRL_D: KeyChord = KeyChord::ctrl('d');
 
+/// Ctrl+Home, which jumps the chat to the oldest output.
+pub(crate) const CTRL_HOME: KeyChord = KeyChord::ctrl_code(KeyCode::Home);
+
 /// Ctrl+End, which returns the chat to the newest output.
 pub(crate) const CTRL_END: KeyChord = KeyChord::ctrl_code(KeyCode::End);
 

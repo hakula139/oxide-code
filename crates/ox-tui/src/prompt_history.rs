@@ -21,21 +21,25 @@ use ox_core::util::time::now_local;
 
 use crate::action::Action;
 use crate::app_event::AppEventSender;
-use crate::keymap::{KeyAction, KeyChord, Keymap, is_unmodified};
-use crate::modal::chrome::{FOOTER_HEIGHT, render_footer};
+use crate::keymap::{KeyAction, KeyChord, Keymap, hint, is_unmodified};
+use crate::modal::chrome::{FOOTER_HEIGHT, KEY_PAGE_UP_DOWN, render_footer};
 use crate::modal::line_editor::LineEditor;
-use crate::modal::pages::{Loaded, ModalPage, Pages};
-use crate::modal::searchable_list::{LoadState, SearchableItem, SearchableList};
+use crate::modal::pages::{Loaded, ModalPage, PageBudget, Pages};
+use crate::modal::searchable_list::{SearchableItem, SearchableList};
 use crate::modal::{Modal, ModalAction, ModalKey};
 use crate::session_info::LiveSessionInfo;
 use crate::theme::Theme;
+use crate::viewport::Viewport;
 use crate::wrap::wrap_line;
 
 const TITLE: &str = "Search prompts";
 const EMPTY: &str = "No prompt history";
 const VISIBLE_ROWS: u16 = 6;
 const PREVIEW_HEIGHT: u16 = 9;
-const PAGE_SIZE: usize = 30;
+const PAGE_BUDGET: PageBudget = PageBudget {
+    threshold: VISIBLE_ROWS as usize,
+    limit: 30,
+};
 
 struct PromptRow {
     entry: PromptEntry,
@@ -120,9 +124,8 @@ pub(crate) struct PromptHistoryPicker {
     pages: Pages<PromptWalk>,
     events: AppEventSender,
     listed_at: OffsetDateTime,
-    preview_offset: usize,
-    preview_page: usize,
-    preview_max: usize,
+    preview: Viewport,
+    preview_len: usize,
 }
 
 impl PromptHistoryPicker {
@@ -134,74 +137,59 @@ impl PromptHistoryPicker {
             pages: Pages::Done,
             events: info.app_events.clone(),
             listed_at: now_local(),
-            preview_offset: 0,
-            preview_page: 1,
-            preview_max: 0,
+            preview: Viewport::default(),
+            preview_len: 0,
         };
         picker.reload();
         picker
     }
 
     fn reload(&mut self) {
-        self.pages
-            .replace(self.store.prompt_history(self.scope, self.list.query()));
         self.listed_at = now_local();
         let scope = match self.scope {
             ProjectScope::Current => "This project",
             ProjectScope::Every => "Every project",
         };
         self.list.set_header(TITLE, scope);
-        self.list.replace_items(Vec::new());
-        self.list.set_load_state(LoadState::Loading);
-        self.preview_offset = 0;
-        self.load_ahead();
+        self.preview.reset();
+        let walk = self.store.prompt_history(self.scope, self.list.query());
+        self.pages
+            .reload(walk, &mut self.list, &self.events, PAGE_BUDGET);
     }
 
     fn load_ahead(&mut self) {
-        if self.list.rows_below_cursor() < usize::from(VISIBLE_ROWS) {
-            self.pages.request(&self.events, PAGE_SIZE);
-        }
+        self.pages.load_ahead(&self.list, &self.events, PAGE_BUDGET);
     }
 
     fn page_loaded(&mut self, loaded: Loaded<PromptEntry>) {
-        match loaded {
-            Loaded::Page(entries) => {
-                let rows = entries
+        let listed_at = self.listed_at;
+        let show_project = self.scope == ProjectScope::Every;
+        if let Some(error) = self.pages.apply_loaded(
+            loaded,
+            &mut self.list,
+            &self.events,
+            PAGE_BUDGET,
+            "prompts",
+            |entries| {
+                entries
                     .into_iter()
                     .map(|entry| PromptRow {
                         entry,
-                        listed_at: self.listed_at,
-                        show_project: self.scope == ProjectScope::Every,
+                        listed_at,
+                        show_project,
                     })
-                    .collect();
-                self.list.append_items(rows);
-                self.load_ahead();
-                self.list.set_load_state(if self.pages.has_more() {
-                    LoadState::Loading
-                } else {
-                    LoadState::Complete
-                });
-            }
-            Loaded::Failed(error) => {
-                tracing::warn!(error = %format_args!("{error:#}"), "prompt history failed to load");
-                self.failed(format!("Failed to load prompts: {error:#}"));
-            }
-            Loaded::Stopped => {
-                self.failed("Failed to load prompts: the page loader stopped".to_owned());
-            }
+                    .collect()
+            },
+        ) {
+            self.list.set_header(TITLE, error);
         }
     }
 
-    fn failed(&mut self, error: String) {
-        self.list.set_header(TITLE, error);
-        self.list.set_load_state(LoadState::Failed);
-    }
-
-    fn layout(&self, width: u16, max_height: u16) -> (u16, u16, u16) {
+    fn layout(&self, max_height: u16) -> (u16, u16, u16) {
         let footer = if max_height >= 12 { FOOTER_HEIGHT } else { 0 };
         let room = max_height.saturating_sub(footer);
         let preview = room.saturating_sub(6).min(PREVIEW_HEIGHT);
-        let list = self.list.height(width, room - preview);
+        let list = self.list.height(room - preview);
         (list, preview, footer)
     }
 
@@ -225,14 +213,15 @@ impl PromptHistoryPicker {
                 )
             })
             .collect();
-        self.preview_page = usize::from(area.height - 1);
-        self.preview_max = lines.len().saturating_sub(self.preview_page);
-        self.preview_offset = self.preview_offset.min(self.preview_max);
-        let end = (self.preview_offset + self.preview_page).min(lines.len());
+        let page = usize::from(area.height - 1);
+        self.preview_len = lines.len();
+        let visible = self.preview.window(self.preview_len, page, None);
         let label = format!(
-            "Preview {}-{end} / {} (PageUp / PageDown to scroll)",
-            self.preview_offset + 1,
-            lines.len()
+            "Preview {}-{} / {} ({})",
+            visible.start + 1,
+            visible.end,
+            lines.len(),
+            hint(KEY_PAGE_UP_DOWN, "scroll"),
         );
         frame.render_widget(Paragraph::new(label).style(theme.dim()), area);
         let body = Rect {
@@ -242,21 +231,21 @@ impl PromptHistoryPicker {
         };
         let visible: Vec<_> = lines
             .into_iter()
-            .skip(self.preview_offset)
-            .take(self.preview_page)
+            .skip(visible.start)
+            .take(visible.len())
             .collect();
         frame.render_widget(Paragraph::new(visible).style(theme.text()), body);
     }
 }
 
 impl Modal for PromptHistoryPicker {
-    fn height(&mut self, width: u16, max_height: u16) -> u16 {
-        let (list, preview, footer) = self.layout(width, max_height);
+    fn height(&mut self, _width: u16, max_height: u16) -> u16 {
+        let (list, preview, footer) = self.layout(max_height);
         list + preview + footer
     }
 
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let (list, preview, footer) = self.layout(area.width, area.height);
+        let (list, preview, footer) = self.layout(area.height);
         self.list.render(
             frame,
             Rect {
@@ -307,19 +296,18 @@ impl Modal for PromptHistoryPicker {
             KeyCode::Up if is_unmodified(event) => self.list.select_prev(),
             KeyCode::Down if is_unmodified(event) => self.list.select_next(),
             KeyCode::PageUp if is_unmodified(event) => {
-                self.preview_offset = self.preview_offset.saturating_sub(self.preview_page);
+                let page = isize::try_from(self.preview.page()).unwrap_or(isize::MAX);
+                self.preview.scroll_by(-page, self.preview_len);
             }
             KeyCode::PageDown if is_unmodified(event) => {
-                self.preview_offset = self
-                    .preview_offset
-                    .saturating_add(self.preview_page)
-                    .min(self.preview_max);
+                let page = isize::try_from(self.preview.page()).unwrap_or(isize::MAX);
+                self.preview.scroll_by(page, self.preview_len);
             }
             _ => self.list.edit_query(event),
         }
         if self.list.query() == before {
             if self.list.cursor_index() != cursor {
-                self.preview_offset = 0;
+                self.preview.reset();
             }
             self.load_ahead();
         } else {
@@ -362,73 +350,29 @@ impl Modal for PromptHistoryPicker {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::time::{Duration, Instant};
+impl crate::modal::pages::testing::PagedModal for PromptHistoryPicker {
+    fn pages_busy(&self) -> bool {
+        self.pages.is_busy()
+    }
+}
 
+#[cfg(test)]
+mod tests {
     use crossterm::event::KeyModifiers;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::{Color, Style};
     use time::macros::datetime;
-    use tokio::sync::mpsc;
 
     use ox_core::session::store::testing::{SEEDED_PROMPT, isolated_store, seed_test_session};
 
     use super::*;
-    use crate::app_event::AppEvent;
-    use crate::modal::pages::PageEnd;
+    use crate::modal::pages::testing::PageHarness;
+    use crate::modal::pages::{Loaded, PageEnd};
     use crate::modal::testing::render_modal;
-    use crate::session_info::testing::test_session_info;
 
-    struct Harness {
-        picker: PromptHistoryPicker,
-        inbox: mpsc::UnboundedReceiver<AppEvent>,
-    }
-
-    impl Harness {
-        fn new(store: SessionStore) -> Self {
-            let (app_events, inbox) = mpsc::unbounded_channel();
-            let info = LiveSessionInfo {
-                store,
-                app_events,
-                ..test_session_info()
-            };
-            Self {
-                picker: PromptHistoryPicker::new(&info),
-                inbox,
-            }
-        }
-
-        fn settle(&mut self) {
-            while matches!(
-                self.picker.pages,
-                Pages::Loading(_) | Pages::Reloading { .. }
-            ) {
-                let page = self.next_page();
-                _ = self.picker.on_page(page);
-            }
-        }
-
-        fn next_page(&mut self) -> ModalPage {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                if let Ok(event) = self.inbox.try_recv() {
-                    let AppEvent::Page(page) = event else {
-                        panic!("expected page");
-                    };
-                    return page;
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "the requested page never arrived"
-                );
-                std::thread::yield_now();
-            }
-        }
-
-        fn key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> ModalKey {
-            self.picker.handle_key(&KeyEvent::new(code, modifiers))
-        }
+    fn harness(store: SessionStore) -> PageHarness<PromptHistoryPicker> {
+        PageHarness::new(store, None, PromptHistoryPicker::new)
     }
 
     fn entry(text: &str) -> PromptEntry {
@@ -443,7 +387,7 @@ mod tests {
     fn keeps_latest_filter_and_scope_and_recalls_exact_text_only_on_plain_enter() {
         let (_dir, store) = isolated_store();
         seed_test_session(&store, "session", None, 1, datetime!(2026-01-01 00:00 UTC));
-        let mut history = Harness::new(store);
+        let mut history = harness(store);
 
         history.picker.handle_paste("unmatched");
         history.key(KeyCode::Char('s'), KeyModifiers::CONTROL);
@@ -474,7 +418,7 @@ mod tests {
     #[test]
     fn renders_full_escaped_multiline_preview_and_reaches_its_final_lines() {
         let (_dir, store) = isolated_store();
-        let mut history = Harness::new(store);
+        let mut history = harness(store);
         history.settle();
         let text = format!(
             "  first\x1b[31m\n{}\nlast  ",
@@ -502,7 +446,11 @@ mod tests {
         for _ in 0..5 {
             history.key(KeyCode::PageUp, KeyModifiers::NONE);
         }
-        assert_eq!(history.picker.preview_offset, 0);
+        assert!(
+            render_modal(&mut history.picker, 65, 25)
+                .join("\n")
+                .contains("Preview 1-"),
+        );
         for _ in 0..5 {
             history.key(KeyCode::PageDown, KeyModifiers::NONE);
         }
@@ -527,7 +475,7 @@ mod tests {
     #[test]
     fn renders_empty_no_match_and_failure_states() {
         let (_dir, store) = isolated_store();
-        let mut history = Harness::new(store);
+        let mut history = harness(store);
         history.settle();
         insta::assert_snapshot!(
             "prompt_empty",
@@ -570,7 +518,7 @@ mod tests {
         assert!(complete.contains("No matches for `absent`"), "{complete}");
         assert_eq!(history.picker.list.query(), "absent");
 
-        let mut unavailable = Harness::new(SessionStore::unopened("project"));
+        let mut unavailable = harness(SessionStore::unopened("project"));
         unavailable.settle();
         let failed = render_modal(&mut unavailable.picker, 60, 20).join("\n");
         assert!(failed.contains("Failed to load prompts:"), "{failed}");
@@ -582,7 +530,7 @@ mod tests {
         #[test]
         fn previews_lines_beyond_u16_and_shows_project_without_losing_recall_text() {
             let (_dir, store) = isolated_store();
-            let mut history = Harness::new(store);
+            let mut history = harness(store);
             history.settle();
             history.picker.scope = ProjectScope::Every;
             let text = (0..65_540)
@@ -594,7 +542,7 @@ mod tests {
                 created_at: datetime!(2026-01-01 00:00 UTC),
                 project_root: "/home/u/src/app".to_owned(),
             }]));
-            history.picker.preview_offset = 65_536;
+            history.picker.preview.scroll_by(65_536, 65_540);
 
             let rendered = render_modal(&mut history.picker, 65, 25).join("\n");
 
@@ -606,7 +554,7 @@ mod tests {
         #[test]
         fn keeps_the_selected_row_visible_in_a_short_picker_and_renders_within_its_grant() {
             let (_dir, store) = isolated_store();
-            let mut history = Harness::new(store);
+            let mut history = harness(store);
             history.settle();
             history
                 .picker
@@ -658,18 +606,23 @@ mod tests {
         #[test]
         fn resets_preview_on_row_changes() {
             let (_dir, store) = isolated_store();
-            let mut history = Harness::new(store);
+            let mut history = harness(store);
             history.settle();
             history
                 .picker
                 .page_loaded(Loaded::Page(vec![entry("first"), entry("second")]));
 
             for (key, expected) in [(KeyCode::Down, "second"), (KeyCode::Up, "first")] {
-                history.picker.preview_offset = 5;
+                history.picker.preview.scroll_by(5, 20);
 
                 history.key(key, KeyModifiers::NONE);
 
-                assert_eq!(history.picker.preview_offset, 0, "{key:?}");
+                assert!(
+                    render_modal(&mut history.picker, 60, 20)
+                        .join("\n")
+                        .contains("Preview 1-"),
+                    "{key:?}",
+                );
                 assert_eq!(
                     history.picker.list.selected().unwrap().entry.text,
                     expected,
@@ -690,7 +643,7 @@ mod tests {
         #[test]
         fn leaves_session_pages_unclaimed() {
             let (_dir, store) = isolated_store();
-            let mut history = Harness::new(store.clone());
+            let mut history = harness(store.clone());
             history.settle();
             let page = ModalPage::Sessions(PageEnd::for_request(
                 999,
@@ -719,7 +672,7 @@ mod tests {
                     at + time::Duration::hours(1),
                 );
             }
-            let mut history = Harness::new(store);
+            let mut history = harness(store);
 
             let page = history.next_page();
             assert!(history.picker.on_page(page).is_none());

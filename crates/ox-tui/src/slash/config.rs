@@ -41,11 +41,26 @@ impl SlashCommand for ConfigCmd {
 // ── Helpers ──
 
 fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
+    let sources = &info.config.provenance;
+    let mut sections = vec![
+        KvSection::annotated(resolved_rows(info)).with_heading("Resolved"),
+        KvSection::annotated(interaction_rows(info)).with_heading("Interactions"),
+    ];
+    let rules = permission_rows(sources);
+    if !rules.is_empty() {
+        sections.push(KvSection::annotated(rules).with_heading("Permissions"));
+    }
+    sections
+        .push(KvSection::new(file_rows(&sources.layers, user_path)).with_heading("Source Files"));
+    KvOverview::new("Configuration", sections)
+}
+
+fn resolved_rows(info: &LiveSessionInfo) -> Vec<(String, String, String)> {
     let cfg = &info.config;
     let sources = &cfg.provenance;
     let row =
         |label: &str, value: String, source: &Source| (label.to_owned(), value, source.to_string());
-    let resolved = vec![
+    vec![
         row("Model", cfg.model.display_name().to_owned(), &sources.model),
         row("Model ID", cfg.model.id().to_owned(), &sources.model),
         row("Effort", labels::effort(cfg.effort), &sources.effort),
@@ -129,16 +144,7 @@ fn build_modal(info: &LiveSessionInfo, user_path: Option<&Path>) -> KvOverview {
             join_or(&info.theme_overrides, labels::NONE),
             join_or(&sources.theme_overrides, &Source::Default.to_string()),
         ),
-    ];
-    let mut sections = vec![KvSection::annotated(resolved).with_heading("Resolved")];
-    sections.push(KvSection::annotated(interaction_rows(info)).with_heading("Interactions"));
-    let rules = permission_rows(sources);
-    if !rules.is_empty() {
-        sections.push(KvSection::annotated(rules).with_heading("Permissions"));
-    }
-    sections
-        .push(KvSection::new(file_rows(&sources.layers, user_path)).with_heading("Source Files"));
-    KvOverview::new("Configuration", sections)
+    ]
 }
 
 fn interaction_rows(info: &LiveSessionInfo) -> Vec<(String, String, String)> {
@@ -149,7 +155,7 @@ fn interaction_rows(info: &LiveSessionInfo) -> Vec<(String, String, String)> {
             "Question Timeout",
             cfg.questions
                 .timeout_seconds
-                .map_or_else(|| "disabled".to_owned(), |seconds| format!("{seconds}s")),
+                .map_or_else(|| "disabled".to_owned(), |seconds| format!("{seconds} s")),
             &sources.question_timeout,
         ),
         (
@@ -161,7 +167,7 @@ fn interaction_rows(info: &LiveSessionInfo) -> Vec<(String, String, String)> {
             "Approval Timeout",
             cfg.approvals
                 .timeout_seconds
-                .map_or_else(|| "disabled".to_owned(), |seconds| format!("{seconds}s")),
+                .map_or_else(|| "disabled".to_owned(), |seconds| format!("{seconds} s")),
             &sources.approval_timeout,
         ),
         (
@@ -198,16 +204,6 @@ fn permission_rows(sources: &Provenance) -> Vec<(String, String, String)> {
     roots.chain(rules).collect()
 }
 
-/// `items` joined with commas, or `empty` when there are none.
-fn join_or(items: impl IntoIterator<Item = impl ToString>, empty: &str) -> String {
-    let items: Vec<String> = items.into_iter().map(|item| item.to_string()).collect();
-    if items.is_empty() {
-        empty.to_owned()
-    } else {
-        items.join(", ")
-    }
-}
-
 /// The loaded files, lowest precedence first, led by where the user file belongs if it is absent.
 fn file_rows(layers: &[Layer], user_path: Option<&Path>) -> Vec<(String, String)> {
     let user_loaded = layers.iter().any(|layer| matches!(layer, Layer::User(_)));
@@ -236,8 +232,19 @@ fn layer_kind(layer: &Layer) -> &'static str {
     }
 }
 
+/// `items` joined with commas, or `empty` when there are none.
+fn join_or(items: impl IntoIterator<Item = impl ToString>, empty: &str) -> String {
+    let items: Vec<String> = items.into_iter().map(|item| item.to_string()).collect();
+    if items.is_empty() {
+        empty.to_owned()
+    } else {
+        items.join(", ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
     use std::path::PathBuf;
 
     use ox_core::config::StatusLineSegment;
@@ -373,6 +380,23 @@ mod tests {
                 "{rendered}"
             );
             assert!(row(&rendered, "Base URL").contains("default"), "{rendered}");
+        }
+
+        #[test]
+        fn shows_interaction_timeouts_in_seconds() {
+            let mut info = test_session_info();
+            info.config.interaction.questions.timeout_seconds = NonZeroU32::new(30);
+            info.config.interaction.approvals.timeout_seconds = NonZeroU32::new(120);
+            let rendered = rendered_text(&mut build_modal(&info, None), 80);
+
+            assert!(
+                row(&rendered, "Question Timeout").contains(" 30 s "),
+                "{rendered}"
+            );
+            assert!(
+                row(&rendered, "Approval Timeout").contains(" 120 s "),
+                "{rendered}"
+            );
         }
     }
 

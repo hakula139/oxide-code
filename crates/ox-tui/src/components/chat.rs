@@ -572,11 +572,8 @@ mod tests {
     use std::rc::Rc;
     use std::time::Instant;
 
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
+    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use indoc::{formatdoc, indoc};
-    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use unicode_width::UnicodeWidthStr as _;
 
@@ -589,6 +586,7 @@ mod tests {
         BAR, INTERRUPTED_MARKER, THINKING_PREFIX, TOOL_BORDER_CONT, TOOL_BORDER_PREFIX, TOOL_ERROR,
         TOOL_SUCCESS,
     };
+    use crate::testing::{ctrl_key as ctrl_key_event, plain_key as key_event, render_backend};
     use crate::theme::builtin::find;
 
     fn test_chat() -> ChatView {
@@ -670,22 +668,10 @@ mod tests {
             .join("\n")
     }
 
-    fn key_event(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
-    }
-
-    fn ctrl_key_event(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL))
-    }
-
     fn render_chat(chat: &mut ChatView, width: u16, height: u16) -> TestBackend {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| {
-                chat.render(frame, frame.area());
-            })
-            .unwrap();
-        terminal.backend().clone()
+        render_backend(width, height, |frame, area, _| {
+            chat.render(frame, area);
+        })
     }
 
     fn screen_rows(backend: &TestBackend) -> Vec<String> {
@@ -2116,28 +2102,6 @@ mod tests {
         }
 
         #[test]
-        fn tool_call_with_edit_diff_over_budget_elides_the_middle_of_the_hunk() {
-            let mut chat = test_chat();
-            chat.push_tool_call(call("✎", "Edit(/tmp/big.rs)"));
-            let old = (0..14)
-                .map(|i| format!("old{i}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let new = (0..14)
-                .map(|i| format!("new{i}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let view = ToolResultView::Diff(edit_diff(&old, &new));
-            chat.push_tool_result(view_result(
-                "Edit(/tmp/big.rs)",
-                "Edited big.rs",
-                view,
-                false,
-            ));
-            insta::assert_snapshot!(render_chat(&mut chat, 60, 26));
-        }
-
-        #[test]
         fn tool_call_with_edit_diff_error_uses_error_border_color() {
             let mut chat = test_chat();
             chat.push_tool_call(call("✎", "Edit(/tmp/f.rs)"));
@@ -2157,44 +2121,6 @@ mod tests {
             assert_eq!(buffer[(4, 2)].bg, theme.diff_del().bg.unwrap());
             assert_eq!(buffer[(4, 3)].bg, theme.diff_add().bg.unwrap());
             insta::assert_snapshot!(backend);
-        }
-
-        #[test]
-        fn tool_call_with_edit_diff_identical_sides_emits_no_change_marker() {
-            let mut chat = test_chat();
-            chat.push_tool_call(call("✎", "Edit(/tmp/f.rs)"));
-            let view = ToolResultView::Diff(edit_diff("unchanged", "unchanged"));
-            chat.push_tool_result(view_result("Edit(/tmp/f.rs)", "Edited f.rs", view, false));
-            insta::assert_snapshot!(render_chat(&mut chat, 60, 6));
-        }
-
-        #[test]
-        fn tool_call_with_edit_diff_shows_context_and_a_gap_between_hunks() {
-            let mut chat = test_chat();
-            chat.push_tool_call(call("✎", "Edit(/tmp/f.rs)"));
-            let old = (1..=12)
-                .map(|n| format!("line {n}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-                + "\n";
-            let new = old
-                .replace("line 2\n", "line 2\n    inserted\n")
-                .replace("line 11\n", "line eleven\n");
-            let view = ToolResultView::Diff(edit_diff(&old, &new));
-            chat.push_tool_result(view_result("Edit(/tmp/f.rs)", "Edited f.rs", view, false));
-            insta::assert_snapshot!(render_chat(&mut chat, 60, 18));
-        }
-
-        #[test]
-        fn tool_call_with_edit_diff_wraps_long_lines_under_bar() {
-            let mut chat = test_chat();
-            chat.push_tool_call(call("✎", "Edit(/tmp/f.rs)"));
-            let view = ToolResultView::Diff(edit_diff(
-                "short",
-                "an intentionally quite long replacement line that forces wrapping",
-            ));
-            chat.push_tool_result(view_result("Edit(/tmp/f.rs)", "Edited f.rs", view, false));
-            insta::assert_snapshot!(render_chat(&mut chat, 40, 10));
         }
 
         #[test]

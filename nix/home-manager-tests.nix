@@ -6,8 +6,8 @@
   pkgs,
   crossPkgs,
   home-manager,
-  homeModule,
   oxide-code,
+  homeModule,
 }:
 
 let

@@ -2605,7 +2605,7 @@ mod tests {
             }
         }
 
-        #[tokio::test]
+        #[tokio::test(start_paused = true)]
         async fn a_modal_the_lookup_opens_defers_the_queue_until_the_user_closes_it() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("/delete abcd".to_owned()));
@@ -2617,6 +2617,7 @@ mod tests {
                 OpEnd::Completed,
             );
             let deferred = rx.try_recv();
+            tokio::time::advance(crate::modal::acceptance::TYPE_AHEAD_GUARD).await;
 
             app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::from(KeyCode::Char('n'))));
 
@@ -2625,7 +2626,7 @@ mod tests {
             assert_eq!(rx.try_recv(), Ok(Op::prompt("typed meanwhile")));
         }
 
-        #[tokio::test]
+        #[tokio::test(start_paused = true)]
         async fn closing_the_last_modal_that_sends_ops_starts_the_queue_under_a_read_only_one() {
             let (mut app, mut rx, _event_tx) = test_app(None);
             app.dispatch_action(Action::Submit("/delete abcd".to_owned()));
@@ -2638,6 +2639,7 @@ mod tests {
                 OpEnd::Completed,
             );
             let deferred = rx.try_recv();
+            tokio::time::advance(crate::modal::acceptance::TYPE_AHEAD_GUARD).await;
 
             app.handle_crossterm_event(&CrosstermEvent::Key(KeyEvent::from(KeyCode::Char('n'))));
 

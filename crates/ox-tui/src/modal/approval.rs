@@ -15,7 +15,7 @@ use ox_core::tool::view::{ApprovalBody, ApprovalPreview, Diff, DiffLine, DiffLin
 use ox_core::util::text::is_hidden;
 
 use super::acceptance::Acceptance;
-use super::chrome::{HINT_SEPARATOR, KEY_UP_DOWN, wrap_hints};
+use super::chrome::{HINT_SEPARATOR, KEY_UP_DOWN, format_deadline, wrap_hints};
 use super::line_editor::LineEditor;
 use super::{EngineUpdate, Modal, ModalAction, ModalKey, UpdateReply};
 use crate::action::Action;
@@ -23,6 +23,7 @@ use crate::glyphs::{DIFF_SIGN_WIDTH, HUNK_GAP, diff_cap_row, diff_sign};
 use crate::keymap::{KeyChord, hint};
 use crate::saturating_u16;
 use crate::theme::Theme;
+use crate::viewport::Viewport;
 use crate::wrap::{expand_tabs, expand_tabs_in_spans, wrap_line};
 
 // ── Constants ──
@@ -59,20 +60,11 @@ pub(crate) struct ApprovalModal {
     grant: Option<Box<SessionGrant>>,
     /// The editor `A` or `F` opened, until Enter submits it or Esc returns to the choice.
     edit: Option<Edit>,
-    /// First painted body row. Key handling clamps it to the last render's [`View`].
-    scroll: usize,
-    view: View,
+    viewport: Viewport,
     /// Reused across frames so a large preview is wrapped once per width and palette.
     wrapped: Option<Wrapped>,
     acceptance: Acceptance,
     deadline: Option<PromptDeadline>,
-}
-
-/// Viewport geometry from the last render.
-#[derive(Clone, Copy, Default)]
-struct View {
-    rows: usize,
-    max_scroll: usize,
 }
 
 /// An open one-line editor and what its Enter submits.
@@ -181,8 +173,7 @@ impl ApprovalModal {
             body: flatten_body(&preview.body),
             grant,
             edit: None,
-            scroll: 0,
-            view: View::default(),
+            viewport: Viewport::default(),
             wrapped: None,
             acceptance: Acceptance::default(),
             deadline: None,
@@ -229,12 +220,9 @@ impl ApprovalModal {
             .reason
             .iter()
             .map(|reason| Line::from(reveal(reason, palette.reason, palette.marker, false)));
-        let deadline = self.deadline.map(|deadline| {
-            Line::from(format!(
-                "After {}s: {}",
-                deadline.timeout_seconds, deadline.action,
-            ))
-        });
+        let deadline = self
+            .deadline
+            .map(|deadline| Line::from(format_deadline(deadline)));
         let heading = std::iter::once(title)
             .chain(reason)
             .chain(deadline)
@@ -258,16 +246,6 @@ impl ApprovalModal {
             heading,
             body,
         }
-    }
-
-    fn scroll_by(&mut self, delta: isize) -> ModalKey {
-        let max_scroll = self.view.max_scroll;
-        self.scroll = self
-            .scroll
-            .min(max_scroll)
-            .saturating_add_signed(delta)
-            .min(max_scroll);
-        ModalKey::Consumed
     }
 
     /// Opens an editor for `purpose` prefilled with `text`, re-arming the type-ahead guard so an
@@ -304,6 +282,15 @@ impl ApprovalModal {
         })
     }
 
+    fn scroll_by(&mut self, delta: isize) -> ModalKey {
+        let total = self
+            .wrapped
+            .as_ref()
+            .map_or(0, |wrapped| wrapped.body.len());
+        self.viewport.scroll_by(delta, total);
+        ModalKey::Consumed
+    }
+
     /// The scroll a line or page key asks for. Home and End are not among them, since the editors
     /// move their cursor with them.
     fn line_scroll(&self, code: KeyCode) -> Option<isize> {
@@ -329,22 +316,24 @@ impl ApprovalModal {
 
     /// The heading and the body rows that fit `area`. The edit step claims its rows first, so the
     /// body yields to the answer being typed.
-    fn body_window(&self, wrapped: &Wrapped, area: Rect) -> BodyWindow {
+    fn body_window(&mut self, area: Rect) -> BodyWindow {
         let chrome = CHROME_ROWS + self.edit_rows(area.width) + self.footer_rows(area.width).len();
+        let edit_absent = usize::from(self.edit.is_none());
+        let wrapped = self.wrapped.as_ref().expect("refresh_wrapped ran first");
         let room = usize::from(area.height)
             .saturating_sub(wrapped.heading.len() + chrome)
-            .max(usize::from(self.edit.is_none()));
+            .max(edit_absent);
         let total = wrapped.body.len();
         let rows = total.min(MAX_BODY_ROWS).min(room);
-        let scroll = self.scroll.min(total - rows);
+        let visible = self.viewport.window(total, rows, None);
 
         let mut lines = wrapped.heading.clone();
         lines.push(Line::default());
-        lines.extend_from_slice(&wrapped.body[scroll..scroll + rows]);
+        lines.extend_from_slice(&wrapped.body[visible.clone()]);
         BodyWindow {
             lines,
-            scroll,
-            rows,
+            scroll: visible.start,
+            rows: visible.len(),
             total,
             body_shown: area.width > 0 && wrapped.heading.len() + 1 < usize::from(area.height),
         }
@@ -376,7 +365,7 @@ impl ApprovalModal {
     }
 
     fn page(&self) -> isize {
-        let rows = self.view.rows.saturating_sub(1).max(1);
+        let rows = self.viewport.page().saturating_sub(1).max(1);
         isize::try_from(rows).unwrap_or(isize::MAX)
     }
 }
@@ -409,7 +398,7 @@ impl Modal for ApprovalModal {
             rows,
             total,
             body_shown,
-        } = self.body_window(self.wrapped(), area);
+        } = self.body_window(area);
         let max_scroll = total - rows;
 
         if max_scroll > 0 && rows > 0 {
@@ -439,7 +428,6 @@ impl Modal for ApprovalModal {
                 .map(|row| Line::from(Span::styled(row, theme.dim()))),
         );
         let editor_shown = area.width > 0 && has_edit && lines.len() <= usize::from(area.height);
-        self.view = View { rows, max_scroll };
         self.acceptance.update(if has_edit {
             editor_shown
         } else if self.body.is_empty() {
@@ -1291,12 +1279,12 @@ mod tests {
         #[test]
         fn scroll_keys_do_nothing_when_the_body_fits() {
             let mut modal = command_modal("ls");
-            rendered(&mut modal, 40, 40);
+            let before = rendered(&mut modal, 40, 40);
 
             let outcome = modal.handle_key(&KeyEvent::from(KeyCode::Down));
 
             assert!(matches!(outcome, ModalKey::Consumed));
-            assert_eq!(modal.scroll, 0);
+            assert_eq!(rendered(&mut modal, 40, 40), before);
         }
 
         #[tokio::test(start_paused = true)]

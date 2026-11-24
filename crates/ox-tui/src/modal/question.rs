@@ -1,6 +1,6 @@
 //! Mid-turn questions with suggested choices and a freeform answer.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -12,14 +12,18 @@ use ox_core::tool::ask::{Question, QuestionAnswer};
 use ox_core::util::text::escape_hidden;
 
 use super::acceptance::Acceptance;
-use super::chrome::{above, wrap_hints};
+use super::chrome::{KEY_PAGE_UP_DOWN, KEY_UP_DOWN, above, format_deadline, wrap_hints};
 use super::line_editor::LineEditor;
 use super::{EngineUpdate, Modal, ModalAction, ModalKey, UpdateReply};
 use crate::action::Action;
+use crate::glyphs::cursor_gutter;
+use crate::keymap::{KeyChord, hint, is_unmodified};
 use crate::saturating_u16;
 use crate::theme::Theme;
 use crate::viewport::Viewport;
 use crate::wrap::wrap_line;
+
+const SKIP_KEY: KeyChord = KeyChord::ctrl('s');
 
 pub(crate) struct QuestionModal {
     id: String,
@@ -77,7 +81,7 @@ impl QuestionModal {
             if index == self.selected {
                 selected_row = lines.len();
             }
-            let marker = if index == self.selected { ">" } else { " " };
+            let gutter = cursor_gutter(index == self.selected);
             let recommended = if self.question.recommended == Some(index) {
                 " (recommended)"
             } else {
@@ -86,10 +90,7 @@ impl QuestionModal {
             let label = escape_hidden(&option.label);
             let style = if index == self.selected { accent } else { text };
             lines.extend(wrap_line(
-                Line::from(Span::styled(
-                    format!("{marker} {label}{recommended}"),
-                    style,
-                )),
+                Line::from(Span::styled(format!("{gutter}{label}{recommended}"), style)),
                 width,
                 2,
                 None,
@@ -111,28 +112,18 @@ impl QuestionModal {
         let mut rows = self
             .deadline
             .into_iter()
-            .flat_map(|deadline| {
-                wrap_line(
-                    Line::from(format!(
-                        "After {}s: {}",
-                        deadline.timeout_seconds, deadline.action
-                    )),
-                    width,
-                    0,
-                    None,
-                )
-            })
+            .flat_map(|deadline| wrap_line(Line::from(format_deadline(deadline)), width, 0, None))
             .map(|line| line.to_string())
             .collect::<Vec<_>>();
         let mut hints = vec![
-            "↑/↓ choose",
-            "Tab type",
-            "Enter answer",
-            "Ctrl+S skip",
-            "Esc abort",
+            hint(KEY_UP_DOWN, "choose"),
+            hint(KeyChord::plain(KeyCode::Tab), "type"),
+            hint(KeyChord::plain(KeyCode::Enter), "answer"),
+            hint(SKIP_KEY, "skip"),
+            hint(KeyChord::plain(KeyCode::Esc), "abort"),
         ];
         if overflow {
-            hints.push("PgUp/PgDn scroll");
+            hints.push(hint(KEY_PAGE_UP_DOWN, "scroll"));
         }
         rows.extend(wrap_hints(&hints, width));
         rows
@@ -227,7 +218,7 @@ impl Modal for QuestionModal {
                 self.acceptance.reset();
                 ModalKey::Consumed
             }
-            KeyCode::Char('s') if event.modifiers == KeyModifiers::CONTROL => {
+            _ if SKIP_KEY.matches(event) => {
                 ModalKey::Submitted(self.answer(QuestionAnswer::Skipped))
             }
             KeyCode::Up => {
@@ -256,12 +247,17 @@ impl Modal for QuestionModal {
                 ModalKey::Submitted(self.answer(QuestionAnswer::Answered(text)))
             }
             KeyCode::Enter => ModalKey::Consumed,
-            _ => {
+            _ if self.selected == choices => {
+                self.editor.handle_key(event);
+                ModalKey::Consumed
+            }
+            _ if is_unmodified(event) && matches!(event.code, KeyCode::Char(_)) => {
                 self.selected = choices;
                 self.focus_changed = true;
                 self.editor.handle_key(event);
                 ModalKey::Consumed
             }
+            _ => ModalKey::Consumed,
         }
     }
 
@@ -272,8 +268,10 @@ impl Modal for QuestionModal {
     }
 
     fn binds_modified_key(&self, event: &KeyEvent) -> bool {
-        event.code == KeyCode::Char('s') && event.modifiers == KeyModifiers::CONTROL
-            || LineEditor::binds_modified_key(event)
+        self.acceptance.is_guarded()
+            || SKIP_KEY.matches(event)
+            || (self.selected == self.question.options.len()
+                && LineEditor::binds_modified_key(event))
     }
 
     fn on_cancel(&mut self) -> Option<ModalAction> {
@@ -284,6 +282,8 @@ impl Modal for QuestionModal {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
+
+    use crossterm::event::KeyModifiers;
 
     use ox_core::protocol::PromptTimeoutAction;
     use ox_core::tool::ask::QuestionOption;
@@ -399,12 +399,12 @@ mod tests {
 
                 for rows in [&before, &after_page, &after_tab] {
                     for hint in [
-                        "↑/↓ choose",
-                        "Tab type",
-                        "Enter answer",
-                        "Ctrl+S skip",
-                        "Esc abort",
-                        "PgUp/PgDn scroll",
+                        "Up / Down to choose",
+                        "Tab to type",
+                        "Enter to answer",
+                        "Ctrl+S to skip",
+                        "Esc to abort",
+                        "PageUp / PageDown to scroll",
                     ] {
                         assert!(
                             rows.iter().any(|row| row.contains(hint)),
@@ -412,8 +412,7 @@ mod tests {
                         );
                     }
                     if let Some(deadline) = deadline {
-                        let policy =
-                            format!("After {}s: {}", deadline.timeout_seconds, deadline.action);
+                        let policy = format_deadline(deadline);
                         let visible = rows
                             .iter()
                             .map(|row| row.trim())
@@ -423,9 +422,9 @@ mod tests {
                     }
                 }
                 let footer_start = if deadline.is_some() {
-                    "After 120s:"
+                    "After 120 s:"
                 } else {
-                    "↑/↓ choose"
+                    "Up / Down to choose"
                 };
                 let footer = before
                     .iter()
@@ -468,19 +467,67 @@ mod tests {
 
         #[test]
         fn skipping_and_cancelling_are_distinct_from_an_empty_answer() {
+            for event in [
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                KeyEvent::new(
+                    KeyCode::Char('S'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                ),
+            ] {
+                let mut modal = modal();
+                render_rows(&mut modal, 60, 15);
+                modal.acceptance.expire();
+
+                let skipped = submitted(modal.handle_key(&event));
+                let aborted = modal.on_cancel();
+
+                assert_eq!(skipped, QuestionAnswer::Skipped, "{event:?}");
+                assert!(
+                    matches!(aborted, Some(ModalAction::Dispatch(Action::Op(Op::AnswerQuestion { id, answer: QuestionAnswer::Aborted }))) if id == "question-1")
+                );
+            }
+        }
+
+        #[test]
+        fn unbound_and_modified_keys_do_not_jump_focus_to_the_freeform_editor() {
             let mut modal = modal();
             render_rows(&mut modal, 60, 15);
             modal.acceptance.expire();
 
-            let skipped = submitted(
-                modal.handle_key(&KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
-            );
-            let aborted = modal.on_cancel();
+            for event in [
+                KeyEvent::from(KeyCode::F(5)),
+                KeyEvent::from(KeyCode::Left),
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
+            ] {
+                assert!(
+                    matches!(modal.handle_key(&event), ModalKey::Consumed),
+                    "{event:?}"
+                );
+                assert_eq!(modal.selected, 1, "{event:?} must keep the chosen option");
+            }
 
-            assert_eq!(skipped, QuestionAnswer::Skipped);
-            assert!(
-                matches!(aborted, Some(ModalAction::Dispatch(Action::Op(Op::AnswerQuestion { id, answer: QuestionAnswer::Aborted }))) if id == "question-1")
-            );
+            assert!(matches!(
+                modal.handle_key(&KeyEvent::from(KeyCode::Char('z'))),
+                ModalKey::Consumed
+            ));
+            assert_eq!(modal.selected, modal.question.options.len());
+            assert_eq!(modal.editor.text(), "z");
+        }
+
+        #[test]
+        fn binds_modified_keys_while_guarded() {
+            let mut modal = modal();
+            let ctrl_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+
+            assert!(modal.binds_modified_key(&ctrl_x));
+
+            modal.acceptance.expire();
+            assert!(!modal.binds_modified_key(&ctrl_x));
+            assert!(modal.binds_modified_key(&KeyEvent::new(
+                KeyCode::Char('S'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )));
         }
     }
 }
