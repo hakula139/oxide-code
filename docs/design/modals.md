@@ -1,6 +1,6 @@
 # Modal UI
 
-A modal is an overlay that takes keyboard focus, owns its render, emits a typed result, and dismisses. A slash command, a tool call that needs approval, or `ox --resume` at startup opens one, and it draws in the band between the chat scroll and the input area, the rows the slash popup uses. Chat blocks persist in the transcript, while modals are ephemeral.
+A modal is an overlay that takes keyboard focus, owns its render, emits a typed result, and dismisses. A slash command, a tool call that needs approval, a mid-turn question from `ask`, or `ox --resume` at startup opens one, and it draws in the band between the chat scroll and the input area, the rows the slash popup uses. Chat blocks persist in the transcript, while modals are ephemeral.
 
 Three needs drove the abstraction: `/theme` swaps palettes as the user arrows through choices and snaps back on Esc, the combined `/model + /effort` picker and the confirm-delete modal nested in `/resume` take several steps, and a tool call that needs approval emits `Event::ApprovalRequested` and blocks until the App pushes an `ApprovalModal` and routes the decision back as `Op::Resolve`.
 
@@ -10,7 +10,7 @@ The [`Modal` trait and its result types](../../crates/ox-tui/src/modal.rs) defin
 
 ## Hooks
 
-- **`on_cancel`.** Fires whenever a modal leaves the stack without submitting, by the stack-level Esc / Ctrl+C, a `Cancelled` outcome, or `ModalStack::clear`, and returns an optional `ModalAction` the App dispatches as the modal leaves. `ApprovalModal` emits an abort decision so the blocked turn always gets an answer, the `ox --resume` picker emits `Op::Shutdown` because dismissing it quits `ox`, and the `/theme` picker emits `Action::RevertThemePreview` to restore the theme it previewed over.
+- **`on_cancel`.** Fires whenever a modal leaves the stack without submitting, by the stack-level Esc / Ctrl+C, a `Cancelled` outcome, or `ModalStack::clear`, and returns an optional `ModalAction` the App dispatches as the modal leaves. `ApprovalModal` and `QuestionModal` emit an abort decision so the blocked turn always gets an answer, the `ox --resume` picker emits `Op::Shutdown` because dismissing it quits `ox`, and the `/theme` picker emits `Action::RevertThemePreview` to restore the theme it previewed over.
 - **`on_engine`.** Tells every open modal about each op `dispatch_op` admits (`EngineUpdate::Admitted`) and each event the engine reports (`EngineUpdate::Event`), so a modal that sent an op learns whether it left and how it ended. Prompts go through the prompt queue and never reach modals. The `UpdateReply` says whether the modal shows the update, closes on it with a replacement action, or leaves it for the App to report. The App skips its own report of an archive or delete result a modal shows, and applies the actions of the modals an admitted op closes only after it sends that op.
 - **`on_page`.** Session and prompt pages reach the stack through the closed `ModalPage` app event, and `ModalStack::deliver_page` offers each result from the top until the picker awaiting its request takes it, so a picker keeps loading under a confirm dialog. Shared typed `Pages` workers return the walk with each bounded page. While one page runs, query or scope changes keep only the latest desired walk, which starts once the old result returns, and globally unique request IDs discard completions for closed pickers.
 - **`tick` and `next_tick`.** The frame tick calls `tick` on the top modal, and `next_tick` tells the loop when its time-driven state, such as an expiring notice, next changes, so an idle modal does not keep the loop awake.
@@ -25,9 +25,9 @@ The stack routes keys before any component sees them. A modal whose `captures_es
 - `searchable_list`: a substring filter over paged rows, shared by session and prompt history pickers.
 - `pages`: typed bounded page workers and request routing for both pickers.
 - `kv_overview`: a sectioned read-only table, behind `/status`, `/config`, and `/help`.
-- `line_editor`: the single-line text field behind `/rename`, the picker search, and the approval rule and feedback editors. It keeps its text in a `ratatui-textarea` buffer and edits through the prompt's grapheme-aware table.
+- `line_editor`: the single-line text field behind `/rename`, the picker search, the approval rule and feedback editors, and the question answer field. It keeps its text in a `ratatui-textarea` buffer and edits through the prompt's grapheme-aware table.
 - `chrome`: the title header and hint footer, which cuts trailing hints on a narrow row, so callers list the essential hints first.
-- `acceptance`: the visibility check and type-ahead guard that the confirm-delete and approval modals share, so a key typed before the prompt appeared cannot answer it.
+- `acceptance`: the visibility check and type-ahead guard that the confirm-delete, approval, and question modals share, so a key typed before the prompt appeared cannot answer it.
 - `ox_tui::keymap`: named actions with their keys and hint labels, so the `/resume` picker's keys and footer come from one table.
 
 ## Modals
@@ -40,6 +40,7 @@ The stack routes keys before any component sees them. A modal whose `captures_es
 - **Prompt history picker.** It lists retained ordinary user prompts with an escaped, scrollable multiline preview. Enter recalls exact text as an undoable composer edit, while cancellation leaves the editor untouched.
 - **Confirm-delete modal.** It is a Y / N gate for deleting a saved session, pushed by `/delete <id-prefix>` and by the `/resume` picker. A failure stays inline until a retry replaces it or the modal closes, so a stray key cannot wipe the diagnostic.
 - **Approval modal.** It gates a tool call that needs approval, showing the command or the diff it would apply. [Permissions](permissions.md) covers its choices and guard.
+- **Question modal.** It handles mid-turn questions from the `ask` tool, offering suggested choices and a freeform `LineEditor` answer with optional deadline hints and the shared `Acceptance` guard. [Terminal UI](../guide/terminal-ui.md#answer-questions) covers its controls.
 - **`/status`, `/config`, and `/help` overviews.** They are `KvOverview` tables of the session, the resolved config with each value's source, and the registered commands.
 
 ## Design Decisions
@@ -75,4 +76,6 @@ The stack routes keys before any component sees them. A modal whose `captures_es
 - `crates/ox-tui/src/modal/kv_overview.rs`: `KvOverview` and `KvSection`.
 - `crates/ox-tui/src/modal/line_editor.rs`: `LineEditor`.
 - `crates/ox-tui/src/modal/list_picker.rs`: `ListPicker<T: PickerItem>`.
+- `crates/ox-tui/src/modal/pages.rs`: `ModalPage`, `PageSource`, `Pages`, and `PageEnd`, the typed page workers shared by session and prompt pickers.
+- `crates/ox-tui/src/modal/question.rs`: `QuestionModal`.
 - `crates/ox-tui/src/modal/searchable_list.rs`: `SearchableList<T: SearchableItem>`.

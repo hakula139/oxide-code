@@ -131,7 +131,7 @@ Tool schemas go in the API `tools` parameter, and the system prompt holds only t
 
 ## System Block Layout
 
-Claude Code turns its flat section array into the block layout the API receives, consuming the boundary marker so it never reaches the request (`splitSysPromptPrefix` in `src/utils/api.ts` of the frozen 2.1.87 source, checked 2026-10-21). oxide-code builds the static and dynamic text as the two fields of `prompt::SystemPrompt`, so it needs no marker. Agentic streaming emits the same 4-block shape: billing / attribution, identity, static, and dynamic. The billing block ships on every base URL, and only the static block's `cache_control` varies by base URL.
+Claude Code turns its flat section array into the block layout the API receives, consuming the boundary marker so it never reaches the request (`splitSysPromptPrefix` in `src/utils/api.ts` of the frozen 2.1.87 source, checked 2026-10-21). [System Prompt](../../design/prompt.md) and [Client](../../design/client.md#request-shape) cover oxide-code's block assembly and base-URL gating. Agentic streaming emits this 4-block shape: billing / attribution, identity, static, and dynamic. The billing block ships on every base URL, and only the static block's `cache_control` varies by base URL.
 
 **First-party base URL** (`api.anthropic.com`), global cache active:
 

@@ -19,7 +19,7 @@ Running `ox` opens the terminal UI, with the status line on the top row, then th
 | **Ctrl+R**                                 | Search the [prompt history](#prompt-history)                                              |
 | **Tab** / **Shift+Tab**                    | Step through the [permission modes](permissions.md#modes)                                 |
 
-- **Shift+Enter** needs a terminal that reports it, such as kitty, WezTerm, and Ghostty. Elsewhere it arrives as a plain Enter and sends the prompt. VS Code and Cursor support it once a keybinding sends ESC followed by Enter for Shift+Enter, as Claude Code's `/terminal-setup` installs.
+- **Shift+Enter** needs a terminal that reports it, such as kitty, WezTerm, and Ghostty. Elsewhere it arrives as a plain **Enter** and sends the prompt. VS Code and Cursor support it once a keybinding sends **Esc** followed by **Enter** for **Shift+Enter**, as Claude Code's `/terminal-setup` installs.
 - **Backspace and Delete** remove a whole grapheme cluster, so an emoji or an accented letter goes in one press.
 - **Alt keys on macOS** work in Terminal.app, iTerm2, and VS Code only once the Option key is set to act as Meta in their settings.
 - **A paste** inserts its text, line breaks included, without sending it. **Ctrl+V** stays with the terminal's paste.
@@ -69,3 +69,18 @@ Drag over chat text to select it, and release to copy it to the clipboard. Doubl
 ## Approve Tool Calls
 
 When a tool call needs approval, an approval prompt replaces the input box. [Approval Prompt](permissions.md#approval-prompt) describes its keys.
+
+## Answer Questions
+
+When the assistant asks a mid-turn question, a question prompt replaces the input box with suggested choices (marking a recommended choice when present), a freeform answer field, and any deadline hint configured under [interaction](configuration.md#interaction-question-and-approval-deadlines).
+
+| Key                       | Action                                              |
+| ------------------------- | --------------------------------------------------- |
+| **Up** / **Down**         | Move between suggested choices and the answer field |
+| **Tab**                   | Jump to the freeform answer field                   |
+| **PageUp** / **PageDown** | Scroll the question body when it overflows          |
+| **Enter**                 | Submit the highlighted choice or the typed answer   |
+| **Ctrl+S**                | Skip the question without answering                 |
+| **Esc** / **Ctrl+C**      | Abort the question                                  |
+
+Typing or pasting while a choice is highlighted moves focus to the freeform answer field. Like the approval and delete prompts, the question prompt ignores keys until you pause typing for 300 ms, so type-ahead cannot submit an answer unintentionally.

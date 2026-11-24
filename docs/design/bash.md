@@ -24,22 +24,13 @@ A process that starts once the region is set up skips the lock, so a shell kille
 
 ## Environment
 
-The command inherits ox's environment minus the [credentials](#credentials) ox authenticates with, `CDPATH`, and `OLDPWD`, and it adds these variables:
+The command inherits ox's environment minus the [credentials](#credentials), `CDPATH`, and `OLDPWD`, and sets `OX_SESSION_ID` plus `EDITOR`, `GIT_EDITOR`, and `VISUAL` to `true`. [Commands the Assistant Runs](../guide/permissions.md#commands-the-assistant-runs) covers the user-facing behavior.
 
-| Variable                         | Value            | Purpose                                                                                          |
-| -------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------ |
-| `OX_SESSION_ID`                  | The session's ID | Lets a script tell which session started it                                                      |
-| `EDITOR`, `GIT_EDITOR`, `VISUAL` | `true`           | Makes a command that opens an editor keep its default text, so nothing waits on an editor window |
-
-With the editor set to `true`, `git rebase --continue` keeps the prepared message, while `git commit` without `-m` stops with `Aborting commit due to empty commit message`. `GIT_EDITOR` takes precedence over git's `core.editor`, which takes precedence over `VISUAL` and `EDITOR`, so all three are needed for git and for tools that fall back to the generic pair, such as `gh` and `crontab -e`.
-
-An exported `CDPATH` makes `cd sub` try its entries before the working directory, so dropping it keeps directory changes independent of the caller's search path. Dropping inherited `OLDPWD` leaves `~-` as written until the command's own first `cd`, `pushd`, or `popd`.
+Setting all three editor variables covers both git (`GIT_EDITOR` overrides `core.editor`, which overrides `VISUAL` and `EDITOR`) and tools that read only the generic pair. Dropping inherited `OLDPWD` leaves `~-` as written until the command's own first `cd`, `pushd`, or `popd`.
 
 ### Credentials
 
-Every command runs without `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and `ANTHROPIC_CUSTOM_HEADERS`, which carries gateway keys. `secret_env_vars` derives the list from the order credentials resolve in, so ox withholds each new credential variable as soon as it reads it. ox's own environment keeps them.
-
-A permitted command can expand environment variables and return their contents to the session store and model context, so withholding these keeps ox's own credentials off that path. A script that needs its own Anthropic key, such as a test suite that calls the API, has to read it from another variable or a file. Other secrets in ox's environment, such as cloud or GitHub tokens, still reach every command.
+[Commands and Credentials](../guide/authentication.md#commands-and-credentials) lists the withheld credential variables. `secret_env_vars` derives the list from the credential resolution order, so ox withholds each new credential variable as soon as it reads it while keeping them in ox's own environment. Other secrets in ox's environment, such as cloud or GitHub tokens, still reach every command.
 
 ## Background Shells
 
@@ -49,7 +40,7 @@ With `run_in_background: true`, `bash` starts the command in a background shell 
 - **Reading.** `bash_output` returns the output printed since the previous read, or `(no new output)`, followed by `(still running)`, `(exit code N)`, or `(killed by signal N)`. Each read has a foreground call's output limit, keeping the head and tail and saving what it cuts to a [spill file](truncation.md#spill-files) numbered by the read. An optional `timeout` in milliseconds, capped at 600000, waits until the command exits or the timeout passes, so for a server it lasts the full timeout. An unknown ID returns an error listing the open shells and their states.
 - **Stopping.** `bash_stop` ends the shell and its process tree, removes it from the list, and returns any unread output followed by `(stopped)`, or by `(stopped after it exited with code N)` or `(stopped after signal N killed it)` when the shell had already finished.
 - **Limit.** A shell stays open, running or finished, until `bash_stop` or the session ends, so a finished shell's last output stays readable. A session holds at most 16 open shells, past which `bash` refuses to start another and lists the open shells.
-- **Permission.** `bash_output` and `bash_stop` belong to the `read` class and run without approval in every mode, since they act only on shells an allowed `bash` call started. A class-wide `read` deny blocks them while `bash` can still start background shells, which then run unread until the session ends. Neither tool joins a parallel batch, since reading empties the unread output and stopping ends a shell another call may be reading.
+- **Permission.** `bash_output` and `bash_stop` belong to the `read` class and run without approval in every mode, because they act only on shells an allowed `bash` call started ([Rules](../guide/permissions.md#rules) covers how a class-wide `read` deny interacts with them). Neither tool joins a parallel batch, because reading empties the unread output and stopping ends a shell another call may be reading.
 
 ### Shell Lifecycle
 

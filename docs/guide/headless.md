@@ -29,7 +29,7 @@ ox -c -p "Run the tests again"                      # Continue the latest sessio
 
 Every format also writes tool calls, the task list, retries, notices, and errors as text to stderr, plus the model's progress notes unless a `text` run shows thinking on stdout because `tui.show_thinking` is set. When parsing JSON, read stdout alone.
 
-If the program reading stdout closes it, such as a pipe into `head -5`, a `text` or `stream-json` run stops its turn at the next safe point, as Ctrl+C does, and still saves the session. A `json` run writes nothing until the end, so it finishes the turn and then fails to print the result.
+If the program reading stdout closes it, such as a pipe into `head -5`, a `text` or `stream-json` run stops its turn at the next safe point, as **Ctrl+C** does, and still saves the session. A `json` run writes nothing until the end, so it finishes the turn and then fails to print the result.
 
 ## Exit Status
 

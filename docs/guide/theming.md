@@ -199,27 +199,29 @@ Pick a `selection` background that leaves `dim` and `thinking` text at a contras
 
 Each status-line segment uses one of the slots above, so to restyle a segment, override its slot.
 
-| Segment             | Slot                         |
-| ------------------- | ---------------------------- |
-| `current-dir`       | `muted`                      |
-| `git-branch`        | `accent`                     |
-| `pull-request`      | `accent`                     |
-| `model`             | `text`                       |
-| `model-with-effort` | `text`                       |
-| `context-used`      | `text` / `warning` / `error` |
-| `session-cost`      | `muted`                      |
-| `five-hour-limit`   | `text` / `warning` / `error` |
-| `weekly-limit`      | `text` / `warning` / `error` |
-| `permission-mode`   | `muted` / `accent` / `error` |
-| `run-state` (idle)  | `muted`                      |
-| `run-state` (busy)  | `info`                       |
-| `run-state` (warn)  | `warning`                    |
-| `queued-prompts`    | `muted`                      |
-| `task-progress`     | `muted`                      |
-| `thread-title`      | `muted`                      |
-| `session-id`        | `muted`                      |
-| `theme`             | `muted`                      |
-| `current-time`      | `dim`                        |
+| Segment               | Slot                                      |
+| --------------------- | ----------------------------------------- |
+| `current-dir`         | `muted`                                   |
+| `git-branch`          | `accent`                                  |
+| `pull-request`        | `accent`                                  |
+| `pull-request-checks` | `success` / `warning` / `error` / `muted` |
+| `pull-request-review` | `success` / `warning` / `error`           |
+| `model`               | `text`                                    |
+| `model-with-effort`   | `text`                                    |
+| `context-used`        | `text` / `warning` / `error`              |
+| `session-cost`        | `muted`                                   |
+| `five-hour-limit`     | `text` / `warning` / `error`              |
+| `weekly-limit`        | `text` / `warning` / `error`              |
+| `permission-mode`     | `muted` / `accent` / `error`              |
+| `run-state` (idle)    | `muted`                                   |
+| `run-state` (busy)    | `info`                                    |
+| `run-state` (warn)    | `warning`                                 |
+| `queued-prompts`      | `muted`                                   |
+| `task-progress`       | `muted`                                   |
+| `thread-title`        | `muted`                                   |
+| `session-id`          | `muted`                                   |
+| `theme`               | `muted`                                   |
+| `current-time`        | `dim`                                     |
 
 - **`context-used`, `five-hour-limit`, and `weekly-limit`** use `text` until the share they show reaches 70%, then `warning`, and `error` from 90%.
 - **`permission-mode`** uses `muted` for `auto` and `manual`, `accent` for `plan`, and `error` for `yolo`.

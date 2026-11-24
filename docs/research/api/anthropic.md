@@ -118,7 +118,7 @@ x-anthropic-billing-header: cc_version=<VERSION>.<FINGERPRINT>; cc_entrypoint=<E
 
 A 3-character hex value derived from conversation content:
 
-1. Select the first user message that is not meta, and take its string content or its first text block, or `""` when it has neither. Claude Code 2.1.301 selects from the messages before normalization merges adjacent user messages, so it skips the context message, which is meta, and reads the user's first prompt. 2.1.87 took the first user message after normalization, which began with the context message. oxide-code skips the user context it prepends and reads the transcript's first user message.
+1. Select the first user message that is not meta, and take its string content or its first text block, or `""` when it has neither. Claude Code 2.1.301 selects from the messages before normalization merges adjacent user messages, so it skips the context message, which is meta, and reads the user's first prompt. 2.1.87 took the first user message after normalization, which began with the context message.
 2. Extract the characters at indices `[4, 7, 20]` of that text, using `"0"` for an index out of bounds. Indices count UTF-16 code units, and an index inside a surrogate pair picks a lone surrogate, which the hash input's UTF-8 encoding turns into U+FFFD under both Bun and Node.
 3. Compute `SHA256(SALT + chars + VERSION)` and take the first 3 hex characters.
 4. The salt is `59cf53e54c78`, hardcoded in `claude-code/src/utils/fingerprint.ts`, and must match the server's.
@@ -140,8 +140,6 @@ The hash covers the entire serialized body, so the only safe change after hashin
 
 [anthropics/claude-code#40652](https://github.com/anthropics/claude-code/issues/40652) reports that the Bun binary replaces `cch=` values across the entire serialized body, historical tool results included. A tool result holding a `cch=XXXXX` string, such as one from reading proxy logs or session JSONL files, then has its bytes rewritten on every turn, which changes the conversation prefix and invalidates the prompt cache for good, wasting 30-50K+ tokens per turn. The issue reports the behavior partially mitigated in v2.1.90-91.
 
-oxide-code serializes with `serde_json`, replaces only the first occurrence via `str::replacen`, and never mutates historical message content.
-
 ### 4. Client Identity Headers
 
 ```text
@@ -151,7 +149,7 @@ x-app: cli
 
 Claude Code builds the `User-Agent` as `claude-cli/<version> (<user_type>, <entrypoint>)`, where `user_type` is `external`, or `ant` for Anthropic employees, and `entrypoint` is `cli`. The 2.1.296 bundle keeps this format.
 
-In Claude Code 2.1.121, the Stainless TS SDK also emitted `x-stainless-lang`, `-package-version`, `-runtime`, `-runtime-version`, `-os`, `-arch`, `-timeout`, and `-retry-count`, and oxide-code sends the same set.
+In Claude Code 2.1.121, the Stainless TS SDK also emitted `x-stainless-lang`, `-package-version`, `-runtime`, `-runtime-version`, `-os`, `-arch`, `-timeout`, and `-retry-count`.
 
 ## What Happens Without These
 
@@ -204,7 +202,7 @@ Sets the intelligence-versus-latency level of agentic turns to `low`, `medium`, 
 }
 ```
 
-- **The body field does the work.** Anthropic's [effort docs](https://platform.claude.com/docs/en/build-with-claude/effort) list effort as GA with no beta header, and the `effort-2025-11-24` header alone is a no-op. Claude Code still sends the header, so oxide-code does too.
+- **The body field does the work.** Anthropic's [effort docs](https://platform.claude.com/docs/en/build-with-claude/effort) list effort as GA with no beta header, and the `effort-2025-11-24` header alone is a no-op. Claude Code still sends the header.
 - **Levels.** Every supported model accepts all five, per the effort docs on 2026-10-17.
 - **Per-model default.** The API defaults are `medium` on Opus 5.5 and Haiku 5.5 and `high` on Sonnet 5.5 and Fable 5.1, while Claude Code 2.1.301 sends `medium` on Sonnet 5.5. [Configuration](../../guide/configuration.md#effort-reasoning-effort) lists the defaults oxide-code sends.
 - **`max_tokens`.** Claude Code 2.1.301 sends 128K on the 5.5 models and 64K on Fable 5.1. [Configuration](../../guide/configuration.md#max_tokens-response-ceiling) gives oxide-code's defaults and their rationale.
@@ -248,9 +246,9 @@ As of April 4, 2026, Anthropic accepts OAuth subscription credits (Pro / Max) on
 
 The `cch` hash is the primary technical enforcement, and both its algorithm (xxHash64, non-cryptographic) and its constants are public. No other protection exists: no TLS fingerprinting, binary attestation, pre-registration handshake, replay detection, or connection association. Anthropic could escalate enforcement at any time, but today's scheme reads as billing plumbing with no security boundary behind it.
 
-oxide-code attaches the attestation block to every request under every auth mode, as Claude Code does on its turns and side queries in both the 2.1.87 source and the 2.1.301 bundle, and `CLAUDE_CODE_ATTRIBUTION_HEADER=0` drops it everywhere. A relay gateway checks its version and fingerprint (see [Third-Party Gateway Validation](#third-party-gateway-validation)).
+Claude Code attaches the attestation block on its turns and side queries in both the 2.1.87 source and the 2.1.301 bundle, and `CLAUDE_CODE_ATTRIBUTION_HEADER=0` drops it everywhere. [Client](../../design/client.md#base-url-gating) and [Authentication](../../guide/authentication.md#llm-gateways) cover oxide-code's handling.
 
-- **`cch` by destination.** Requests to the Anthropic API carry a valid `cch` hash. Since 2.1.181, Claude Code sends custom base URLs the block without `cch`, so a gateway that caches on the request body sees a stable prefix, and oxide-code matches that.
+- **`cch` by destination.** Requests to the Anthropic API carry a valid `cch` hash. Since 2.1.181, Claude Code sends custom base URLs the block without `cch`, so a gateway that caches on the request body sees a stable prefix.
 - **Version-specific constants.** The fingerprint salt and xxHash64 seed may change with Claude Code releases. The 2.1.301 bundle keeps the salt and character indices and changes the message selection, as [Fingerprint](#fingerprint-3-char-version-suffix) describes. Its seed lives in the native Bun HTTP stack outside the JavaScript bundle, and a scan of the 2.1.301 binary did not find it ([#123](https://github.com/hakulab/oxide-code/issues/123#issuecomment-6210505896)).
 - **Verification.** On 2026-10-16, the Anthropic API accepted oxide-code's requests carrying a `cch` computed with the seed above, which shows that the API accepts the hash but not that it verifies it.
 
@@ -276,7 +274,7 @@ The `anthropic-version` header is `2023-06-01` across all Claude Code endpoints,
 
 ## Model IDs
 
-oxide-code sends the dateless IDs `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`, which Anthropic's [models overview](https://platform.claude.com/docs/en/about-claude/models/overview) lists as pinned snapshots. All four have a 1M-token context window without the `context-1m-2025-08-07` beta. The `[1m]` suffix, as in `claude-opus-5-5[1m]`, is a client-side convention that Claude Code's `normalizeModelStringForAPI()` strips before sending. oxide-code treats such an ID as unknown and suggests the ID without the suffix.
+Anthropic's [models overview](https://platform.claude.com/docs/en/about-claude/models/overview) lists the dateless IDs `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5` as pinned snapshots. All four have a 1M-token context window without the `context-1m-2025-08-07` beta. The `[1m]` suffix, as in `claude-opus-5-5[1m]`, is a client-side convention that Claude Code's `normalizeModelStringForAPI()` strips before sending.
 
 ## Pricing
 
@@ -301,7 +299,7 @@ For OAuth, Claude Code passes the Anthropic TypeScript SDK an `authToken`, and t
 - Includes `x-stainless-*` telemetry headers.
 - Retries `x-should-retry: true` responses with exponential backoff.
 
-A raw HTTP client replicates the headers by hand, and oxide-code mirrors `?beta=true` and the Stainless headers.
+A raw HTTP client must replicate these headers and `?beta=true` by hand ([Client](../../design/client.md#request-shape)).
 
 ## Token Refresh
 

@@ -39,17 +39,11 @@ Each tool's description states the facts that would otherwise cost the model a f
 ## Design Decisions
 
 1. **Keep the identity block and name oxide-code in the introduction.** Non-Haiku OAuth requests fail without the exact identity text as its own block, and the API validates the first block after attribution, so the block stays byte-identical. The model still needs to know its real harness. One that believes it is Claude Code edits `.claude/settings.json` to stop a prompt, which `ox` never reads, so the introduction names oxide-code and what it reads.
-
 2. **Follow Claude Code's sections and rewrite every sentence `ox` contradicts.** Claude models are tuned against Claude Code's prompt, so reusing its structure and wording where the harnesses behave alike keeps behavior predictable. A whole copy would describe Claude Code's harness, such as a persistent working directory between `bash` calls and clickable `owner/repo#123` references, so each sentence is checked against what `ox` does, and rules the copied prompt states twice are merged into one sentence.
-
 3. **Describe the permission modes statically, and name the active one in the user context.** The modes and the chain rule are the same in every session, so they belong in the cached static prefix. The active mode changes within a session, so it travels in the user context, where a switch costs one reminder and leaves the cached prefix intact, and the model plans in `plan` without first spending a denied call. The `plan` denial still tells the model to present its plan, since a denied call is the latest instruction it reads.
-
 4. **Name the shell that runs commands.** Claude Code reports `$SHELL` because its Bash tool runs commands through the user's shell. `ox` runs every command with `bash -c`, so reporting only `$SHELL` invites zsh or fish syntax that bash rejects.
-
 5. **Lead the messages with the user context.** Claude Code does the same. An instruction edit then changes only a message, so the cached system prompt survives it, and a catch-up reminder delivers that edit or a model swap without rewriting history the model has already read.
-
 6. **Keep tool descriptions to facts that prevent a failed call.** Every request sends every description, so a fact the result already reports would cost tokens on each request to save one round in a rare case.
-
 7. **Fold a reminder after tool results into the last result on the wire.** The model reads a text block after tool results as a new user turn, and Claude Code's A/B found that repeating that shape taught the model to end its turn empty, so its `mergeUserContentBlocks` folds such text into the last result. The Anthropic request builder joins any text that follows a tool result to that result's content, while the transcript keeps the reminder as its own block, so displays still hide it and a resume replays it unchanged. The fold depends only on the stored messages, so each request reproduces the cached prefix.
 
 ## Sources

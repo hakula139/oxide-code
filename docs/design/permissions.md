@@ -1,8 +1,6 @@
 # Tool Permissions and Approval
 
-Every tool call passes through a permission gate. Rules place calls in one of three tiers: deny, ask, or allow. The mode decides the calls the rules leave open, and `plan` also denies every `edit`, `exec`, and `net` call. [Permissions](../guide/permissions.md) covers the modes, rule syntax, and settings for users, and this page covers how the gate reaches each decision.
-
-Companion docs: [Modals](modals.md), [File Edits](file-edits.md).
+Every tool call passes through a permission gate. Rules place calls in one of three tiers: deny, ask, or allow. The mode decides the calls the rules leave open, and `plan` also denies every `edit`, `exec`, and `net` call. [Permissions](../guide/permissions.md) covers the modes, rule syntax, and settings for users, [Modals](modals.md) and [File Edits](file-edits.md) cover the approval overlay and file-integrity checks, and this page covers how the gate reaches each decision.
 
 ## Rules and Classes
 
@@ -116,14 +114,10 @@ Headless `-p` runs render engine events through `run_op`. `main` calls `Config::
 
 ## Out of Scope
 
-- **An OS sandbox** ([#133](https://github.com/hakulab/oxide-code/issues/133)). It would enforce a filesystem boundary that the rules cannot reach, covering files a `bash` command touches and intermediate-directory swaps.
+- **An OS sandbox.** It would enforce a filesystem boundary that the rules cannot reach, covering files a `bash` command touches and intermediate-directory swaps ([#133](https://github.com/hakulab/oxide-code/issues/133)).
 
 ## Sources
 
-- `crates/ox-core/src/config.rs`: `OX_PERMISSION_MODE`, `Config::apply_mode_flag`, and `Config::set_unattended`.
-- `crates/ox-core/src/config/load.rs`: `reject_project_keys`, the keys a project file may set.
-- `crates/ox-core/src/engine.rs`: the live policy, `Engine::set_mode`, and `Engine::serve`.
-- `crates/ox-core/src/engine/abort.rs`: `Mailbox`, which holds the mode switches and queued prompts that arrive mid-operation.
 - `crates/ox-core/src/engine/classifier.rs`: the classifier request, the user prompts it carries, and its decision.
 - `crates/ox-core/src/engine/dispatch.rs`: `run_tool_round`, the gate, and `await_approval`.
 - `crates/ox-core/src/permission.rs`: `Mode`, `Workspace`, `Access::for_path`, `Verdict`, `Basis`, `Policy::verdict`, `Policy::session_grant`, `SessionGrant`, and `ReadFilter`.
@@ -132,14 +126,4 @@ Headless `-p` runs render engine events through `run_op`. `main` calls `Config::
 - `crates/ox-core/src/permission/shell/pattern.rs`: the `exec` pattern grammar.
 - `crates/ox-core/src/permission/shell/walk.rs`: the simple-command extraction that leaves unsupported syntax unmatched.
 - `crates/ox-core/src/permission/shell/word.rs`: quote removal, expansions, and literal words.
-- `crates/ox-core/src/protocol.rs`: `Event::ApprovalRequested`, `Event::SessionRulesUpdated`, `Event::ModeChanged`, `Op::Resolve`, `Op::SetMode`, and `ApprovalDecision`.
-- `crates/ox-core/src/tool.rs`: the `Tool` trait, `ToolSpec`, and `ToolCtx::path_access`.
-- `crates/ox-core/src/tool/file.rs`: `read_validated` and `open_gated`, the size and type checks on the opened file.
-- `crates/ox-core/src/tool/search.rs`: `SearchRoot` and the withheld-file note.
-- `crates/ox-core/src/util/fs.rs`: `open_no_follow`, the open that refuses a swapped symlink.
-- `crates/ox-tui/src/action.rs`: `next_mode`, the Tab and Shift+Tab cycle.
-- `crates/ox-tui/src/app/dispatch.rs`: `App::cycle_mode`, which steps from the last requested mode.
-- `crates/ox-tui/src/modal/acceptance.rs`: `Acceptance`, the type-ahead guard.
 - `crates/ox-tui/src/modal/approval.rs`: `ApprovalModal`, its preview, and its rule and feedback editors.
-- `crates/ox/src/driver/stdio.rs`: `run_op` and `TextState`.
-- `crates/ox/src/main.rs`: the `--mode` flag and the attendance setting.

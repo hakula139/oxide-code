@@ -14,6 +14,12 @@ Agentic turns on the supported models send the sequence Claude Code sends for th
 
 Every request sends `thinking.display`, since an upstream's default can differ from the API's. `show_thinking` selects `"summarized"`, and otherwise the supported models that write progress notes ask for `"updates"`, which adds the `thinking-display-updates-2026-08-18` beta, while Haiku 5.5 asks for `"omitted"`. The stream keeps thinking text only when the request asked for it, so an upstream that sends text anyway shows none, and a resumed session reads no progress notes from the reasoning of a catalog model that writes none.
 
+## Thinking Block Binding
+
+Every adaptive thinking request sets `thinking.block_binding` to `{"prefix_mismatch_behavior": "drop_block"}` and appends the `thinking-binding-controls-2026-08-01` beta header, so a change to the system prompt, tools, or earlier messages drops only the affected replayed blocks for that request.
+
+The Anthropic wire replays every Anthropic `thinking` and `redacted_thinking` block unchanged across model swaps and credential changes, letting the API drop or ignore blocks the active model or account cannot read. Requests end on a user message, or on a paused reply that a `pause_turn` continuation must send back as-is, so the client strips no trailing thinking blocks, and it does not read `input_transformations` from the response.
+
 ## Cache Breakpoints
 
 A request carries two ephemeral breakpoints, both with the configured [`prompt_cache_ttl`](../guide/configuration.md#prompt_cache_ttl-cache-duration):
@@ -52,7 +58,8 @@ The attribution block follows the same split. A first-party request carries the 
 - `crates/ox-core/src/client.rs`: `Request`, the conversation request a wire sends, and its `cache_tail` flag.
 - `crates/ox-core/src/client/anthropic.rs`: `Client`, `CLAUDE_CLI_VERSION`, the request builder, and the identity and attribution blocks.
 - `crates/ox-core/src/client/anthropic/betas.rs`: `compute_betas` and the beta header constants.
+- `crates/ox-core/src/client/anthropic/billing.rs`: `compute_fingerprint`, `build_billing_header`, and `inject_cch`.
 - `crates/ox-core/src/client/anthropic/transport.rs`: `with_retry`, `retry_delay`, and the failure classification.
-- `crates/ox-core/src/client/anthropic/wire.rs`: `CacheControl`, `static_prefix`, `conversation`, and `ThinkingConfig::asks_for_text`.
+- `crates/ox-core/src/client/anthropic/wire.rs`: `BlockBinding`, `CacheControl`, `static_prefix`, `conversation`, and `ThinkingConfig::asks_for_text`.
 - `crates/ox-core/src/config.rs`: the prompt-cache TTL.
 - `crates/ox-core/src/config/base_url.rs`: `BaseUrl::is_first_party`, the gate on the host-based cache scope.

@@ -1,12 +1,10 @@
 # Compaction
 
-Context compression replaces the visible transcript with a summary so a long session keeps working. `/compact [instructions]` runs it on demand, and automatic compaction runs it when the estimated size of the next request nears the active model's context window. Both share one summarizer, one persisted boundary, and one failure pause.
+Context compression replaces the visible transcript with a summary so a long session keeps working. [Compaction](../guide/slash-commands.md#compaction) covers user-facing behavior and `/compact`, and [`[client.compaction]`](../guide/configuration.md#clientcompaction-context-compression) lists the configuration keys. Both manual and automatic compaction share one summarizer, one persisted boundary, and one failure pause.
 
 ## Triggers
 
-`/compact` accepts optional instructions that steer the summary, and the slash registry marks it idle-only, so a turn in flight finishes first. Auto-compaction is on by default and can be disabled, which manual `/compact` ignores.
-
-Automatic compaction runs at two points, and never interrupts an in-flight stream or tool call:
+`/compact` is marked idle-only in the slash registry, so a turn in flight finishes first. Automatic compaction runs at two points without interrupting an in-flight stream or tool call:
 
 - **Before a prompt.** Before recording a new prompt, the engine compacts when the previous turn left its estimate over the threshold, whether that turn completed, failed, or was cancelled.
 - **Inside a turn.** At a round boundary where the next request would cross the threshold, the engine compacts and the turn continues from the summary.
@@ -34,11 +32,7 @@ effective_window = context_window - min(max_tokens, 20_000)
 threshold = effective_window - 13_000
 ```
 
-The 20k summary reserve mirrors Claude Code's p99 summary-output headroom and keeps a compact request from firing at the hard limit. The 13k buffer leaves room for the next prompt, dynamic instructions, and small tool-schema drift. With the default `max_tokens`, supported models compact at `967_000` tokens. If the subtraction would underflow, auto-compaction stays disabled.
-
-## Configuration
-
-[`[client.compaction]`](../guide/configuration.md#clientcompaction-context-compression) lists the settings and how explicit thresholds snap into a usable range. They control only the automatic trigger. Token and percent thresholds are mutually exclusive, so the resolved trigger stays obvious, and the `50_000` floor exists because a lower threshold would summarize again and again long before context pressure exists.
+The 20k summary reserve mirrors Claude Code's p99 summary-output headroom and keeps a compact request from firing at the hard limit. The 13k buffer leaves room for the next prompt, dynamic instructions, and small tool-schema drift. With the default `max_tokens`, supported models compact at `967_000` tokens. If the subtraction would underflow, auto-compaction stays disabled. [`[client.compaction]`](../guide/configuration.md#clientcompaction-context-compression) controls only the automatic trigger. Token and percent thresholds are mutually exclusive so the resolved trigger stays obvious, and the `50_000` floor avoids repeated summaries before context pressure exists.
 
 ## Summarizer
 
@@ -103,21 +97,13 @@ In headless runs, `driver::stdio::TextState` writes `Compacting the conversation
 
 ## Design Decisions
 
-1. **One path for manual and automatic compaction.** Both call `Engine::run_compaction`, so the summarizer, the boundary, and the failure handling have one implementation. Setting `client.compaction.auto_enabled = false` turns off only the automatic trigger.
+1. **One path for manual and automatic compaction, default on with an opt-out.** Both call `Engine::run_compaction`, so the summarizer, boundary, and failure handling share one implementation. Running out of context near the end of a long task costs the work done so far, so auto-compaction defaults on while `client.compaction.auto_enabled = false` turns off only the automatic trigger and leaves manual `/compact` available.
 
-2. **Auto-compaction is default on, with an opt-out.** Running out of context near the end of a long task costs the work done so far, which is worse than a well-marked summary boundary. The opt-out preserves user control, and manual `/compact` stays available either way.
+2. **Response usage as the token signal, with reserved output headroom.** The stream already carries usage, and only the messages appended since the latest request need an estimate. A count-tokens request would add latency and still be approximate once dynamic system context and tool definitions are included. Claude Code and opencode likewise read the last usage, estimate the tail, and compact below the advertised context limit so the summarizer has room (the 20k reserve and 13k buffer).
 
-3. **Response usage as the token signal.** The stream already carries usage, and only the messages appended since the latest request need an estimate. A count-tokens request would add latency and still be approximate once dynamic system context and tool definitions are included. Claude Code and opencode likewise read the last usage and estimate the tail.
+3. **Boundary-only compaction.** Compaction runs after a coherent transcript unit is persisted, before the next prompt or at a round boundary once every tool call has its result, and manual `/compact` is idle-only as in Claude Code, Codex, and opencode. It never interrupts a stream or a running tool, so the summarized transcript holds no unresolved call and session replay matches manual `/compact`. Claude Code's microcompact and opencode's prune, which clear old tool-output bodies between summaries, would add a second retention policy with its own UI and persistence for a need these boundaries already cover.
 
-4. **Reserve output headroom in the threshold.** Claude Code and opencode both compact below the advertised context limit, and the summarizer needs room to produce its summary. The 20k reserve and 13k buffer follow that floor.
-
-5. **Boundary-only compaction.** Compaction runs after a coherent transcript unit is persisted, before the next prompt or the next round of a turn, once every call of the round has its result. It never interrupts a stream or a running tool, so the summarized transcript holds no unresolved call, and session replay matches manual `/compact`. The round boundary is a site because a long tool loop would otherwise fill the context window before its turn ends. Claude Code's microcompact and opencode's prune, which clear old tool-output bodies between summaries, would add a second retention policy with its own UI and persistence for a need these boundaries already cover.
-
-6. **Refuse manual compaction mid-turn.** Claude Code, Codex, and opencode treat manual compaction as a between-turns operation. The slash dispatcher refuses an idle-only `/compact` while a turn is in flight, and the user retries after the reply finishes.
-
-7. **Same request path as a turn.** The summarization request goes through the same `Wire` and `collect_response` as a turn, so it reuses the live model, effort and thinking settings, credentials, betas, and cache handling. `request_summary` checks the stop reason itself, so a summary cut off or stopped early fails before it can replace the transcript. Codex rewrites history server-side on its OpenAI and Azure paths, while this path needs only the Messages stream every supported endpoint already serves.
-
-8. **Send the conversation's own request prefix.** The system prompt, tools, and message prefix match what the conversation sends, so the summarizer reads the conversation's prompt cache and pays cache-read rates for most of its input. Codex forks the same way.
+4. **Same request path and cached prefix as a turn.** The summarization request goes through the same `Wire` and `collect_response` as a turn, reusing the live model, effort and thinking settings, credentials, betas, and cache handling. `request_summary` checks the stop reason itself, so a summary cut off or stopped early fails before replacing the transcript. Sending the conversation's own system prompt, tools, and message prefix lets the summarizer read the conversation's prompt cache at cache-read rates, as Codex does, while needing only the Messages stream every supported endpoint serves:
 
    - **Preserve the prefix.** Editing the history first would miss that cache. On models that bind thinking blocks to the conversation prefix, such as Opus 5.5, it would also invalidate the thinking blocks the request replays, which enforced accounts reject with a 400.
    - **Keep the tools and ask for text only.** The tools array is part of the cached prefix. The rubric asks the model not to call any tool, and a reply that stops on `tool_use` fails the compaction.
@@ -125,29 +111,17 @@ In headless runs, `driver::stdio::TextState` writes `Compacting the conversation
    - **Trim on overflow.** Retries drop the oldest API rounds and strip every thinking block, since a new turn may omit earlier thinking but must not replay it after a changed prefix. A retry whose kept rounds end on a tool result closes that turn with a short assistant message before the rubric.
    - **Reserve summary room.** Claude Code's `truncateHeadForPTLRetry` frees just the reported overflow. oxide-code frees about 20k tokens beyond it so the retry leaves the summary room to finish, and marks no cache breakpoint on a transcript no later request reads.
 
-9. **Synthetic post-compact user message with no parent.** Claude Code, Codex, and opencode all materialize the summary as a `role: user` message, since an assistant message cannot lead a turn and system blocks are special-cased at the prefix. Storing it with no parent lets the chain walk stop at the boundary with no special case. `SUMMARY_PREFIX` is a re-entry framing taken from the Codex template, which tells the next-turn model to use the summary and continue without re-asking what to do.
+5. **Synthetic parentless user message as the stored boundary.** Claude Code, Codex, and opencode all materialize the summary as a `role: user` message, since an assistant message cannot lead a turn and system blocks are special-cased at the prefix. Storing it with no parent lets the chain walk stop at the boundary with no special case while the summarized rows stay for export. The root carries `CompactInfo` (with `pre_message_count` for the header) and the refreshed prompt context, and `SUMMARY_PREFIX` (adapted from Codex) tells the next-turn model to continue from the summary.
 
-10. **The synthetic message as the stored boundary.** The synthetic root carries the `CompactInfo` and the refreshed prompt context, and the session's head moves onto it. The loader's chain walk stops at the root, keeps `CompactInfo` for resume display, and reads only the new tail, while the summarized rows stay for export. Claude Code's boundary entry and Codex's `RolloutItem::Compacted` serve the same purpose, and `pre_message_count` fills the post-compact header without a second field.
+6. **Preserve session identity and queued prompts, reset the file tracker.** Like Claude Code, Codex, and opencode, `/compact` keeps the session ID, stored rows, project, title, and queued prompts because user intent continues, whereas `/clear` rolls to a new session. The file tracker resets to match `/clear`, forcing a fresh Read before any Edit against the summarized transcript.
 
-11. **Preserve session identity.** Claude Code, Codex, and opencode converge on this. `/clear` rolls because intent resets, while `/compact` keeps the session because intent is retained and only context is compressed. The session ID, its stored rows, project, and title all carry through unchanged.
+7. **Stream the summary as it generates.** A long session's summary can take tens of seconds, so streaming shows progress early through one protocol across frontends, discarding before retries or errors while headless text output keeps its one-line boundary notice. `CompactedBlock` renders the header and summary as one accent-bar chat block.
 
-12. **Reset the file tracker.** Edit and Write require a Read in the visible transcript, which is now the summary, so the previous reads are out of scope. The reset matches the post-`/clear` behavior and forces a fresh Read before any Edit.
+8. **A failed attempt fails its prompt, and three consecutive failures pause auto-compaction.** Sending the prompt against an unchanged transcript over the threshold would let context grow until it overflowed, so the TUI hands the unsent prompt back and holds the queue (and a failed mid-turn attempt ends its turn). Pausing after three consecutive automatic failures, as Claude Code does, keeps an unrecoverable compact request from firing on every prompt.
 
-13. **Keep queued prompts.** A session switch drops the prompts queued before it because they belong to the conversation that ended. `/compact` preserves the user's intent, so queued prompts still make sense after it.
+9. **A continuation only inside a turn.** Between prompts, queued input drains and otherwise the assistant waits, since a synthetic continue prompt would act without fresh user intent. A mid-turn compaction resumes work the user already asked for, matching Claude Code and opencode.
 
-14. **Stream the summary as it generates.** A long session's summary can take tens of seconds, and streaming it shows progress and lets the user judge it early. The engine streams the text and decides its fate, so every frontend sees one protocol. A discard precedes the event that reports a failure or cancellation, and a retry discards before streaming again. Headless text output omits the summary stream and keeps its one-line boundary notice.
-
-15. **A failed attempt fails its prompt.** Sending the prompt against the unchanged transcript would put a request over the threshold on the wire, and the context would keep growing until it overflowed, the case auto-compaction exists for. The TUI hands the unsent prompt back and holds the queue, so the prompts behind it do not each start another summary request. A failed mid-turn attempt ends its turn for the same reason.
-
-16. **A continuation only inside a turn.** After a compaction between prompts, queued input drains, and otherwise the assistant waits, since a synthetic continue prompt would make the agent act without fresh user intent. A mid-turn compaction resumes work the user already asked for, so its summary asks the model to resume the task. Claude Code and opencode add a continuation only where a turn is already running.
-
-17. **Circuit-break automatic failures.** A compact request that is too large or malformed can be unrecoverable, so the pause keeps the engine from sending it with every prompt. Claude Code also stops after three consecutive failures.
-
-18. **Free-text instructions, appended verbatim.** `/compact <instructions>` lets the user steer the summary, using the same typed-argument form as `/rename <title>` and `/model <id>`. Claude Code accepts the same argument and appends it under an additional-instructions heading after its rubric.
-
-19. **Refuse a short transcript and an empty summary.** Below about 1,000 tokens the summary is about as long as the transcript, so the attempt fails and leaves the session untouched. A whitespace-only reply fails the same way, since retrying costs less than committing a useless summary.
-
-20. **`CompactedBlock` is one chat block.** The accent-bar surface gives compaction a visual identity while keeping the header and summary one conceptual unit.
+10. **Free-text instructions, and refuse short transcripts or empty summaries.** `/compact <instructions>` appends user steering verbatim under an additional-instructions heading, matching Claude Code and the typed-argument shape of `/rename` and `/model`. Below about 1,000 tokens the summary is about as long as the transcript, and a whitespace-only reply is useless, so both fail and leave the session untouched.
 
 ## Out of Scope
 

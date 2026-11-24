@@ -20,7 +20,7 @@ Terminal-side wheel translation can't cover tmux. DECSET 1007 (alternate scroll)
 
 ## Text Selection
 
-Dragging with the left button over the chat selects text, and releasing the button copies it. A double click selects a word, bounded by whitespace and bracket, quote, and separator characters, and a triple click selects a row. Dragging after a double or triple click extends the selection by words or rows. A press on the second cell of a wide character takes the whole character. A plain click selects nothing and clears the previous selection, though one on a collapsed block [expands it](#expanding-a-block). Selection covers only the chat area, and a drag past the last row ends at that row's end.
+[Select and Copy](../guide/terminal-ui.md#select-and-copy) covers drag, double-click, triple-click, and bypass-modifier gestures. Internally, word selection splits on whitespace and bracket, quote, and separator characters, dragging after a double or triple click extends by words or rows, and pressing the second cell of a wide character takes the whole character. A plain click selects nothing and clears the previous selection, though one on a collapsed block [expands it](#expanding-a-block). Selection covers only the chat area, and a drag past the last row ends at that row's end.
 
 The highlight stays until the next keystroke clears it. While it shows, Ctrl+C copies it again and clears it without interrupting a turn or arming exit.
 
@@ -30,7 +30,7 @@ The highlight stays until the next keystroke clears it. While it shows, Ctrl+C c
 - **Highlight.** Selected cells take the `selection` theme slot's style, a background fill in the built-in themes.
 - **Copied text.** Rows join with newlines, each without its trailing whitespace, and hold what the rows show, gutters such as the block bar and diff line numbers included. Columns follow ratatui's paint, which skips control characters and zero-width graphemes and measures each grapheme with ratatui's cell width, so a row holding an escape sequence copies what it shows, and a halfwidth katakana letter with a sound mark, such as `ｶﾞ`, covers the two cells it paints. A selection of only whitespace copies nothing.
 
-The terminal's bypass modifier still gives native selection: Shift in most terminals, Option in iTerm2, Fn in Terminal.app, and Option in VS Code and Cursor on macOS with `terminal.integrated.macOptionClickForcesSelection` enabled. Inside tmux with `mouse on`, the default `MouseDrag1Pane` binding forwards drags to a pane that reports the mouse, so tmux's own copy-mode selection needs the same bypass and selects across pane borders.
+Inside tmux with `mouse on`, the default `MouseDrag1Pane` binding forwards drags to a pane that reports the mouse, so tmux's own copy-mode selection needs the terminal's bypass modifier and selects across pane borders.
 
 ## Expanding a Block
 

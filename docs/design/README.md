@@ -27,13 +27,13 @@ Each page covers one topic, and [`docs/research/`](../research/) holds the API r
 
 ## Commands
 
-| Document                            | Description                                                                      |
-| ----------------------------------- | -------------------------------------------------------------------------------- |
-| [Slash Commands](slash-commands.md) | Registry, dispatch, autocomplete, `/diff`                                        |
-| [Init](init.md)                     | `/init`, the instruction-file picker, diff-first updates                         |
-| [Login](login.md)                   | `/login` and `/logout`, browser sign-in, credential stores, signed-out sessions  |
-| [Modal UI](modals.md)               | Modal trait and stack, shared primitives, pickers, editors, approvals, overviews |
-| [Resume](resume.md)                 | Session picker, search, archive view, listing, in-process resume                 |
+| Document                            | Description                                                                                 |
+| ----------------------------------- | ------------------------------------------------------------------------------------------- |
+| [Slash Commands](slash-commands.md) | Registry, dispatch, autocomplete, `/diff`                                                   |
+| [Init](init.md)                     | `/init`, the instruction-file picker, diff-first updates                                    |
+| [Login](login.md)                   | `/login` and `/logout`, browser sign-in, credential stores, signed-out sessions             |
+| [Modal UI](modals.md)               | Modal trait and stack, shared primitives, pickers, editors, approvals, questions, overviews |
+| [Resume](resume.md)                 | Session picker, search, archive view, `/delete`, listing, in-process resume                 |
 
 ## Tools
 
