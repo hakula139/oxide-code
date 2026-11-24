@@ -408,7 +408,7 @@ impl PathGlob {
         let literal = literal_prefix(&parsed);
         Ok(Self {
             exact: set([parsed, path_glob(&below)?])?,
-            folded: set([path_glob(&fold_path(glob))?, path_glob(&fold_path(&below))?])?,
+            folded: set([folded_path_glob(glob)?, folded_path_glob(&below)?])?,
             absolute,
             literal,
         })
@@ -487,6 +487,15 @@ fn prefix_locations(bases: &[PathBuf]) -> impl Iterator<Item = PathBuf> + '_ {
 /// `literal_separator` keeps `*` from crossing `/`, so `*.json` names one level of files.
 fn path_glob(glob: &str) -> Result<Glob> {
     Ok(GlobBuilder::new(glob).literal_separator(true).build()?)
+}
+
+/// Folded form of [`path_glob`] for deny and ask matching. `case_insensitive` keeps POSIX classes
+/// like `[[:upper:]]` matching folded lowercase paths.
+fn folded_path_glob(glob: &str) -> Result<Glob> {
+    Ok(GlobBuilder::new(&fold_path(glob))
+        .literal_separator(true)
+        .case_insensitive(true)
+        .build()?)
 }
 
 /// The complete fixed path components at the start of `glob`, decoded by its parsed grammar.
@@ -1152,6 +1161,58 @@ mod tests {
             assert!(!allows_path(&edit(".env"), &folded));
         }
 
+        #[test]
+        fn path_bracket_classes_exclude_separators() {
+            let slash_only = edit("./secrets[/]key");
+            let range_over_slash = edit("./secrets[.-0]key");
+            let negated = edit("./secrets[^x]key");
+
+            let across_dir = ["secrets/key".to_owned()];
+            let target = path(&abs("/repo/secrets/key"), &across_dir);
+            for rule in [&slash_only, &range_over_slash, &negated] {
+                assert!(!allows_path(rule, &target), "{}", rule.pattern());
+                assert!(!denies_path(rule, &target), "{}", rule.pattern());
+            }
+
+            for name in ["secrets.key", "secrets0key"] {
+                let rooted = [name.to_owned()];
+                let single_segment = path(&abs(&format!("/repo/{name}")), &rooted);
+                assert!(allows_path(&range_over_slash, &single_segment), "{name}");
+                assert!(allows_path(&negated, &single_segment), "{name}");
+            }
+        }
+
+        #[test]
+        fn path_posix_classes_match_and_fold_under_deny() {
+            let digits = edit("src/[[:digit:]].rs");
+            let digit_rooted = ["src/7.rs".to_owned()];
+            let letter_rooted = ["src/a.rs".to_owned()];
+            assert!(allows_path(
+                &digits,
+                &path(&abs("/repo/src/7.rs"), &digit_rooted)
+            ));
+            assert!(!allows_path(
+                &digits,
+                &path(&abs("/repo/src/a.rs"), &letter_rooted)
+            ));
+
+            let upper = edit("src/[[:upper:]]*.rs");
+            let lower = edit("src/[[:lower:]]*.rs");
+            let upper_rooted = ["src/A.rs".to_owned()];
+            let upper_target = path(&abs("/repo/src/A.rs"), &upper_rooted);
+            let lower_target = path(&abs("/repo/src/a.rs"), &letter_rooted);
+
+            assert!(allows_path(&upper, &upper_target));
+            assert!(!allows_path(&upper, &lower_target));
+            assert!(denies_path(&upper, &upper_target));
+            assert!(denies_path(&upper, &lower_target));
+
+            assert!(allows_path(&lower, &lower_target));
+            assert!(!allows_path(&lower, &upper_target));
+            assert!(denies_path(&lower, &lower_target));
+            assert!(denies_path(&lower, &upper_target));
+        }
+
         #[cfg(windows)]
         #[test]
         fn path_reads_backslash_separators_and_needs_a_drive() {
@@ -1285,7 +1346,7 @@ mod tests {
                 ("/a/[!x]/file", "/a"),
                 ("/a/{one/two,three}/file", "/a"),
                 ("/a/{one/two}/file", "/a/one/two/file"),
-                ("/a[/]b/file", "/a/b/file"),
+                ("/a[/]b/file", ""),
                 ("/caf\u{e9}/[[]/file", "/caf\u{e9}/[/file"),
                 ("/{caf\u{e9},caf\u{e8}}/file", "/"),
             ] {

@@ -2010,7 +2010,6 @@ mod tests {
                 symlink_dir(Path::new("real"), &root.join("secrets"));
                 let workspace = Workspace::new(root);
                 for pattern in [
-                    "./secrets[/]key",
                     "./{secrets/key}",
                     #[cfg(unix)]
                     r"./secrets\/key",
