@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.13] - 2026-11-25
+
+### Highlights
+
+- Permission path globs now exclude `/` from bracket character classes and support POSIX classes such as `[[:digit:]]` and `[[:upper:]]`.
+- TUI modals ignore stray modified keys, `/help` lists `Ctrl+R`, and `Ctrl+Home` / `Ctrl+End` scroll the chat view reliably.
+
+### Fixed
+
+- _(permission)_ Adopt `globset` 0.4.22 bracket and POSIX character class semantics in path globs: bracket classes exclude `/` when matching path segments, POSIX classes such as `[[:digit:]]` and `[[:upper:]]` work, and case-folded deny and ask globs match case-sensitive POSIX classes ([#889](https://github.com/hakulab/oxide-code/pull/889))
+- _(tui)_ Guard buffered and modified keys in delete-confirmation and question modals so stray chords do not trigger actions or jump into the freeform editor, list `Ctrl+R` in `/help`, and match `Ctrl+Home` / `Ctrl+End` chords in input forwarding and chat scrolling ([#894](https://github.com/hakulab/oxide-code/pull/894))
+- _(docs)_ Align user guides and design documentation with current behavior, adding the question-modal guide and missing status-line segment entries in theming docs ([#891](https://github.com/hakulab/oxide-code/pull/891))
+
+[0.1.0-alpha.13]: https://github.com/hakulab/oxide-code/compare/v0.1.0-alpha.12...v0.1.0-alpha.13
+
 ## [0.1.0-alpha.12] - 2026-11-18
 
 ### Highlights
