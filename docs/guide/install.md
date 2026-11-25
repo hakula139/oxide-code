@@ -32,7 +32,7 @@ brew install hakulab/tap/oxide-code
 Download the archive for your platform from [Releases](https://github.com/hakulab/oxide-code/releases), extract it, and move the `ox` binary to a directory on your `PATH`. Set `VERSION` to the newest tag listed on that page:
 
 ```bash
-VERSION=v0.1.0-alpha.12
+VERSION=v0.1.0-alpha.13
 
 # macOS aarch64 (Apple Silicon)
 curl -fsSL "https://github.com/hakulab/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz" | tar -xz
