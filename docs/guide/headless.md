@@ -1,6 +1,6 @@
 # Headless Mode
 
-`ox -p "<prompt>"` (`--print`) answers one prompt without the TUI and exits when the turn ends. Use it in scripts, CI jobs, and programs that drive `ox`. An interactive run requires terminals on both stdin and stdout.
+`ox -p "<prompt>"` (`--print`) runs one turn without the TUI and exits. Use it in scripts, CI jobs, and automation. Interactive mode requires terminals on both stdin and stdout.
 
 ```bash
 ox -p "Summarize the TODOs in src/"                 # Print the reply as text
@@ -10,16 +10,16 @@ ox -p "Fix the failing test" --output stream-json   # Stream every event as a JS
 ox -c -p "Run the tests again"                      # Continue the latest session
 ```
 
-- **Input**: When stdin is not a terminal, `ox -p` reads it to the end and attaches it after the prompt in a `<stdin>` block, so the model can tell your instruction from the data. Without a prompt, piped stdin is the prompt itself, as in `ox -p < task.md`. Invalid UTF-8 bytes become U+FFFD, so a stray byte in a diff or log does not end the run.
-- **Open stdin**: A program that runs `ox` with a stdin it never closes leaves `ox` waiting, and after 3 seconds `ox` says so on stderr. Redirect stdin from `/dev/null` to keep it away from `ox`.
-- **Usage errors**: A run with neither a prompt nor piped stdin fails with status `2`, as does a prompt that is exactly a slash command's name. Pass `--` before such a word to send it.
-- **Sessions**: Each run starts and saves a new session, unless `-c` continues the latest one or `-r` names one by ID prefix or [export](sessions.md#moving-a-session-between-machines) path. Resume a run's session later with `ox -r <id-prefix>`, in the TUI or with another `-p`. A run that continues a session another `ox` process wrote to in the meantime continues in a [fork](sessions.md#several-processes-on-one-session) of it.
-- **Questions**: The `ask` tool returns an aborted result at once, without reading stdin.
-- **Approvals**: Calls that need approval are denied, and the denial tells the model what [Approval Prompt](permissions.md#approval-prompt) describes. Add `allow` patterns for the calls your script needs, as [Rules](permissions.md#rules) describes. Pass `--mode plan` to keep a run read-only, or `--mode yolo` to allow every call your deny and ask rules leave open. Since `yolo` runs whatever a rule misses, run untrusted work in a sandbox or container, as [SECURITY.md](../../SECURITY.md#trust-model) explains. No command-specific allow pattern covers a `bash` command with shell syntax `ox` cannot analyze, so the mode decides it, as [Chained Commands and Unsupported Syntax](permissions.md#chained-commands-and-unsupported-syntax) describes.
+- **Input**: Non-terminal stdin is read to EOF and appended after the prompt in a `<stdin>` block. Without a prompt, piped stdin becomes the prompt (`ox -p < task.md`). Invalid UTF-8 bytes become U+FFFD.
+- **Open stdin**: If a caller leaves stdin open, `ox` waits and warns on stderr after 3 seconds. Redirect stdin from `/dev/null` to avoid blocking.
+- **Usage errors**: Missing both a prompt and stdin exits with status `2`, as does a prompt matching a bare slash-command name (pass `--` before it to send it).
+- **Sessions**: Each run saves a new session unless `-c` continues the latest or `-r` resumes by ID prefix or [export](sessions.md#moving-a-session-between-machines) path. Resume later with `ox -r <id-prefix>` in the TUI or `-p`. Continuing a session that another `ox` process modified continues in a [fork](sessions.md#several-processes-on-one-session).
+- **Questions**: `ask` aborts immediately without reading stdin.
+- **Approvals**: Calls needing approval are denied with the message described in [Approval Prompt](permissions.md#approval-prompt). Add `allow` rules ([Rules](permissions.md#rules)), pass `--mode plan` for read-only runs, or pass `--mode yolo` to allow calls left open by deny and ask rules (run untrusted work in a sandbox or container, as [SECURITY.md](../../SECURITY.md#trust-model) explains). Commands with syntax `ox` cannot analyze skip command-specific allow rules and fall back to the mode ([Chained Commands and Unsupported Syntax](permissions.md#chained-commands-and-unsupported-syntax)).
 
 ## Output Formats
 
-`--output` picks what stdout carries:
+`--output` selects the stdout format:
 
 | Format           | stdout                                                                        |
 | ---------------- | ----------------------------------------------------------------------------- |
@@ -27,9 +27,9 @@ ox -c -p "Run the tests again"                      # Continue the latest sessio
 | `json`           | One [result](#result) line once the run ends                                  |
 | `stream-json`    | One JSON line per [event](#events), then the [result](#result)                |
 
-Every format also writes tool calls, the task list, retries, notices, and errors as text to stderr, plus the model's progress notes unless a `text` run shows thinking on stdout because `tui.show_thinking` is set. When parsing JSON, read stdout alone.
+All formats write tool calls, task lists, retries, notices, and errors to stderr, plus progress notes unless `text` already streams thinking on stdout (`tui.show_thinking`). Parse JSON from stdout only.
 
-If the program reading stdout closes it, such as a pipe into `head -5`, a `text` or `stream-json` run stops its turn at the next safe point, as **Ctrl+C** does, and still saves the session. A `json` run writes nothing until the end, so it finishes the turn and then fails to print the result.
+If stdout closes early (such as piping to `head -5`), `text` and `stream-json` stop at the next safe point like **Ctrl+C** and still save the session. `json` buffers until the end, so it finishes the turn before failing to write.
 
 ## Exit Status
 
@@ -41,11 +41,11 @@ If the program reading stdout closes it, such as a pipe into `head -5`, a `text`
 | `101`               | `ox` crashed, and the JSON formats still print a `failed` result                                                     |
 | `129`, `130`, `143` | SIGHUP, SIGINT, or SIGTERM stopped the run, and `ox` died by that signal, which shells report as 128 plus its number |
 
-If `ox` cannot start a run, for example because of a configuration or credential error, it prints the error to stderr and emits no result.
+Startup failures (such as config or credential errors) print to stderr and emit no JSON result.
 
 ## Result
 
-The `json` and `stream-json` formats emit this result shape:
+`json` and `stream-json` emit this result object:
 
 ```json
 {
@@ -74,17 +74,17 @@ The `json` and `stream-json` formats emit this result shape:
 | `usage`               | The latest usage, or `null` when no request reported any                                                                             |
 | `session_id`          | The run's session, or the fork it continued in, which `ox -r <id-prefix>` resumes                                                    |
 
-`usage` contains the following fields, each set to `null` when unknown:
+`usage` fields (each `null` when unknown):
 
-- **`context_tokens`**: The input size of the latest request, including cached tokens. It shows how full the context window is.
-- **`context_window`**: The model's context window, measured in tokens.
-- **`estimated_cost_usd`**: The cumulative estimated session cost at public per-token rates, restored on resume, or `null` when no positive estimate is available.
+- **`context_tokens`**: Latest request input tokens, including cached tokens (shows context window fill).
+- **`context_window`**: Model context window in tokens.
+- **`estimated_cost_usd`**: Cumulative estimated session cost at public per-token rates (restored on resume), or `null` when no positive estimate is available.
 
-A turn reports usage when it ends and before each automatic compaction inside it, so after a signal, `usage` omits the requests sent since the latest report.
+Usage is reported at turn end and before each automatic compaction, so after a signal it omits requests sent since the latest report.
 
 ## Events
 
-Each `stream-json` line is an object with a `type` and, for most types, a `data` payload. [Engine](../design/engine.md) describes the contract behind these events, including which event ends each operation.
+Each `stream-json` line has a `type` and, for most types, a `data` payload. [Engine](../design/engine.md) defines the event contract, including which event ends each operation.
 
 | `type`                      | `data`                                                                                             |
 | --------------------------- | -------------------------------------------------------------------------------------------------- |
@@ -111,15 +111,15 @@ Each `stream-json` line is an object with a `type` and, for most types, a `data`
 
 ### Event Payloads
 
-- **`rate_limits_updated`** arrives with each response under a Claude subscription sign-in. Its `five_hour` and `seven_day` windows are each an object with `utilization`, the spent share from 0 to 1, and `resets_at`, the reset time in Unix seconds, or `null` when the response omits that window.
-- **`tasks_updated`** follows the `tool_call_end` of each successful `tasks` call. Its `data` is the task list in order, each task with its `content` and a `status` of `pending`, `in_progress`, or `completed`. An empty array means the list cleared, which happens once every task is completed or when the model sends an empty list.
-- **`session_compacted`** replaces the conversation with a summary when the context nears its window. Its `data` holds the `summary`, the `pre_count` of messages it replaced, `instructions` (`null` for automatic compactions), and the `trigger`, which is `mid_turn` between the turn's rounds and `auto` before the prompt of a continued or resumed session already past the auto-compaction threshold. After `mid_turn`, the turn goes on from the summary. A failed compaction ends the turn with `turn_failed`, after `prompt_unsent` when the prompt never went out. A headless prompt sends `/compact` to the model as text, so to compact after a failure, resume the session with `ox -r <id-prefix>` in the TUI and run `/compact` there.
-- **`turn_rolled_back`** precedes the `turn_failed` of a refused request. The session drops the refused turn, or after a `mid_turn` compaction, only the work that followed the summary.
-- **`background_shells_updated`** arrives when a background shell starts, exits, or stops. Its `data` lists every open shell with its `id`, `command`, and `state`. The state's `type` is `running`, `exited` with the exit code in `data`, or `killed` with the signal number in `data`. A stopped shell leaves the list. When the run ends, every open shell stops without another event, so the last `background_shells_updated` can still list shells as running.
+- **`rate_limits_updated`**: Sent with each Claude subscription response. `five_hour` and `seven_day` each hold `utilization` (0 to 1) and `resets_at` (Unix seconds), or `null` when omitted.
+- **`tasks_updated`**: Follows each successful `tasks` `tool_call_end`. `data` is the ordered task list (`content` and `status`: `pending`, `in_progress`, or `completed`). An empty array clears the list (when all tasks complete or the model sends an empty list).
+- **`session_compacted`**: Replaces the conversation with a summary near the context limit. `data` holds `summary`, `pre_count` (replaced messages), `instructions` (`null` for automatic compactions), and `trigger` (`mid_turn` between rounds, or `auto` before a continued or resumed prompt already past the threshold). Turns continue after `mid_turn`. Failed compactions end with `turn_failed` (after `prompt_unsent` if the prompt never went out). Because `-p` sends `/compact` as text, resume with `ox -r <id-prefix>` in the TUI to compact manually.
+- **`turn_rolled_back`**: Precedes `turn_failed` on a refusal, dropping the refused turn (or only post-summary work after a `mid_turn` compaction).
+- **`background_shells_updated`**: Sent when a background shell starts, exits, or stops. `data` lists open shells with `id`, `command`, and `state` (`type` is `running`, `exited` with exit code in `data`, or `killed` with signal number in `data`). Stopped shells drop from the list. Remaining shells stop at run end without emitting a final event.
 
 ### Result Views
 
-The `view` in `tool_call_end` is the structured result, an object with its own `type` and `data`:
+`view` in `tool_call_end` is a typed structured result (`type` and `data`):
 
 | `view` type    | `data`                                                                                                              |
 | -------------- | ------------------------------------------------------------------------------------------------------------------- |
@@ -130,11 +130,11 @@ The `view` in `tool_call_end` is the structured result, an object with its own `
 | `glob_files`   | The `pattern`, the matched `files`, and their `total` count                                                         |
 | `tasks`        | The `tasks` the call sent, each with its `content` and `status`                                                     |
 
-In a `diff`, each hunk's `lines` have a `kind` (`context`, `removed`, or `added`), a `number` in the old file for a removed line and in the new file otherwise, the `text` without its line ending, and, when only part of the line changed, the `changed` byte ranges (`start`, `end`). When the two texts differ only in line endings, each `text` keeps its ending, written as `␍` for `\r` and `↵` for `\n`. A diff longer than 2000 lines stops there, and `omitted_lines` counts the rest.
+Each `diff` hunk's `lines` carry `kind` (`context`, `removed`, or `added`), `number` (old-file line for `removed`, new-file line otherwise), `text` without line endings, and `changed` byte ranges (`start`, `end`) for partial-line edits. For line-ending-only diffs, `text` keeps endings as `␍` (`\r`) and `↵` (`\n`). Diffs truncate at 2000 lines, with `omitted_lines` counting the rest.
 
 ### Example
 
-A run that lists files and then attempts `cargo test`, which needs approval, streams lines like these:
+Example stream listing files and attempting `cargo test` (denied for needing approval):
 
 ```json
 {"type":"tool_call_start","data":{"id":"call-1","name":"glob","input":{"pattern":"Cargo.toml"},"icon":"✱","label":"Glob(Cargo.toml)"}}
@@ -149,6 +149,4 @@ A run that lists files and then attempts `cargo test`, which needs approval, str
 
 ## Compatibility
 
-Within a minor version, JSON output preserves its `type` tags, field names, `stop_reason` values, and `view` shapes. Later versions may add event types and fields, so skip any you don't recognize.
-
-Display text can change in any release. This includes a tool call's `icon`, `label`, and `title`, the wording of `content`, `error`, and `message` strings, and everything written to stderr.
+Within a minor version, JSON output preserves `type` tags, field names, `stop_reason` values, and `view` shapes. Ignore unknown event types and fields added in later versions. Display text (`icon`, `label`, `title`, `content`, `error`, `message`, and stderr output) may change in any release.

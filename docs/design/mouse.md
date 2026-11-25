@@ -1,50 +1,44 @@
 # Mouse Interactions
 
-The TUI captures the mouse so the wheel scrolls the chat in a bare terminal and inside tmux. Capture takes drags away from the terminal, so `ox` selects and copies chat text itself, in any terminal. A plain click expands a collapsed block from its overflow footer or `Thought` header, and opens the pull request page a status-bar segment links. The links are also OSC 8 hyperlinks, which terminals open on Ctrl+click or Cmd+click.
+The TUI captures the mouse so the scroll wheel works in bare terminals and inside tmux. Because capture intercepts drags, `ox` handles chat text selection and copying itself. Plain clicks expand collapsed blocks (from their overflow footer or `Thought` header) and open pull-request links in the status bar, which are also OSC 8 hyperlinks for Ctrl+click / Cmd+click.
 
 ## Setup and Event Routing
 
-`init` enables raw mode, then `enter_tui_mode` enables the alternate screen, bracketed paste, and, outside Windows, Kitty keyboard disambiguation and crossterm's `EnableMouseCapture`. crossterm captures the Windows mouse through the console API, so `init` enables it there after `enter_tui_mode` and also requests SGR mouse reports (`?1006h`), which some Windows terminals need before ConPTY delivers mouse records. Each mode unwinds in `leave_tui_mode`, or in `restore` for the Windows mouse.
+`init` enables raw mode, and `enter_tui_mode` enables the alternate screen, bracketed paste, and (outside Windows) Kitty keyboard disambiguation and crossterm's `EnableMouseCapture`. On Windows, `init` enables console mouse input after `enter_tui_mode` and requests SGR mouse reports (`?1006h`) so ConPTY delivers mouse records. Modes unwind in `leave_tui_mode` (and `restore` for Windows mouse).
 
 `App::handle_crossterm_event` routes mouse events:
 
-- **Wheel.** `ChatView::handle_event` scrolls three rows per notch without moving the input cursor. While a modal or the slash-command popup is open, each notch reaches it as one Up or Down key, so the wheel steps a list's selection or scrolls an overview.
-- **Left button.** A plain press on a status-bar link opens it, as [below](#osc-8-hyperlinks-on-the-pr-status-segments) describes, and other presses, drags, and releases go to `ChatView::handle_mouse`, which selects text.
-- **Other events.** They return early, so the motion reports capture enables don't each force a frame.
+- **Wheel.** `ChatView::handle_event` scrolls three rows per notch without moving the input cursor. When a modal or slash popup is open, each notch translates to Up or Down.
+- **Left button.** A plain press on a status-bar link opens it ([below](#osc-8-hyperlinks-on-the-pr-status-segments)). Other presses, drags, and releases go to `ChatView::handle_mouse` for text selection.
+- **Other events.** Return early so motion reports do not trigger frame redraws.
 
 ## Mouse Capture
 
-`EnableMouseCapture` writes `?1000h`, `?1002h`, `?1003h`, `?1015h`, and `?1006h`, and crossterm parses the SGR (`?1006`) reports into `MouseEvent`s. Selection needs the drag mode, and `?1000h` alone already makes the terminal hand clicks to the app, so a narrower set of modes would not keep native selection. On Windows, crossterm enables console mouse input, which has no wheel-only setting.
+`EnableMouseCapture` writes `?1000h`, `?1002h`, `?1003h`, `?1015h`, and `?1006h`, and crossterm parses SGR (`?1006`) events. Drag selection needs drag reporting, and `?1000h` already disables terminal selection (Windows console input also has no wheel-only mode).
 
-Terminal-side wheel translation can't cover tmux. DECSET 1007 (alternate scroll) makes a bare terminal send wheel events in the alternate screen as arrow keys, but under tmux with `mouse on`, tmux receives the wheel itself, and its default `WheelUpPane` binding passes the event to a pane only when the pane reports the mouse (`#{mouse_any_flag}`). Otherwise tmux drops the event or enters copy mode and scrolls its history over the TUI. With capture on, tmux forwards both wheel directions to `ox` under its default bindings.
+Terminal wheel translation (DECSET 1007) fails under tmux with `mouse on`, because tmux's default `WheelUpPane` forwards wheel events only when the pane reports mouse capture (`#{mouse_any_flag}`), otherwise dropping them or entering copy mode. With capture on, tmux forwards both wheel directions by default.
 
 ## Text Selection
 
-[Select and Copy](../guide/terminal-ui.md#select-and-copy) covers drag, double-click, triple-click, and bypass-modifier gestures. Internally, word selection splits on whitespace and bracket, quote, and separator characters, dragging after a double or triple click extends by words or rows, and pressing the second cell of a wide character takes the whole character. A plain click selects nothing and clears the previous selection, though one on a collapsed block [expands it](#expanding-a-block). Selection covers only the chat area, and a drag past the last row ends at that row's end.
+[Select and Copy](../guide/terminal-ui.md#select-and-copy) documents user gestures (drag, double-click, triple-click, bypass modifier). Word selection splits on whitespace, brackets, quotes, and separators, dragging after a double or triple click extends by words or rows, and clicking the trailing cell of a wide character selects the full character. Plain clicks clear selection without copying (unless clicking a collapsed block to [expand it](#expanding-a-block)). Selection stays within the chat area, clamping drags past the last row to that row's end.
 
-The highlight stays until the next keystroke clears it. While it shows, Ctrl+C copies it again and clears it without interrupting a turn or arming exit.
+The highlight lasts until the next keystroke. While active, Ctrl+C copies again and clears selection without interrupting a turn or arming exit.
 
-- **Anchoring.** Each end of the selection is a content anchor from `SlotTops`, the scheme the scroll position uses, plus a column. A slot starts at its block's first row, and a separator above a block belongs to the slot before it, so a tool result inserted above a selected call keeps the highlight on the call. Every frame resolves the anchors against the current slot tops, so the highlight stays on the same text while blocks stream in below or are inserted above. A release renders any covered block the last frame did not, such as a reply committed since. A width change rewraps every row and a view toggle reshapes the blocks, so either drops the selection.
-- **Following the tail.** A drag pauses following the tail, so streamed output can't move text out from under the pointer, and scrolling to the bottom doesn't resume it while the button is held. Whatever drops a held selection resumes following if the drag paused it: the release, a keystroke, a view toggle, a width change, or a press after a lost release.
-- **Edge auto-scroll.** While the pointer is held above or below the chat, the frame tick scrolls one row every 50 ms toward it until the view reaches the content's end, and the selection's head follows the row at that edge. It stops after 200 rows without a mouse event, in case the terminal lost the release.
-- **Highlight.** Selected cells take the `selection` theme slot's style, a background fill in the built-in themes.
-- **Copied text.** Rows join with newlines, each without its trailing whitespace, and hold what the rows show, gutters such as the block bar and diff line numbers included. Columns follow ratatui's paint, which skips control characters and zero-width graphemes and measures each grapheme with ratatui's cell width, so a row holding an escape sequence copies what it shows, and a halfwidth katakana letter with a sound mark, such as `ｶﾞ`, covers the two cells it paints. A selection of only whitespace copies nothing.
+- **Anchoring.** Endpoints store a `SlotTops` content anchor plus column (each slot starts at its block's first row, with preceding separators owned by the prior slot so inserted tool results keep highlights on the call). Every frame re-resolves anchors against current slot tops, releases render any unrendered covered blocks (such as a newly committed reply), and width changes or view toggles drop selection.
+- **Following the tail.** Dragging pauses tail-following so streaming cannot shift text under the pointer, and scrolling to the bottom does not resume it while held. Any release, keystroke, view toggle, width change, or press after a lost release restores tail-following if the drag paused it.
+- **Edge auto-scroll.** Holding the pointer above or below chat scrolls one row every 50 ms toward content bounds with the selection head tracking the edge, stopping after 200 rows without a mouse event in case release was lost.
+- **Highlight.** Selected cells use the `selection` theme slot (background fill in built-in themes).
+- **Copied text.** Rows join with newlines (trailing whitespace stripped) and copy rendered text including gutters (block bars, diff line numbers). Columns match ratatui's paint, skipping control chars and zero-width graphemes and using ratatui cell widths (so escape sequences copy as displayed and halfwidth katakana with a sound mark like `ｶﾞ` spans two cells). Whitespace-only selections copy nothing.
 
-Inside tmux with `mouse on`, the default `MouseDrag1Pane` binding forwards drags to a pane that reports the mouse, so tmux's own copy-mode selection needs the terminal's bypass modifier and selects across pane borders.
+Under tmux with `mouse on`, default `MouseDrag1Pane` forwards drags to the pane, so tmux copy-mode selection requires the terminal's bypass modifier and spans pane borders.
 
 ## Expanding a Block
 
-In the compact view, a plain click on a block's overflow footer, such as `... +3 lines · Ctrl+O to expand`, or on a collapsed `Thought` header renders that block in full. Each block marks these rows when it renders, so the click finds them in the cached render it landed on. The block expands on the release, which keeps a drag that starts on the footer a selection, and only for a press on a painted row, since a press below the last row still lands on that row for selection. The click pauses following the tail, so the rows on screen stay put while the block grows below them. Ctrl+O returns every block to the view it switches to.
+In compact view, a plain click on a block's marked overflow footer (such as `... +3 lines · Ctrl+O to expand`) or collapsed `Thought` header expands that block in full on button release (preserving drags starting on the footer) when pressed on a painted row (since presses below the last row clamp to it for selection only). Expanding pauses tail-following so visible rows stay put, and Ctrl+O resets all per-block expansions.
 
 ## Copying
 
-`ox_tui::clipboard::Clipboard` runs copies in one worker off the event loop and keeps only the latest pending selection:
-
-- It reports outcomes through the App's event channel, and the App discards reports for superseded copies. Starting another copy clears any earlier OSC 52 sequence still waiting for the next frame.
-- A copy that takes over 2 s reports a timeout, and tmux fallback attempts share the original deadline. Before taking the next selection, the worker waits for a started native write to finish or a timed-out tmux child to be killed and reaped, though killing the client cannot cancel actions the tmux server already accepted.
-- The worker drains the latest pending selection when the App drops.
-
-The routes depend on where `ox` runs:
+`ox_tui::clipboard::Clipboard` runs copies on one background worker keeping only the latest pending selection, reporting outcomes via `AppEvent` (discarding superseded reports and clearing pending OSC 52 sequences on a new copy), timing out after 2 s (shared across tmux fallbacks), waiting for a started native write to finish or a timed-out tmux child to be killed and reaped before taking the next selection, and draining the latest selection on drop.
 
 | Session                                         | Routes                                                                       |
 | ----------------------------------------------- | ---------------------------------------------------------------------------- |
@@ -52,49 +46,47 @@ The routes depend on where `ox` runs:
 | Remote inside tmux                              | `tmux load-buffer -w -`, which forwards the text to the outer terminal       |
 | Remote outside tmux, or when every route failed | OSC 52 (`\x1b]52;c;<base64>\x07`), written after the next frame              |
 
-The native write runs on a blocking thread and keeps its `arboard` handle for the session, since X11 and some Wayland compositors drop the contents once the writing process lets go. On X11 the contents still vanish when `ox` exits, unless a clipboard manager took them over. A native write works under every terminal's default settings, including those of iTerm2 and Terminal.app, which ignore OSC 52.
+The native route keeps one `arboard` handle on a blocking thread for the session because X11 and some Wayland compositors clear the clipboard when the writer drops (on X11, contents still vanish on exit without a clipboard manager). It works under every terminal's default settings, including iTerm2 and Terminal.app.
 
-`tmux load-buffer -w` stores the text in a paste buffer and, on tmux 3.2 and later, forwards it to the outer terminal's clipboard unless `set-clipboard` is off. This works under tmux's default `set-clipboard external`, where tmux ignores OSC 52 written by the pane itself. Older tmux rejects `-w`, so `ox` retries without it, and the notice says that only the tmux buffer holds the text.
+`tmux load-buffer -w` populates the paste buffer and (on tmux 3.2+) forwards to the outer clipboard unless `set-clipboard` is off, working under tmux's default `set-clipboard external` where pane-emitted OSC 52 is ignored. On older tmux rejecting `-w`, `ox` retries without `-w` and notes that only the tmux buffer holds the text.
 
-The OSC 52 write goes out inside the next frame's synchronized update:
+OSC 52 emits inside the next frame's synchronized update:
 
-- **GNU screen.** With `STY` set outside tmux, screen passes OSC 52 to the outer terminal only inside its DCS passthrough (`ESC P` ... `ESC \`) and abandons a string over its 768-byte buffer, so `ox` sends the payload as a run of DCS strings of 76 base64 bytes each.
-- **Terminals that ignore it.** Terminal.app and the Linux console ignore OSC 52, so when no other route worked, `ox` writes nothing and names the fix: Fn+drag or Cmd+R, which turns off mouse reporting, in Terminal.app, and Shift+drag in the console. iTerm2 applies OSC 52 only once "Applications in terminal may access clipboard" is on, so its notice names that setting.
-- **Size cap.** Selections over 100,000 bytes, xterm's default cap, go only to the system clipboard.
+- **GNU screen.** With `STY` set outside tmux, `ox` splits payload into 76-byte base64 chunks wrapped in DCS passthrough (`ESC P` ... `ESC \`) to stay under screen's 768-byte buffer.
+- **Terminals that ignore it.** On Terminal.app and Linux console, when no other route succeeds, `ox` skips OSC 52 and shows the workaround (Fn+drag or Cmd+R in Terminal.app, Shift+drag in the console). On iTerm2, the notice names the clipboard-access setting.
+- **Size cap.** Selections over 100,000 bytes (xterm's default cap) use only the system clipboard.
 
-A pill at the chat's bottom-left corner reports the outcome for three seconds, truncated to the width the jump-to-bottom pill leaves. OSC 52 has no acknowledgment, so a terminal that blocks clipboard writes still shows the copy as done. VS Code's Remote SSH terminal drops OSC 52 this way, and Cursor's remote terminal reports the same `TERM_PROGRAM` and applies it, so `ox` cannot warn about it.
+A bottom-left pill shows copy status for 3 s, truncated to leave room for the jump-to-bottom pill. Because OSC 52 has no acknowledgment, blocked writes still report success (VS Code Remote SSH drops OSC 52 while Cursor Remote SSH shares `TERM_PROGRAM` and applies it, so `ox` cannot warn).
 
 ## OSC 8 Hyperlinks on the PR Status Segments
 
-The `pull-request` status segment renders `#NN` as plain spans and links the PR, while `pull-request-checks` and `pull-request-review` link its checks and changed-files pages. After painting the frame buffer, `StatusBar::render` records each hyperlink's rect, URL, chars, and style. `App::render` drains that queue after `terminal.draw()` and replays OSC 8 directly to the crossterm backend inside the same synchronized update, so the linked cells present with the frame.
+`pull-request` links the PR on `#NN`, while `pull-request-checks` and `pull-request-review` link its checks and changed-files pages. After painting, `StatusBar::render` records each link's rect, URL, chars, and style, and `App::render` replays OSC 8 directly to crossterm after `terminal.draw()` inside the same synchronized update:
 
 ```text
 \x1b[<row>;<col>H\x1b]8;;<URL>\x07<styled cells>\x1b]8;;\x07
 ```
 
-The envelope must live **outside** the cell symbols. ratatui's `Buffer::diff` uses each cell's `CellWidth` to decide how many trailing cells the cell occupies, so a URL like `https://github.com/o/r/pull/86` inside a cell looks roughly 30 cells wide, which drops the rest of `#86` and shifts later text. Replaying after the draw keeps buffer cells plain, so the next diff still sees one-cell symbols.
+Keeping the envelope outside buffer cells preserves ratatui's `Buffer::diff` cell widths (an embedded URL would count as ~30 cells and corrupt trailing cells).
 
-- **Out-of-band emission.** `App::emit_status_hyperlinks` saves the cursor with DECSC (`\x1b7`), positions each link with CUP (`\x1b[<row>;<col>H`, 1-based), writes the OSC 8 opener, replays the captured cells with an SGR reset after each styled cell, closes OSC 8, and restores with DECRC (`\x1b8`). DECSC / DECRC avoids the stdin race of the DSR query in `terminal.get_cursor_position()`.
-- **BEL (`\x07`) terminator.** Some xterm.js-based terminals, VS Code's and Cursor's integrated terminals among them, misparse self-contained per-cell ST (`\x1b\\`) closers and leak visible bytes into the following cells. BEL is one byte, and every modern emulator parses it identically.
-- **Plain OSC 8 inside tmux.** tmux 3.4 and later parse OSC 8, place the link in pane coordinates, and forward it to outer terminals that have the `hyperlinks` terminal feature. For an outer terminal tmux does not detect, add `set -as terminal-features ',<TERM>:hyperlinks'` to `tmux.conf`, with `<TERM>` matching the outer terminal's `$TERM`. Older tmux drops the OSC and keeps the visible text.
+- **Out-of-band emission.** `App::emit_status_hyperlinks` saves cursor with DECSC (`\x1b7`), moves with 1-based CUP (`\x1b[<row>;<col>H`), opens OSC 8, replays cells with SGR resets, closes OSC 8, and restores with DECRC (`\x1b8`), avoiding the stdin race of `terminal.get_cursor_position()`.
+- **BEL (`\x07`) terminator.** Avoids xterm.js (VS Code, Cursor) misinterpreting ST (`\x1b\\`) closers and leaking visible bytes.
+- **Plain OSC 8 inside tmux.** tmux 3.4+ forwards OSC 8 to outer terminals with the `hyperlinks` feature (`set -as terminal-features ',<TERM>:hyperlinks'` if undetected), while older tmux drops the OSC and keeps the text.
 
-Mouse capture hands plain clicks to `ox`, and some terminals, such as kitty and WezTerm, also deliver clicks on links to an app that captures the mouse. `App::emit_status_hyperlinks` therefore keeps the frame's link rects, and a left press without modifiers inside one opens its URL through `App::open_browser`. A press with modifiers is left to the terminal, so a terminal that opens OSC 8 links on Ctrl+click or Cmd+click doesn't open the page twice. Terminals that ignore OSC control strings leave the visible text intact, while those that print raw OSC bytes may show escape text as the legacy fallback.
-
-Every control character is filtered out of a URL before the envelope is written, so a malformed value can't break out of the OSC 8 sequence.
+`App::emit_status_hyperlinks` retains each frame's link rects so unmodified left clicks open the URL via `App::open_browser` (needed when capture intercepts clicks on kitty, WezTerm, and non-OSC-8 terminals), while modified clicks pass to the terminal to avoid double-opening. Control characters are stripped from URLs before emission.
 
 ## Design Decisions
 
-1. **Capture the mouse and select text in the app.** Wheel scrolling has to work under tmux, which forwards a wheel event to a pane only when the pane reports the mouse, and capture then takes drags from the terminal. Selecting and copying in the app keeps one behavior across terminals, and the bypass modifier still gives the terminal's own selection.
-2. **Anchor both ends to content slots.** A screen-row range would drift when blocks stream in below it or another agent inserts output above it. Content anchors plus a column resolve against every frame's slot tops, so the highlight stays on the same text.
-3. **Copy on release, once.** Copying on each drag update would drive the clipboard worker on every motion event and raise a notice per update. The release copies what the final selection shows.
-4. **Pause tail-follow while dragging.** Followed output would move text out from under the pointer, so a drag pauses it and the release resumes it.
-5. **Offer both an OSC 8 link and a click target.** Terminals disagree on the modifier that opens a link, and some do not support OSC 8 at all, so a status-bar segment carries the hyperlink and a plain press also opens the page.
+1. **Capture the mouse and select text in the app.** Wheel scrolling under tmux requires mouse capture, which takes drags from the terminal. In-app selection gives uniform behavior across terminals while the bypass modifier preserves native selection.
+2. **Anchor both ends to content slots.** Prevents highlights from drifting when blocks stream below or insert above.
+3. **Copy on release, once.** Avoids spamming the clipboard worker and copy notices on every drag motion event.
+4. **Pause tail-follow while dragging.** Stops streaming output from moving text out from under the pointer until release.
+5. **Offer both an OSC 8 link and a click target.** Covers terminals with differing modifier conventions or no OSC 8 support.
 
 ## Out of Scope
 
-- **OSC 8 links in markdown body text.** A link in body text would require threading URLs through the markdown renderer.
-- **Selecting text outside the chat.** The capture serves chat scrollback, while the input and modals stay keyboard-driven.
-- **Copying source text without gutters or soft-wrap breaks.** Each block would need to map rendered rows back to its source ([#300](https://github.com/hakulab/oxide-code/issues/300)).
+- **OSC 8 links in markdown body text.** Would require threading URLs through the markdown renderer.
+- **Selecting text outside the chat.** Input and modals stay keyboard-driven.
+- **Copying source text without gutters or soft-wrap breaks.** Requires mapping rendered rows back to block sources ([#300](https://github.com/hakulab/oxide-code/issues/300)).
 
 ## Sources
 

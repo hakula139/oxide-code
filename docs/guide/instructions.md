@@ -1,34 +1,34 @@
 # Instruction Files
 
-Instruction files are Markdown files that give the assistant persistent, project-specific context. oxide-code loads them when a session starts and includes them with every request.
+Instruction files are Markdown files loaded at session start and included with every request.
 
 ## Where Instruction Files Can Live
 
-oxide-code reads `AGENTS.md`, the file Codex and other agents read, and falls back to Claude Code's `CLAUDE.md`, so existing Claude Code instructions work unchanged. Each location loads the first file in the table that has content:
+oxide-code reads `AGENTS.md` (used by Codex and other agents) and falls back to Claude Code's `CLAUDE.md`. Each location loads its first non-empty file:
 
 | Scope   | Files, in the order tried                                                                                                                   | Purpose                                    |
 | ------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
 | User    | `~/.config/ox/AGENTS.md` (or `$XDG_CONFIG_HOME/ox/AGENTS.md`), then `~/.claude/CLAUDE.md` (or `$CLAUDE_CONFIG_DIR/CLAUDE.md`)               | Personal preferences that apply everywhere |
 | Project | `<dir>/AGENTS.md`, `<dir>/CLAUDE.md`, then `<dir>/.claude/CLAUDE.md`, in each directory from the project root down to the working directory | Team-shared conventions                    |
 
-The project root is the nearest directory at or above the working directory that holds a `.git` directory or file, or the working directory outside a repository. [Sessions](sessions.md#where-sessions-live) are grouped by the same project. Files closer to the working directory appear later in the prompt and conventionally take precedence. For a working directory of `/repo/crates/core`, files load in this order:
+The project root is the nearest directory at or above the working directory holding a `.git` directory or file, or the working directory outside a repository (matching [Sessions](sessions.md#where-sessions-live)). Files closer to the working directory appear later in the prompt and conventionally take precedence. For `/repo/crates/core`, load order is:
 
 1. The user file
 2. `/repo/`
 3. `/repo/crates/`
 4. `/repo/crates/core/`
 
-- **Each file loads once**, at the first location that resolves to it, so a `CLAUDE.md` symlink to `AGENTS.md` adds nothing. A location whose first file with content was already loaded loads nothing further.
-- **A project file stays in the project**, since it comes from the checkout, so it must resolve to a regular `.md` file inside the project root. A symlink to `AGENTS.md` or to `docs/ai.md` works. A file that fails any of these conditions is skipped with a notice, and oxide-code tries the next file at that location. When the project root is your home directory or one of its ancestors, oxide-code skips any project file it reaches through a symlink. User files can link anywhere.
-- **A file that cannot be read**, such as one without read permission or one that is not UTF-8 text, is skipped with a notice, and the next file is tried.
-- **`@path` imports** stay as written, since oxide-code does not expand them as Claude Code does.
+- **Deduplication**: Each file loads once at its first resolved location (so a `CLAUDE.md` symlink to `AGENTS.md` adds nothing). If a location's first non-empty file was already loaded, that location loads nothing else.
+- **Project containment**: Project files must resolve to regular `.md` files inside the project root (symlinks to `AGENTS.md` or `docs/ai.md` work). When the project root is your home directory or an ancestor, any project file reached through a symlink is skipped. Invalid files emit a notice and fall through to the next candidate. User files may link anywhere.
+- **Unreadable files**: Unreadable or non-UTF-8 files emit a notice and fall through to the next candidate.
+- **`@path` imports**: Kept verbatim (not expanded as in Claude Code).
 
 ## When Changes Take Effect
 
-- **Edits during a session** reach the model as a reminder with your next prompt. A date change since the session started arrives the same way.
-- **Resuming a session** with `/resume` or `ox -c` keeps the instructions and date from when the session started, so the cached prompt prefix stays reusable. Edits made since then arrive as a reminder with your next prompt.
-- **`/clear` and `/compact`** start from the current files and date.
+- **Mid-session edits and date changes**: Delivered as a reminder on your next prompt.
+- **Resume** (`/resume`, `ox -c`): Keeps the original instructions and date so the cached prompt prefix stays valid. Subsequent edits arrive as a reminder on your next prompt.
+- **`/clear` and `/compact`**: Reload current files and date.
 
 ## Writing Effective Instructions
 
-Keep instructions concise, since they consume tokens on every request, and focus on rules the assistant cannot infer from the code. Run `/init` to have the assistant draft a file from the codebase or suggest edits to an existing one.
+Keep instructions concise (they consume tokens on every request) and focus on rules the assistant cannot infer from the code. Run `/init` to draft or suggest edits to a file from the codebase.

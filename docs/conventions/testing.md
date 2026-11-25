@@ -4,10 +4,10 @@ Follow the [shared test requirements](https://github.com/hakulab/nixos-config/bl
 
 ## Placement
 
-- Unit tests live in a `#[cfg(test)] mod tests` in the file they test.
-- `crates/ox/tests/` holds end-to-end tests that run the `ox` binary through `CARGO_BIN_EXE_ox`. Every end-to-end test except the live tests builds as one binary, `tests/cli/`, whose `main.rs` holds the shared helpers and declares one module file per area, such as `config_check` or `headless`, so each area gets its own file while the suite links once. `tests/live.rs` holds the [live tests](#live-tests). Test cross-module behavior in the module that composes those modules, such as `engine` tests that run a full turn against a mock server.
-- Share fixtures across test modules from a `#[cfg(test)] mod testing` child of the module that owns what they build, so they can construct private fields. Give the child its own `use` imports and the narrowest [visibility](rust.md#visibility) its callers allow. Put an inline child under a `// ── Testing ──` banner, and declare a file-backed one with the other child modules. A test-only constructor on the type itself, such as `TokenUsage::new`, stays an `#[cfg(test)]` method in the type's `impl`.
-- Gate a `testing` module on `#[cfg(any(test, feature = "testing"))]` when another crate's tests use its fixtures, directly or through another gated module's fixtures. Those crates turn it on through `ox-core`'s `testing` feature in their dev-dependencies. Put a test-only method they call, such as `SessionStore::open_at`, in an `impl` block inside that module, so the `.cargo/mutants.toml` exclusions for gated modules cover it. Any other item a gated fixture needs, such as a `Default` impl, takes the same gate in place at its narrowest visibility. Gated code also compiles without `cfg(test)`, where Clippy disallows `unwrap()`, so it states each invariant with `expect`. Move the module's fixtures that only its own crate's tests use into a sibling `#[cfg(test)] mod local_testing`, since the feature build would compile them as dead code.
+- Unit tests live in `#[cfg(test)] mod tests` in the file they test.
+- `crates/ox/tests/` holds end-to-end tests running `ox` via `CARGO_BIN_EXE_ox`. Non-live tests build as one binary, `tests/cli/`, whose `main.rs` holds shared helpers and declares one module per area (such as `config_check` or `headless`) so the suite links once. `tests/live.rs` holds [live tests](#live-tests). Test cross-module behavior in the composing module (such as `engine` tests against a mock server).
+- Share fixtures across test modules from a `#[cfg(test)] mod testing` child of the owning module so they can access private fields, with its own `use` imports and the narrowest [visibility](rust.md#visibility) needed. Put inline `testing` modules under `// ── Testing ──`, and declare file-backed ones alongside other child modules. Keep test-only constructors on the type itself (such as `TokenUsage::new`) as `#[cfg(test)]` methods in its `impl`.
+- Gate cross-crate fixtures on `#[cfg(any(test, feature = "testing"))]` (enabled via `ox-core`'s `testing` dev-dependency feature). Put test-only methods they call (such as `SessionStore::open_at`) in an `impl` block inside that module so `.cargo/mutants.toml` exclusions cover them, and apply the same gate at narrowest visibility to any other helper item (such as a `Default` impl). Because gated code compiles without `cfg(test)`, use `expect` where Clippy disallows `unwrap()`. Put single-crate fixtures in a sibling `#[cfg(test)] mod local_testing` so the feature build does not compile them as dead code.
 
 ## Grouping and Naming
 
@@ -41,25 +41,25 @@ The end-to-end tests in `crates/ox/tests/cli/` group by area as [Placement](#pla
 
 - Use real names and branded content only when the code under test matches on them, as with model IDs.
 - Use established infrastructure: `wiremock` for HTTP, `temp-env` to isolate environment variables, `TestBackend` with `insta` for TUI snapshots, and extracted trait fakes for dependencies that are difficult to mock.
-- Tests share one process environment, and `temp-env` serializes only code inside its closures. A read outside a closure can therefore see another test's temporary value. If a test's result depends on a variable that other tests set, such as the home directory or `XDG_DATA_HOME`, run it inside a `temp-env` closure that pins the variable. Pin the home directory through `HOME_VAR` in `util::path::testing`, because Windows reads `USERPROFILE`. Types constructed by many tests should take environment-derived values as arguments, as `Client::new` does with the TLS trust and device ID that `main` supplies.
+- Tests share one process environment, and `temp-env` serializes only code inside its closures. Any test depending on a variable other tests modify (such as home directory or `XDG_DATA_HOME`) must pin it inside a `temp-env` closure. Pin home via `HOME_VAR` in `util::path::testing` (Windows reads `USERPROFILE`). Types constructed by many tests should take environment-derived values as arguments (as `Client::new` takes TLS trust and device ID from `main`).
 
 ## Hermetic Tests
 
-Every test must pass wherever the suite runs: on each supported OS and in CI. Never skip, `#[ignore]`, retry, or `cfg`-gate a test to get it past its environment. The [live tests](#live-tests) are the one exception, since they send paid requests. Move the dependency behind a trait fake, as `util::tls` does for the Security framework, or pin what the test reads. A platform `cfg` gate is only for code that exists on that platform alone.
+Every test must pass on every supported OS and in CI. Never skip, `#[ignore]`, retry, or `cfg`-gate a test around environment issues (only [live tests](#live-tests) are ignored, since they send paid requests). Put environment dependencies behind a trait fake (as `util::tls` does for the Security framework) or pin what the test reads. Reserve platform `cfg` gates for platform-only code.
 
-Run the suite as a non-root user, since root ignores the access denials and read-only files that `util::fs::testing` sets up.
+Run the suite as a non-root user, since root ignores access denials and read-only files that `util::fs::testing` sets up.
 
 ## Time
 
-- Drive timers with `#[tokio::test(start_paused = true)]` and the production constants. Tokio advances the paused clock through each `sleep`, making the test deterministic and independent of wall-clock time.
-- Never swap a timing constant under `cfg(test)`, since the tests would then exercise values the binary never ships.
-- Never sleep to order events or assert on elapsed time. Wait for the event itself through a channel or returned handle.
-- Paused time cannot drive a test waiting on a child process because the paused clock stops advancing while a blocking-pool task runs, and on Windows Tokio reads child pipes on that pool. Have the code under test take its deadline as a future that the test completes when an event is observable, or poll with a bounded deadline for a condition caused by the child, such as a file it writes. `tool::bash` does both, through `execute_until` and the PID helpers in its `testing` module.
+- Drive timers with `#[tokio::test(start_paused = true)]` and production constants so Tokio advances paused time deterministically.
+- Never swap a timing constant under `cfg(test)`, since tests would exercise values the binary never ships.
+- Never sleep to order events or assert on elapsed time. Wait for the event itself through a channel or handle.
+- Paused time cannot drive tests waiting on a child process because the paused clock stops while a blocking-pool task runs (and on Windows, Tokio reads child pipes on that pool). Pass the deadline as a future the test completes once an event is observable, or poll with a bounded deadline for a child-produced condition such as a file (`tool::bash` does both via `execute_until` and PID helpers in its `testing` module).
 
 ## Assertions
 
-- An act may sit inside its assertion when the test checks only its return value, as with a pure function, a query, or a render. An act whose side effects the test checks stands as its own step. A test that checks several states in sequence repeats act and assert, with each later step's setup directly above its act. A test that runs several cases of different shapes keeps each case's steps together and puts the blank line between cases, while cases of one shape go in a table that a loop runs with the steps separated as usual.
-- Assert an empty sequence, such as a `Vec`, slice, or `VecDeque`, with `assert_eq!(x, [])`, which prints the unexpected items when it fails, and write `[] as [T; 0]` where the element type does not infer. Compare another collection with an empty value of its type, as in `assert_eq!(map, HashMap::new())`.
+- Inline an act inside its assertion when checking only a return value (pure function, query, or render). Separate acts whose side effects are checked. Multi-state tests repeat act and assert with each step's setup directly above its act. Multi-case tests of distinct shapes separate cases with blank lines, while homogeneous cases go in a table driven by a loop.
+- Assert an empty sequence (`Vec`, slice, `VecDeque`) with `assert_eq!(x, [])` (printing unexpected items on failure), writing `[] as [T; 0]` when the element type does not infer. Compare other collections against an empty instance, as in `assert_eq!(map, HashMap::new())`.
 
 ## Snapshots
 

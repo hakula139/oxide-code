@@ -1,50 +1,48 @@
 # System Prompt
 
-The `prompt` module builds what the model reads about its role and its session: static sections shared by every session, an environment section for the session's machine and directory, and a user context that carries the instruction files, the date, the model's identity, and the permission mode.
+The `prompt` module constructs the model's context: shared static sections, a per-session environment block, and a user context carrying instruction files, local date, model identity, and permission mode.
 
 ## Request Layout
 
-The client sends the system prompt as text blocks, with the identity block `You are Claude Code, Anthropic's official CLI for Claude.` placed as [Client](client.md#request-shape) describes, followed by the static sections and then the environment section. The static sections are identical in every session, so their block carries the prompt-cache breakpoint described in [Client](client.md#cache-breakpoints). The environment varies by session and follows the breakpoint.
+The client sends the system prompt as text blocks: the identity block `You are Claude Code, Anthropic's official CLI for Claude.` ([Client](client.md#request-shape)), the shared static sections carrying the prompt-cache breakpoint ([Client](client.md#cache-breakpoints)), and the per-session environment section after the breakpoint.
 
-The user context travels as a `<system-reminder>` in a user message that leads the conversation on the wire and that the transcript never stores, so an edited instruction file leaves the system prompt byte-identical and its cache entry valid. A `/model` swap writes a new cache entry, since prompt caches are scoped to the model, while the earlier model's entries stay valid for a swap back within their lifetime.
+User context travels as a `<system-reminder>` in an unpersisted leading user message on the wire, keeping the system prompt byte-identical and cached across instruction edits. `/model` swaps write a new model-scoped cache entry while prior models' entries stay warm until expiry.
 
 ## Static Sections
 
-The static sections follow the order and much of the wording of Claude Code's prompt, whose layout [System Prompt Architecture](../research/api/system-prompt.md) records: an introduction, System, Doing tasks, Executing actions with care, Using your tools, Tone and style, and Output efficiency. They differ wherever `ox` behaves differently from Claude Code:
+Static sections follow Claude Code's order and wording ([System Prompt Architecture](../research/api/system-prompt.md): introduction, System, Doing tasks, Executing actions with care, Using your tools, Tone and style, Output efficiency), diverging wherever `ox` differs:
 
-- **Harness.** The introduction says the model runs in oxide-code, names the config files and the `AGENTS.md` instruction files `ox` reads, says a project's `.ox/config.toml` cannot add allow rules or change credentials, the endpoint, or TLS trust, says Claude Code's settings, hooks, skills, slash commands, and MCP servers have no effect, and points usage questions to `/help` and the [user guides](../guide/README.md).
-- **Permissions.** The System section describes the four [permission modes](../guide/permissions.md#modes) and explains that the check reads each command of a chain on its own while the mode decides shell syntax it cannot analyze. Each denial's tool result names what denied the call, and a `plan` denial names the tools `plan` still runs and tells the model to finish investigating and present its plan.
-- **Links.** Tone and style asks for full issue and pull request URLs, which terminals open, since the TUI renders `owner/repo#123` as plain text.
+- **Harness.** Identifies oxide-code, names `ox` config and `AGENTS.md` files, notes that project `.ox/config.toml` cannot add allow rules or change credentials, endpoint, or TLS trust, notes that Claude Code settings, hooks, skills, slash commands, and MCP servers do not apply, and points usage questions to `/help` and the [user guides](../guide/README.md).
+- **Permissions.** Explains the four [permission modes](../guide/permissions.md#modes) and per-segment shell matching. Denials name their cause, and `plan` denials list the tools `plan` allows and direct the model to finish investigating and present its plan.
+- **Links.** Requests full issue and PR URLs because the TUI renders `owner/repo#123` as plain text.
 
 ## Environment
 
-The environment section lists the working directory, whether it is in a Git repository, the platform, the shell that runs `bash` tool calls, the user's login shell from `$SHELL`, and the OS version. The `bash` tool always runs `bash -c`, so the section names bash as the shell and lists the login shell separately, for commands the model suggests the user run in their own terminal.
-
-A session records the environment with its prompt context, as [Persistence](persistence.md#prompt-context) describes, and a resume in the same directory replays it. A resume in another directory detects the environment again.
+Lists working directory, Git repo presence, platform, `bash` (the tool shell), the user's `$SHELL` separately (for user-run suggestions), and OS version. Recorded with prompt context ([Persistence](persistence.md#prompt-context)) and replayed verbatim on same-directory resume, or re-detected when resuming in another directory.
 
 ## User Context
 
-The leading user message carries the user context: the instruction files that [Instruction Files](../guide/instructions.md) describes, the local date, the model's name, exact ID, and knowledge cutoff, and the active permission mode. The System section describes each mode, so the mode section only names the active one, and in `plan` it also names the tools that still run and asks the model to investigate and then present its plan. The `plan` denial names the same tools through `plan_runs` over `ToolRegistry::plan_tools`, so the two texts cannot disagree. `PromptParts::seen` records what the model has seen of these values.
+The leading user message carries [instruction files](../guide/instructions.md), local date, model name / exact ID / knowledge cutoff, and active permission mode (in `plan`, also listing allowed tools via `plan_runs` over `ToolRegistry::plan_tools` so prompt and denial text agree). `PromptParts::seen` tracks what the model has seen.
 
-Before each prompt, the engine loads the user context again and compares it with what the model has seen. When an instruction file, the date, the model, or the mode changed, it appends a `<system-reminder>` with only the changed values to the prompt's user message, which transcript displays hide, and a removed instruction file produces a reminder that the earlier instructions no longer apply.
+Before each prompt, the engine reloads user context and appends a display-hidden `<system-reminder>` with only changed values (or a removal notice when an instruction file disappears):
 
-- **Mode switches.** A switch through `/mode`, Tab, or Shift+Tab applies before the next user context render, gated call, or round boundary, whichever comes first. At each round boundary, the engine also compares the mode with what the model has seen and appends any reminder to the round's tool results, which the request folds into the last result, so a switch during a turn reaches the model with its next request, ahead of any prompt queued with it, and `seen` names the mode the model was last told.
-- **Resume.** A resumed session whose recorded context predates the mode, or that resumes in another mode, names the current one on its first prompt.
-- **Compaction.** The engine renders a fresh user context for the summarized transcript and counts it as seen, since no earlier request started with that transcript.
+- **Mode switches.** Applied before the next user-context render, gated call, or round boundary. At round boundaries, any unseen mode change appends a reminder to tool results (folded into the last result on the wire) ahead of queued prompts and updates `seen`.
+- **Resume.** Names the current mode on the first prompt if saved context predates mode tracking or resumed under a different mode.
+- **Compaction.** Renders fresh user context for the summary root and marks it seen.
 
 ## Tool Descriptions
 
-Each tool's description states the facts that would otherwise cost the model a failed call: how `bash` runs a command, the `read` row format that `edit` must strip from `old_string`, the regex dialect `grep` accepts and its line-by-line matching, and the files a search skips without saying so. Facts that a tool result already reports, such as a binary file refusal, a truncated listing or excerpt, or files a search skipped for size, stay in the result.
+Descriptions state only facts needed to avoid failed calls (`bash` execution model, `read` line prefixes that `edit` must strip from `old_string`, `grep`'s regex dialect and line-by-line matching, and silently skipped search files). Result-reported facts (binary refusals, truncation, size-skipped files) stay in tool output.
 
 ## Design Decisions
 
-1. **Keep the identity block and name oxide-code in the introduction.** Non-Haiku OAuth requests fail without the exact identity text as its own block, and the API validates the first block after attribution, so the block stays byte-identical. The model still needs to know its real harness. One that believes it is Claude Code edits `.claude/settings.json` to stop a prompt, which `ox` never reads, so the introduction names oxide-code and what it reads.
-2. **Follow Claude Code's sections and rewrite every sentence `ox` contradicts.** Claude models are tuned against Claude Code's prompt, so reusing its structure and wording where the harnesses behave alike keeps behavior predictable. A whole copy would describe Claude Code's harness, such as a persistent working directory between `bash` calls and clickable `owner/repo#123` references, so each sentence is checked against what `ox` does, and rules the copied prompt states twice are merged into one sentence.
-3. **Describe the permission modes statically, and name the active one in the user context.** The modes and the chain rule are the same in every session, so they belong in the cached static prefix. The active mode changes within a session, so it travels in the user context, where a switch costs one reminder and leaves the cached prefix intact, and the model plans in `plan` without first spending a denied call. The `plan` denial still tells the model to present its plan, since a denied call is the latest instruction it reads.
-4. **Name the shell that runs commands.** Claude Code reports `$SHELL` because its Bash tool runs commands through the user's shell. `ox` runs every command with `bash -c`, so reporting only `$SHELL` invites zsh or fish syntax that bash rejects.
-5. **Lead the messages with the user context.** Claude Code does the same. An instruction edit then changes only a message, so the cached system prompt survives it, and a catch-up reminder delivers that edit or a model swap without rewriting history the model has already read.
-6. **Keep tool descriptions to facts that prevent a failed call.** Every request sends every description, so a fact the result already reports would cost tokens on each request to save one round in a rare case.
-7. **Fold a reminder after tool results into the last result on the wire.** The model reads a text block after tool results as a new user turn, and Claude Code's A/B found that repeating that shape taught the model to end its turn empty, so its `mergeUserContentBlocks` folds such text into the last result. The Anthropic request builder joins any text that follows a tool result to that result's content, while the transcript keeps the reminder as its own block, so displays still hide it and a resume replays it unchanged. The fold depends only on the stored messages, so each request reproduces the cached prefix.
+1. **Keep the identity block and name oxide-code in the introduction.** Non-Haiku OAuth requests require the exact identity block after attribution, while naming oxide-code in the introduction stops the model from editing `.claude/settings.json` or assuming Claude Code features.
+2. **Follow Claude Code's sections and rewrite every sentence `ox` contradicts.** Reusing familiar structure keeps Claude's behavior predictable while stripping inaccurate assumptions (such as persistent `bash` cwd or clickable `owner/repo#123`) and merging duplicated rules.
+3. **Describe the permission modes statically, and name the active one in the user context.** Keeps static rules in the cached prefix while mode switches cost one reminder without busting cache or spending a denied call in `plan` (keeping the plan reminder on denials as the latest instruction).
+4. **Name the shell that runs commands.** Reporting `bash` alongside `$SHELL` prevents zsh / fish syntax in `bash -c` calls (unlike Claude Code, which invokes `$SHELL`).
+5. **Lead the messages with the user context.** Matches Claude Code so instruction edits leave the system cache valid and catch-up reminders propagate edits or model swaps without rewriting history.
+6. **Keep tool descriptions to facts that prevent a failed call.** Avoids spending per-request tokens repeating details already returned in tool results.
+7. **Fold a reminder after tool results into the last result on the wire.** A standalone text block after tool results looks like a new user turn and can teach the model to end its turn empty, so the Anthropic wire folds trailing text into the preceding tool result (matching Claude Code) while the transcript keeps the reminder separate for hidden display and exact replay.
 
 ## Sources
 

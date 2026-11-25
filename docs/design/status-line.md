@@ -1,75 +1,68 @@
 # Status Line
 
-The status line is the TUI's top row, a user-ordered roster of built-in segments. Most segments read in-process state, `git-branch` and the pull request segments probe `git` and the GitHub CLI, the context and session-cost segments count prompt-cache tokens, and the usage-limit segments read response headers. The [`[tui]` section of the configuration guide](../guide/configuration.md#tui-terminal-ui) lists each segment, what it renders, and how often it refreshes, and segments outside the [default order](#default-order) are opt-in.
+The status line is the TUI's top row, a user-ordered roster of built-in segments reading in-process state, background `git` / `gh` probes, prompt-cache token counts, and response rate-limit headers. The [`[tui]` configuration guide](../guide/configuration.md#tui-terminal-ui) lists each segment's output and refresh interval, and segments outside the [default order](#default-order) are opt-in.
 
 ## Segments
 
-`StatusLineSegment` in `config.rs` defines the roster, and `[tui] status_line = [...]` or `OX_STATUS_LINE`, which takes the same comma-separated names, sets its order. Segment colors and the separator glyph come from the active theme.
+`StatusLineSegment` in `config.rs` defines the roster, configured via `[tui] status_line = [...]` or `OX_STATUS_LINE` (comma-separated). Theme slots supply segment colors and the separator glyph.
 
-`StatusBar` keeps only its own state (the spinner, the clock minute, the git probe results, and the links it last drew) and delegates segment formatting to `ox_tui::components::status::line`. Each frame, `App` hands it a `StatusView` that borrows `LiveSessionInfo` for the session's values, such as the model, title, usage, and usage limits, and adds the run state, the queued prompt count, and the task list's progress, so every value the bar shows has one owner.
+`StatusBar` holds only local UI state (spinner, clock minute, git probe results, last drawn link rects) and delegates formatting to `ox_tui::components::status::line`. Each frame, `App` builds a `StatusView` borrowing `LiveSessionInfo` (model, title, usage, rate limits) plus run state, queued prompt count, and task progress, keeping one owner per value.
 
-Segment render rules:
+Render rules:
 
-- A segment returns `None` when its data is unavailable, so an absent branch, title, usage, or price renders no placeholder, and only rendered segments are joined, so omitted ones leave no extra separator.
-- Segments use active theme styles, leaving color customization to theme overrides.
-- The model segments drop the `Claude` family prefix to save width, while other surfaces keep the full label.
-- The review segment appears only when branch protection requires a review, because GitHub otherwise reports no review decision.
-- Segments that approach a limit escalate their color with the percent they show (**Escalate usage by the percent shown**), and each permission mode has its own color (**Show every configured permission mode**).
+- Unavailable data returns `None`, omitting the segment and its separator with no placeholder.
+- Model segments strip the `Claude` family prefix to save width, while other surfaces keep the full label.
+- `pull-request-review` appears only when branch protection requires a review (otherwise GitHub reports no decision).
+- Usage segments escalate color by displayed percentage (**Escalate usage by the percent shown**), and permission modes carry per-mode colors (**Show every configured permission mode**).
 
 ## Usage Data
 
-`TokenUsage` reads Anthropic's `usage` payload directly, and `TokenUsage::context_tokens()` returns input + cache creation + cache read. Auto-compaction reads the context tokens of the latest request plus an estimate of the messages appended since.
+`TokenUsage` maps Anthropic's `usage` payload directly, with `TokenUsage::context_tokens()` returning input + cache creation + cache read. Auto-compaction adds an estimate of messages appended since the latest request.
 
-Each `agent_turn` reports the latest provider usage and the total across its requests, including one the user cancelled or that failed partway. `Engine` keeps the turn's estimate of the next request for the next auto-compaction check, updates the displayed usage snapshot, adds the turn's estimated cost when rates are known, and emits `Event::UsageUpdated(UsageSnapshot)` before the turn ends. The summarization requests behind `/compact` and auto-compaction add their cost the same way. Each request also lands in the session's `usage` rows with its model ID and prompt-cache TTL, so a resumed session can price it at the rates it ran with. The background title request runs alongside the first turn, and once its response reports usage, it records its own row and hands the record to `Engine`, which adds the Haiku-priced cost at its next `UsageUpdated`.
+Each `agent_turn` reports latest and total usage across all requests (including cancelled or failed ones). `Engine` saves the next-request estimate for auto-compaction, updates the usage snapshot, adds estimated cost when rates are known, and emits `Event::UsageUpdated(UsageSnapshot)` before the turn ends. Compaction summaries add cost the same way, and every request writes a `usage` row with model ID and prompt-cache TTL for accurate pricing on resume. The background title task records its own row and passes it to `Engine`, which folds its Haiku cost into the next `UsageUpdated`.
 
-Known first-party Claude API rates live in `model/pricing.rs`, and the `model.rs` catalog attaches them to each model. Unknown models render context without session cost. The estimate excludes account discounts, marketplace billing, data-residency multipliers, fast mode, and server-side tool surcharges.
+First-party Claude rates live in `model/pricing.rs`, attached via `model.rs`. Unknown models show context without cost. Estimates exclude account discounts, marketplace billing, data-residency multipliers, fast mode, and server-tool surcharges.
 
-The session cost accumulates from requests that reported usage, and each change of basis resets what no longer applies, with [Session Cost](persistence.md#session-cost) covering the stored side:
+Basis resets ([Session Cost](persistence.md#session-cost) covers persistence):
 
-- **Model swap.** The snapshot is recomputed with the new model's context window.
-- **Compaction.** Manual and automatic compaction clear the context usage, since the visible transcript changed, and keep the session cost. Each emits `UsageUpdated` once its summary requests end, so the summary's cost shows before the next request, and the context segment stays hidden until the next request reports usage.
-- **`/clear`.** Both reset, and a title cost already recorded but not yet shown stays with the session it titled.
-- **Resume.** `/resume` and `ox -c` clear the context usage and restore the session cost.
+- **Model swap.** Recomputes the snapshot against the new model's context window.
+- **Compaction.** Clears context usage while keeping session cost, emitting `UsageUpdated` after summary requests finish and hiding context until the next request reports usage.
+- **`/clear`.** Resets both, leaving any pending title cost with the old session.
+- **Resume.** `/resume` and `ox -c` clear context usage and restore session cost.
 
 ## Usage Limits
 
-A Claude subscription sign-in's responses carry `anthropic-ratelimit-unified-5h-utilization` and `-5h-reset`, and the same pair for `7d`. Utilization is the spent share of the window, from 0 to 1, and reset is the window's end in Unix seconds. API keys receive neither pair, so the segments stay hidden for them.
+Claude subscription responses include `anthropic-ratelimit-unified-5h-utilization` / `-5h-reset` and the `7d` pair (utilization from 0 to 1 and Unix-second reset). API keys receive neither, so both segments stay hidden.
 
-The SSE pump reads the headers of each attempt's response and forwards them as `ResponseEvent::RateLimits` ahead of the stream's events. The agent loop emits `Event::RateLimitsUpdated`, and `LiveSessionInfo` keeps the latest. The summarization requests behind a compaction report their limits the same way.
-
-A window renders its utilization floored to a whole percent, after rounding to basis points so a share like `0.29` keeps its exact percent. The App's tick drops a window once its reset time passes, since the spent share no longer applies until the next response reports the new window. A sign-in or sign-out drops both windows, which belonged to the previous credential.
+The SSE pump emits `ResponseEvent::RateLimits` from response headers ahead of stream events (including for compaction summaries), and the engine emits `Event::RateLimitsUpdated` into `LiveSessionInfo`. Utilization renders floored to a whole percent after rounding to basis points (preserving exact values like `0.29`). The App tick drops expired windows after their reset time, and sign-in or sign-out drops both windows.
 
 ## Default Order
 
-`StatusLineSegment::DEFAULT` owns the default order, which the [configuration example](../guide/configuration.md#config-file) spells out.
-
-Claude Code's status line is a command you configure, and each line it prints becomes a row. oxide-code renders its built-in segments in one row because Ratatui owns the app chrome.
-
-The default order tracks reading flow: location and branch orient the user, model and usage describe cost and context pressure, the permission mode says what the next call may do, and run state sits near the end because it changes most often.
+`StatusLineSegment::DEFAULT` owns the default order shown in the [configuration example](../guide/configuration.md#config-file). Unlike Claude Code's external-command status line, `ox` renders built-in segments in one Ratatui row following reading flow: location and branch orient the user, model and usage track cost and context pressure, permission mode states allowed actions, and run state sits near the end because it changes most often.
 
 ## Narrow Rows
 
-The status line keeps the highest-priority segment, truncating it if needed, then fits the others from highest to lowest utility and renders them in configured order, so a smaller segment can use space a larger omitted one left. From lowest to highest utility, the order is `theme` → `session-id` → `thread-title` → `current-time` → `pull-request-review` → `pull-request-checks` → `pull-request` → `git-branch` → `current-dir` → `task-progress` → `queued-prompts` → `session-cost` → `weekly-limit` → `five-hour-limit` → `context-used` → `permission-mode` in `auto` or `manual` → `model` → `model-with-effort` → `permission-mode` in `plan` or `yolo` → `run-state`.
+The bar keeps the highest-priority segment (truncating if needed), greedily fits remaining segments from highest to lowest utility, and renders survivors in configured order so smaller segments can fill space left by omitted larger ones. Utility order (lowest → highest): `theme` → `session-id` → `thread-title` → `current-time` → `pull-request-review` → `pull-request-checks` → `pull-request` → `git-branch` → `current-dir` → `task-progress` → `queued-prompts` → `session-cost` → `weekly-limit` → `five-hour-limit` → `context-used` → `permission-mode` (`auto` / `manual`) → `model` → `model-with-effort` → `permission-mode` (`plan` / `yolo`) → `run-state`.
 
 ## Design Decisions
 
-1. **Typed segment roster.** A typed segment list is enough for first-party data and keeps rendering inside Ratatui, so the config needs no format DSL.
-2. **Implemented segments only.** Unsupported names fail config parsing, so the accepted vocabulary matches the shipped segments.
-3. **Local usage first.** Context and session cost use provider usage that oxide-code observed, in the current process or recorded in the session store.
-4. **Segment omission.** Missing usage, unknown pricing, an absent branch, and blank titles disappear cleanly with no placeholder.
-5. **Background probes.** `git-branch` and the pull request segments re-probe as background child processes, 5 s and 60 s respectively after the previous probe finishes, with at most one run of each in flight, and each probe runs only while the roster has a segment that reads it. One `gh pr view` call serves all three PR segments, reading the checks and review state only when the roster shows them, since those fields add every check on the head commit to the query. The bar stays current after `git checkout` or `gh pr create`, and a slow `gh` round-trip never stalls input or rendering.
-6. **A branch change clears the pull request.** The segments clear and probe again at once, so the bar never pairs the new branch with the previous branch's link, checks, or review state.
-7. **Probe deadline.** A probe that outlives 30 s is killed, so a hung `git` or network-bound `gh` cannot freeze its segment for the rest of the session.
-8. **Checks like `gh pr checks`.** The checks segment buckets each check's state the way the GitHub CLI does and counts only the latest run of a re-run check, so a passing re-run clears an earlier failure. Cancelled checks get their own bucket, below failing and pending. A workflow that failed to start counts as failing, where `gh` leaves it pending even though it will never run.
-9. **Usage limits from response headers.** Every response already reports the account's utilization, so the segments add no extra request and refresh with each turn.
-10. **Show every configured permission mode.** The segment confirms the active mode after a switch, including a return to `auto` or `manual`. In a narrow row, those two drop before the model, while `plan` and `yolo` rank just below run state so the active restriction or bypass stays visible. `auto` and `manual` take `muted`, `yolo` takes `error`, as Claude Code colors its bypass mode, and `plan` takes `accent`, since it only restricts.
-11. **Escalate usage by the percent shown.** The context and limit segments use the same pair of thresholds and compare the floored percent in their labels, keeping each label's color aligned with its number. Session cost has no limit to approach, so it keeps one color. The 70% warning matches Claude Code's `WARNING_THRESHOLD` in `src/services/rateLimitMessages.ts`, below which Claude Code shows no usage-limit warning. Default [auto-compaction](compaction.md) begins near 97% of the window, which puts context at 90% about as close to its end as a limit at 90%. oh-my-pi changes its context color at 50%, 70%, and 90%, as well as at 150k, 270k, and 500k tokens, and on a 1M window those token thresholds would flag most of a long session. Its quota windows change color at 50% and 80%.
+1. **Typed segment roster.** First-party segments keep rendering in Ratatui without a format DSL, leaving colors to theme overrides.
+2. **Implemented segments only.** Unknown names fail config parsing so the vocabulary matches shipped segments.
+3. **Local usage first.** Context and cost reflect provider usage observed in-process or stored in the session database.
+4. **Segment omission.** Unavailable values vanish cleanly with no placeholder.
+5. **Background probes.** `git-branch` and PR probes run as background child processes 5 s and 60 s after the prior probe ends (at most one of each in flight, active only when configured). One `gh pr view` serves all three PR segments, requesting checks and review state only when configured to avoid fetching all head-commit checks unnecessarily, keeping `git checkout` and `gh pr create` reflected without stalling input or rendering.
+6. **A branch change clears the pull request.** Clearing and re-probing immediately prevents pairing a new branch with the old branch's link, checks, or review state.
+7. **Probe deadline.** Killing probes after 30 s prevents a hung `git` or `gh` from freezing a segment for the session.
+8. **Checks like `gh pr checks`.** Buckets match the GitHub CLI and count only the latest run of re-run checks so a passing re-run clears an earlier failure. Cancelled checks get their own bucket below failing and pending, and workflows that failed to start count as failing even though `gh` leaves them pending.
+9. **Usage limits from response headers.** Reading response headers avoids extra requests and refreshes every turn.
+10. **Show every configured permission mode.** Confirms switches even back to `auto` or `manual`. On narrow rows, `auto` / `manual` drop before the model while `plan` / `yolo` sit just below run state so active restrictions or bypasses stay visible. Tones: `auto` / `manual` use `muted`, `yolo` uses `error` (matching Claude Code's bypass color), and `plan` uses `accent`.
+11. **Escalate usage by the percent shown.** Context and limit segments share thresholds against their floored displayed percent so color matches the number, while session cost has no limit and keeps one color. The 70% warning matches Claude Code's usage-limit warning threshold, and 90% puts context near default [auto-compaction](compaction.md) (near 97%) just as a limit nears exhaustion. oh-my-pi uses 50%, 70%, and 90% plus fixed 150k, 270k, and 500k token thresholds (which would flag most of a 1M window) and 50% and 80% for quota windows.
 
 ## Out of Scope
 
-- **A user-command segment.** It would run a shell command on each refresh, which needs its own failure and refresh policy ([#166](https://github.com/hakulab/oxide-code/issues/166)).
-- **ccusage integration.** It would re-read stored sessions to total cost, while the status line already shows the response's own usage.
-- **Pricing for other providers.** It waits for the data-driven model catalog ([#152](https://github.com/hakulab/oxide-code/issues/152)).
+- **A user-command segment.** Needs its own refresh and failure policy ([#166](https://github.com/hakulab/oxide-code/issues/166)).
+- **ccusage integration.** Re-reads stored sessions when the bar already tracks response usage directly.
+- **Pricing for other providers.** Awaits the data-driven model catalog ([#152](https://github.com/hakulab/oxide-code/issues/152)).
 
 ## Sources
 

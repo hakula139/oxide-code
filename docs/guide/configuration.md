@@ -1,55 +1,51 @@
 # Configuration
 
-oxide-code loads configuration from multiple sources, merged in order of increasing priority:
+oxide-code merges configuration in order of increasing priority:
 
 1. **Built-in defaults.**
 2. **User config file**: `~/.config/ox/config.toml` (or `$XDG_CONFIG_HOME/ox/config.toml`).
 3. **User drop-ins**: `*.toml` files in `~/.config/ox/config.d/` (or `$XDG_CONFIG_HOME/ox/config.d/`), in file-name order.
-4. **Project config file**: `.ox/config.toml` in the nearest directory from the working directory up to the project root that has one. The project root is the nearest directory at or above the working directory that holds a `.git` directory or file, or the working directory outside a repository.
-5. **[Environment variables](#environment-variables)**: Override every file. A command-line flag such as `--mode` overrides them in turn.
+4. **Project config file**: The nearest `.ox/config.toml` from the working directory up to the project root (the nearest directory at or above the working directory containing a `.git` directory or file, or the working directory outside a repository).
+5. **[Environment variables](#environment-variables)**: Override every file. CLI flags such as `--mode` override them in turn.
 
-Run `/config` to see each resolved value next to the layer that set it: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$OX_MODEL`, `--mode`, or `session` after a change made during the session.
+Run `/config` to see each resolved value and its layer: `default`, `user`, `config.d/<name>`, `project`, an environment variable such as `$OX_MODEL`, `--mode`, or `session` (changed during the session).
 
 ## Layers
 
 ### Merging
 
-Each file sets only the keys it names, and a later layer wins key by key, so a drop-in that sets `client.effort` keeps the `client.model` from `config.toml`. Tables merge recursively, including `[tui.theme.overrides]`, with these replacement and list rules:
+Later layers override earlier ones key by key and merge tables recursively, including `[tui.theme.overrides]`, with these exceptions:
 
-- **`client.auth` and `client.headers`** come whole from the last layer that sets them. An empty header map clears the lower map.
-- **`permission.extra_roots` and the class lists under `permission.deny`, `permission.ask`, and `permission.allow`** concatenate, so the entries from every layer apply.
-- **Other arrays**, such as `tui.status_line`, come whole from the last layer that sets them.
-- **`auto_threshold_tokens` and `auto_threshold_percent`** act as one setting, so a layer that sets either replaces both.
+- **`client.auth` and `client.headers`** replace lower layers whole. An empty header map clears lower headers.
+- **`permission.extra_roots` and the class lists under `permission.deny`, `permission.ask`, and `permission.allow`** concatenate across layers.
+- **Other arrays**, such as `tui.status_line`, replace lower layers whole.
+- **`auto_threshold_tokens` and `auto_threshold_percent`** act as one setting, so setting either replaces both.
 
 ### Drop-Ins
 
-`config.d/` lets a dotfile manager or a team script own one file without editing your `config.toml`, and holds your local overrides when the [Home Manager module](install.md#home-manager) writes `config.toml`. Drop-ins share the `config.toml` schema and count as user config.
+`config.d/` holds drop-ins that share the `config.toml` schema and count as user config. Dotfile managers and team scripts can write separate files there without editing `config.toml`, and you can put local overrides there when the [Home Manager module](install.md#home-manager) manages `config.toml`.
 
-- **Order**: Drop-ins load after `config.toml`, sorted by file name byte by byte, so a numeric prefix such as `10-team.toml` sets their order.
-- **Skipped entries**: Hidden files, subdirectories, and files without a `.toml` extension are skipped, and a symlink loads its target.
-- **Errors**: An invalid drop-in, including a symlink whose target is missing, stops startup with an error that names the file, as does a malformed permission pattern or extra root in it.
+- **Order**: Load after `config.toml` in byte-sorted file-name order, so numeric prefixes such as `10-team.toml` control precedence.
+- **Skipped entries**: Hidden files, subdirectories, and non-`.toml` files are skipped. Symlinks load their target.
+- **Errors**: Any invalid drop-in (including a broken symlink, malformed permission pattern, or invalid extra root) stops startup and names the file.
 
 ### Project Config
 
-A project file comes from the checkout, so it cannot redirect your credentials, change the endpoint or TLS trust, or widen what runs without asking. It can set only these keys, and any other fails the config load:
+Because a project file comes from the checkout, it cannot redirect credentials, change the endpoint or TLS trust, or widen approvals. It may set only these keys (any other fails the config load):
 
-- **`[client]`**: `model`, `effort`, `max_tokens`, `max_tool_rounds`, `prompt_cache_ttl`, and the [`[client.compaction]`](#clientcompaction-context-compression) table.
+- **`[client]`**: `model`, `effort`, `max_tokens`, `max_tool_rounds`, `prompt_cache_ttl`, and [`[client.compaction]`](#clientcompaction-context-compression).
 - **`[permission]`**: `deny` and `ask`.
-- **`[tui]`**: Every key, with `tui.theme.base` limited to a built-in theme name. The TUI refuses to start when it names a file.
+- **`[tui]`**: Every key, except `tui.theme.base` must name a built-in theme (a file path stops TUI startup).
 
-A TOML error in a project file gives only its line, column, and key, since the parser's message can quote a value.
-
-The project file must resolve inside the project root, so one that leads outside it through a symlinked file or `.ox` directory fails the config load with an error that names only the link. An unreadable candidate, an entry that is not a regular file, or a link whose target cannot resolve also fails the load. A link to a file inside the repository works, unless the project root is your home directory or one of its ancestors, as with a dotfiles repository at `~`. There, a project file reached through any symlink fails the load.
+TOML errors in a project file report only line, column, and key so values are never quoted. The file must resolve inside the project root. Any symlinked file or `.ox` directory pointing outside the root fails the load (naming only the link), as does an unreadable candidate, non-regular file, or broken symlink. Symlinks inside the repository work unless the project root is your home directory or one of its ancestors (such as a dotfiles repository at `~`), where any project file reached through a symlink fails.
 
 ## Checking the Config
 
-`ox config check` validates the config files that apply in the working directory and the environment variables as startup does, and prints each file it read. Warnings go to stderr, and an invalid value exits with status 1 and the startup error.
-
-The check skips credential files, stored logins, and CA bundles, so it never opens the keychain or connects, which lets it run in CI or a Nix build. Instruction files go unchecked. Other paths, such as a theme file or an extra root, resolve against the filesystem where the check runs.
+`ox config check` validates the config files and environment variables for the working directory as startup does and lists each loaded file. Warnings go to stderr, and any error exits with status 1. It skips credential files, stored logins, CA bundles, and instruction files, so it never touches the keychain or network and can run in CI or a Nix build. Other paths, such as theme files and extra roots, resolve against the current filesystem.
 
 ## Config File
 
-All fields are optional, so set only the values you want to override. [Config Keys](#config-keys) lists every key with its type and default.
+All fields are optional. [Config Keys](#config-keys) lists every key, type, and default.
 
 ```toml
 # ~/.config/ox/config.toml, a drop-in in ~/.config/ox/config.d/,
@@ -83,13 +79,13 @@ status_line = [
 
 #### `model`: Supported Models
 
-oxide-code supports `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`, each with a 1M-token context window and adaptive thinking. Fable 5.1 is not available to every account or gateway.
+oxide-code supports `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`, each with a 1M-token context window and adaptive thinking. Fable 5.1 is not available on every account or gateway.
 
-Any other ID, such as a gateway alias, is sent verbatim without `effort`, `thinking`, or context management. Its `max_tokens` defaults to `16000`, it gets no cost estimate, and automatic compaction stays off unless you set `auto_threshold_tokens`. oxide-code warns about such IDs at startup, and for a `claude-*` ID that names a model family or carries a `[1m]` suffix, it suggests the matching supported model.
+Unrecognized IDs (such as gateway aliases) are sent verbatim without `effort`, `thinking`, or context management: `max_tokens` defaults to `16000`, cost estimates are omitted, and auto-compaction stays off unless `auto_threshold_tokens` is set. Startup warns on unknown IDs and suggests a supported model when a `claude-*` ID names a model family or carries a `[1m]` suffix.
 
 #### `effort`: Reasoning Effort
 
-`effort` sets the `output_config.effort` request field to `"low"`, `"medium"`, `"high"`, `"xhigh"`, or `"max"`, all of which every supported model accepts. When it is unset, each model uses the API's default:
+`effort` sets `output_config.effort` to `"low"`, `"medium"`, `"high"`, `"xhigh"`, or `"max"`, accepted by every supported model. When unset, each model uses its API default:
 
 | Model      | Default  |
 | ---------- | -------- |
@@ -98,32 +94,30 @@ Any other ID, such as a gateway alias, is sent verbatim without `effort`, `think
 | Sonnet 5.5 | `high`   |
 | Haiku 5.5  | `medium` |
 
-A `/model` swap carries the current effort over to the new model.
+A `/model` swap carries the current effort over. Anthropic's [effort documentation](https://platform.claude.com/docs/en/build-with-claude/effort) recommends these levels for Haiku 5.5 and for agentic Sonnet 5.5 work:
 
-Anthropic's [effort documentation](https://platform.claude.com/docs/en/build-with-claude/effort) recommends these levels for Haiku 5.5, and for Sonnet 5.5 on agentic work:
-
-- `max` / `xhigh`: Only where you have measured a quality gain, since turns run much longer and cost more.
+- `max` / `xhigh`: Only after measuring a quality gain, since turns run longer and cost more.
 - `high`: Knowledge work, harder or longer agent tasks, and strict instruction following.
-- `medium`: The starting point for most work, including well-specified agentic coding and multistep tool use.
-- `low`: Chat and short, latency-sensitive tasks. At this level, long agent tasks are more likely to stop early or skip verifying a change.
+- `medium`: Starting point for well-specified agentic coding and multistep tool use.
+- `low`: Chat and short, latency-sensitive tasks (long agent tasks are more likely to stop early or skip verification).
 
-For Opus 5.5, the documentation names no starting level and recommends an effort sweep on your own evaluations. Fable 5.1's recommended start is its `high` default.
+Opus 5.5 has no fixed starting level (run an effort sweep on your own evaluations). Fable 5.1's recommended start is its `high` default.
 
 #### `max_tokens`: Response Ceiling
 
-When unset, `max_tokens` is `64000` on the supported models, half their 128K output ceiling, since `effort` controls how much the model thinks and this cap only bounds runaway output. Other IDs get `16000`, which fits the lower output ceilings of older or smaller models. The default follows a `/model` swap.
+When unset, `max_tokens` defaults to `64000` on supported models (half their 128K output ceiling, since `effort` controls thinking and this cap only bounds runaway output) and `16000` on other IDs. The default follows `/model` swaps.
 
 #### `max_tool_rounds`: Agent-Loop Safety Cap
 
-When unset, the agent loop has no per-turn round cap. `max_tool_rounds = N` ends the turn after `N` rounds with a runaway-loop error. The cap guards against tools stuck in a retry loop, since normal agent sessions routinely run hundreds of rounds.
+Unset by default (unbounded), since normal agent sessions routinely run hundreds of rounds. `max_tool_rounds = N` ends a turn after `N` rounds with a runaway-loop error to guard against stuck retry loops.
 
 #### `base_url`: Endpoint
 
-Set `base_url` in user config or `ANTHROPIC_BASE_URL`. The URL must use HTTPS unless it points at localhost for a local proxy, and it must omit query strings, fragments, and a username or password. Requests go to `/v1/messages` under it, so leave `/v1` off the URL. A path prefix is supported, and a trailing slash makes no difference. [LLM Gateways](authentication.md#llm-gateways) covers authenticating against a gateway.
+Set `base_url` in user config or `ANTHROPIC_BASE_URL`. The URL must use HTTPS (except localhost for a local proxy) and omit query strings, fragments, and credentials. Requests go to `/v1/messages` under it, so leave `/v1` off. Path prefixes are supported, and trailing slashes make no difference. See [LLM Gateways](authentication.md#llm-gateways) for gateway authentication.
 
 #### `extra_ca_certs`: Corporate Trust Anchors
 
-oxide-code verifies TLS certificates against the operating system's trust store, so a corporate CA installed system-wide works without extra configuration. For a private-CA endpoint whose root CA is not in that store, set `extra_ca_certs` to a PEM bundle of the roots to add:
+oxide-code verifies TLS against the OS trust store, so system-installed corporate CAs work automatically. To add a private root CA, point `extra_ca_certs` at a PEM bundle:
 
 ```toml
 [client]
@@ -131,27 +125,21 @@ base_url = "https://gw.llm.corp.example/anthropic"
 extra_ca_certs = "~/.config/ox/corp-cachain.pem"
 ```
 
-The path must be absolute or start with `~/`. `OX_EXTRA_CA_CERTS` wins over this field, and [`NODE_EXTRA_CA_CERTS`](authentication.md#llm-gateways) applies only when neither is set. Both variables may hold a relative path, which resolves from the working directory as in Node.
-
-On macOS, a server certificate valid for longer than Apple's 825-day limit is accepted when it chains to a CA in the bundle, even one already installed system-wide, unless that CA is one of Apple's built-in roots.
+The path must be absolute or start with `~/`. Precedence is `OX_EXTRA_CA_CERTS`, then `extra_ca_certs`, then [`NODE_EXTRA_CA_CERTS`](authentication.md#llm-gateways). Both variables accept relative paths resolved from the working directory, matching Node. On macOS, server certificates valid longer than Apple's 825-day limit are accepted when they chain to a CA in this bundle (even one installed system-wide), except Apple's built-in roots.
 
 #### `prompt_cache_ttl`: Cache Duration
 
-`"1h"`, the default, costs more per cache write than the server's default `"5m"` and pays off in sessions with pauses over 5 minutes.
+Default `"1h"` costs more per cache write than the server's `"5m"` default and pays off in sessions with pauses over 5 minutes.
 
 ### `[client.compaction]`: Context Compression
 
-Auto-compaction is on by default for the supported models, and `auto_enabled = false` turns it off. The default trigger leaves room for the next response and a safety buffer, and `auto_threshold_tokens` or `auto_threshold_percent` (`1` to `100`) makes compaction happen earlier.
+Auto-compaction is on by default for supported models (`auto_enabled = false` disables it). By default it triggers with room for the next response plus a safety buffer, and `auto_threshold_tokens` or `auto_threshold_percent` (`1` to `100`) compacts earlier.
 
-The two thresholds are mutually exclusive. Either resolves to a token count clamped into the usable range, so values below `50000` tokens snap up to that floor and values above the model-derived safe trigger snap down. That ceiling shifts with `/model`, so a global threshold sized for a larger context window keeps working after a swap.
-
-For other model IDs, the default and percent-based triggers stay off, while an explicit token threshold still works, with values below `50000` raised to it.
-
-[Compaction](slash-commands.md#compaction) covers when automatic compaction runs and what happens when it fails.
+The two thresholds are mutually exclusive. Both resolve to a token count clamped between `50000` and the model's safe trigger (which adjusts across `/model` swaps). For unrecognized model IDs, default and percent triggers stay off, while an explicit `auto_threshold_tokens` still applies (with a floor of `50000`). See [Compaction](slash-commands.md#compaction) for trigger timing and failure handling.
 
 ### `[interaction]`: Question and Approval Deadlines
 
-Questions and permission approvals wait without a time limit by default. Set a positive whole number of seconds in user config or a user drop-in to limit their total wait:
+Questions and approvals wait indefinitely by default. Set a positive integer `timeout_seconds` in user config or a drop-in to cap their total wait:
 
 ```toml
 [interaction.questions]
@@ -163,18 +151,18 @@ timeout_seconds = 60
 on_timeout = "deny"
 ```
 
-- **Questions** choose the recommended option when time runs out, or skip when there is none, and `on_timeout = "skip"` always skips. The tool result marks a timeout answer as automatic, so it does not count as a user instruction.
-- **Approvals** deny when time runs out, and `on_timeout = "allow"` approves only that call, without granting later calls or overriding a configured deny rule.
+- **Questions**: Default `on_timeout = "recommended"` picks the recommended option or skips if none exists. `on_timeout = "skip"` always skips. Timeout answers are marked automatic in the tool result and do not count as user instructions.
+- **Approvals**: Default `on_timeout = "deny"` denies the call. `on_timeout = "allow"` approves only that single call without granting later calls or overriding deny rules.
 
-The timer starts when the request is published and does not reset while you type, and TUI prompts show the configured duration and action. Headless runs ignore these deadlines, since they abort questions and deny unapproved calls at once, as [Headless Mode](headless.md) describes. Remove `timeout_seconds` to disable a deadline.
+The timer starts when the prompt appears and does not reset while typing, and TUI prompts show the configured duration and action. Headless runs ignore these deadlines because they abort questions and deny unapproved calls immediately ([Headless Mode](headless.md)). Remove `timeout_seconds` to disable a deadline.
 
 ### `[tui]`: Terminal UI
 
-- **`show_thinking = true`** sets `thinking.display = "summarized"`, so the API streams reasoning text. The chat shows it as it arrives, then collapses it to a `Thought` header that **Ctrl+O** or a click expands. With the default `false`, reasoning stays hidden, but the chat still shows the progress notes the model writes before each tool call (`thinking.display = "updates"`). Haiku 5.5 writes no such notes, so its requests use `thinking.display = "omitted"`.
-- **`show_welcome = false`** blanks the chat region until you submit a prompt, which helps when piping or screen-recording.
-- **`status_line`** lists at least one segment from the table below, in display order. When unset, it is the list in the [example](#config-file).
+- **`show_thinking = true`** sets `thinking.display = "summarized"` so the API streams reasoning live, then collapses it to a `Thought` header (**Ctrl+O** or click expands it). With the default `false`, reasoning stays hidden while pre-tool progress notes still display (`thinking.display = "updates"`). Haiku 5.5 writes no progress notes and uses `thinking.display = "omitted"`.
+- **`show_welcome = false`** blanks the chat until the first prompt (useful when piping or screen-recording).
+- **`status_line`** lists at least one segment from the table below in display order (default shown in the [example](#config-file)).
 
-A segment with no data, such as a git branch on detached HEAD or usage limits under an API key, is omitted. The three pull request segments run `gh pr view`, so they need the GitHub CLI on `PATH`. Clicking one opens the PR, its checks, or its changed files, as does **Ctrl+click** or **Cmd+click** in terminals that open links that way. `pull-request-review` shows only on repositories whose branch protection requires a review, since GitHub reports no review decision otherwise.
+Segments with no data (such as `git-branch` on detached HEAD or usage limits under an API key) are omitted. The three pull request segments run `gh pr view` (requiring `gh` on `PATH`) and open the PR, checks, or changed files on click, **Ctrl+click**, or **Cmd+click**. `pull-request-review` appears only when branch protection requires a review.
 
 | Segment               | Renders                                                       | Refresh         |
 | --------------------- | ------------------------------------------------------------- | --------------- |
@@ -198,32 +186,30 @@ A segment with no data, such as a git branch on detached HEAD or usage limits un
 | `theme`               | `Theme: mocha`, or a theme file's name                        | On `/theme`     |
 | `current-time`        | `HH:MM` in the local timezone                                 | Per minute      |
 
-Claude subscription sign-ins report how much of each usage-limit window is spent with every response. A window disappears when it resets and stays gone until a response reports it again. [Theming](theming.md#status-line-segments) lists the colors these segments take as a window fills.
+Claude subscription sign-ins report usage-limit windows on each response and drop a window after reset until the next response reports it. [Theming](theming.md#status-line-segments) lists their color thresholds. Narrow rows drop lower-priority segments first and truncate the highest-priority one if needed (see [Status Line](../design/status-line.md#narrow-rows)).
 
-On a narrow row, lower-priority segments drop first, and the highest-priority segment is truncated if needed. [Status Line](../design/status-line.md#narrow-rows) lists the priority order.
-
-`OX_STATUS_LINE` takes the same segment names, comma-separated with optional whitespace, as in `OX_STATUS_LINE="model, run-state"`. A value with no segments, an empty entry between commas, or an unknown segment name fails startup.
+`OX_STATUS_LINE` accepts the same segment names, comma-separated with optional whitespace (such as `OX_STATUS_LINE="model, run-state"`). Values with no segments (such as whitespace or lone commas), empty entries between commas, or unknown names fail startup.
 
 ### `[tui.theme]`: Terminal Theme
 
-`tui.theme.base` picks a built-in theme or a theme file, and `[tui.theme.overrides]` patches individual color slots. [Theming](theming.md) covers both.
+`tui.theme.base` selects a built-in theme or a theme file, and `[tui.theme.overrides]` patches color slots. See [Theming](theming.md).
 
 ### `[permission]`: Tool Approval
 
-`[permission]` sets the permission mode, the deny, ask, and allow rules, the extra workspace roots, and the classifier's model and instructions. [Permissions](permissions.md) describes each.
+`[permission]` configures the mode, deny / ask / allow rules, extra workspace roots, and classifier model and instructions. See [Permissions](permissions.md).
 
 ## Logs
 
-`ox` logs warnings and errors by default. Set `RUST_LOG=info` (or `debug`) for more detail. `ox` skips a directive it cannot parse and names it on stderr at startup. Where the log goes depends on the frontend:
+`ox` logs warnings and errors by default (`RUST_LOG=info` or `debug` adds detail). Unparsable directives are skipped with a warning on stderr.
 
-- **TUI**: `$XDG_STATE_HOME/ox/log/oxide-code.log` (default `~/.local/state/ox/log/oxide-code.log`), shared by concurrent sessions. Before an event would push a nonempty file past 10 MiB, the file moves to `oxide-code.log.1`, replacing the previous backup. On Unix, the log directory and its files are private to your user.
+- **TUI**: `$XDG_STATE_HOME/ox/log/oxide-code.log` (default `~/.local/state/ox/log/oxide-code.log`), shared across concurrent sessions and private to your user on Unix. Rotates to `oxide-code.log.1` (replacing the prior backup) before exceeding 10 MiB.
 - **Headless runs and `--list`**: stderr.
 
 ## Reference
 
 ### Config Keys
 
-Each key goes in the table its prefix names, so `client.compaction.auto_enabled` is `auto_enabled` under `[client.compaction]`. A project file sets only the keys [Project Config](#project-config) lists.
+Keys live under the table their prefix names (for example, `client.compaction.auto_enabled` is `auto_enabled` under `[client.compaction]`). Project files allow only the keys in [Project Config](#project-config).
 
 | Key                                        | Type    | Default                         | Description                                                                                                             |
 | ------------------------------------------ | ------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
@@ -293,9 +279,9 @@ A variable that maps to a config key overrides that key in every file.
 | `XDG_DATA_HOME`                          | -                                          | Base of the sessions, the device ID, and the oxide-code login, default `~/.local/share`                                                     |
 | `XDG_STATE_HOME`                         | -                                          | Base of the log directory, default `~/.local/state`                                                                                         |
 
-`ox` treats an empty value of each variable in the table as unset. Boolean variables accept `1`, `true`, `yes`, or `on` to enable and `0`, `false`, `no`, or `off` to disable, in any letter case. Numeric variables take a whole number: at least `1` for `OX_MAX_TOKENS` and `OX_MAX_TOOL_ROUNDS`, at least `0` for `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`, and `1` to `100` for `OX_COMPACTION_AUTO_THRESHOLD_PERCENT`. Any other value makes `ox` exit at startup with an error naming the variable and the values it accepts. The matching config keys accept the same ranges, and an out-of-range value there names its file and line.
+Empty values count as unset. Booleans accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `off` (case-insensitive). Integers require ≥ 1 for `OX_MAX_TOKENS` and `OX_MAX_TOOL_ROUNDS`, ≥ 0 for `OX_COMPACTION_AUTO_THRESHOLD_TOKENS`, and `1` to `100` for `OX_COMPACTION_AUTO_THRESHOLD_PERCENT`. Invalid values fail startup naming the variable and accepted values. Matching config keys enforce the same ranges and report file and line.
 
-`ox` also follows these variables, which its libraries read:
+Library-level variables also honored:
 
-- **`HTTPS_PROXY`, `HTTP_PROXY`, and `ALL_PROXY`** send requests through a proxy, and `NO_PROXY` lists comma-separated hosts that skip it. The lower-case names work too, and `ALL_PROXY` applies where the variable for the request's scheme is unset.
-- **`SSL_CERT_FILE` and `SSL_CERT_DIR`** replace the system trust store on Linux with a PEM bundle or directories of certificates.
+- **`HTTPS_PROXY`, `HTTP_PROXY`, and `ALL_PROXY`** (lowercase accepted) route requests through a proxy (`ALL_PROXY` applies when a scheme-specific variable is unset). `NO_PROXY` lists comma-separated bypass hosts.
+- **`SSL_CERT_FILE` and `SSL_CERT_DIR`** replace the system trust store on Linux with a PEM bundle or certificate directories.

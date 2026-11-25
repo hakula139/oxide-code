@@ -1,26 +1,23 @@
 # System Prompt Architecture
 
-Research notes on how [Claude Code](https://github.com/hakula139/claude-code) constructs its system prompt.
+Research notes on how Claude Code constructs its system prompt, injects context, and shapes Messages API requests.
 
 ## Section-Based Assembly
 
-Claude Code builds the system prompt from sections, discrete units with lazy, memoized resolution, which a `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker splits in two:
+Claude Code builds its system prompt from discrete sections with lazy, memoized resolution, split by a dynamic boundary marker into two groups:
 
-- **Static sections** (before the boundary): identity, system guidance, task guidance, tool usage, tone / style. Globally cacheable.
-- **Dynamic sections** (after the boundary): session-specific guidance, CLAUDE.md memory, environment info, MCP instructions, language preference, output style, token budget. Not cacheable.
+- **Static sections** (before the boundary, globally cacheable): identity, system guidance, task guidance, actions, tool usage, tone / style, output efficiency.
+- **Dynamic sections** (after the boundary, not cacheable): session guidance, CLAUDE.md memory, environment info, MCP instructions, language preference, output style, token budget.
 
-Resolution pipeline:
+Assembly pipeline:
 
-1. `getSystemPrompt()` collects the static and dynamic section definitions.
-2. Static sections resolve immediately, and dynamic sections are memoized promises.
-3. `resolveSystemPromptSections()` awaits all section promises.
-4. `buildEffectiveSystemPrompt()` applies the priority order override > coordinator > agent > custom > default.
-5. `splitSysPromptPrefix()` splits by cache boundaries and assigns each block a `cacheScope` (`global` / `org` / `null`), so the API can reuse cached prefixes across sessions.
-6. `buildSystemPromptBlocks()` wraps each block in a `TextBlockParam` with `cache_control` for the API.
+1. Collect static and dynamic section definitions, resolving static sections immediately and memoizing dynamic sections lazily.
+2. Resolve all sections and apply prompt priority: override > coordinator > agent > custom > default.
+3. Split on cache boundaries (consuming the boundary marker so it never reaches the request), assign each block a cache scope (`global` / `org` / `null`), and wrap each block in a `TextBlockParam` with `cache_control`.
 
 ## CLAUDE.md Loading Hierarchy
 
-Files load in priority order, the latest highest:
+Files load in priority order, latest highest:
 
 | Order | Type    | Path                                  | Description                           |
 | ----- | ------- | ------------------------------------- | ------------------------------------- |
@@ -31,7 +28,7 @@ Files load in priority order, the latest highest:
 | 5     | Local   | `CLAUDE.local.md`                     | Private project-specific (gitignored) |
 | 6     | AutoMem | `~/.claude/projects/<slug>/MEMORY.md` | Auto-accumulated memory               |
 
-Project files are discovered by walking from the git root down to the working directory, checking each directory on the way, so subdirectory instructions come later, at higher priority, than root-level ones. For a working directory of `/repo/crates/core`:
+Project files are discovered by walking from the git root down to the working directory, so subdirectory instructions load later and take higher priority than root-level ones. For `/repo/crates/core`:
 
 ```text
 /repo/CLAUDE.md              /repo/.claude/CLAUDE.md
@@ -41,28 +38,27 @@ Project files are discovered by walking from the git root down to the working di
 
 Features:
 
-- **`@include` directives**: `@./relative/path`, `@~/home`, `@/absolute`, recursive include with max depth 5.
+- **`@include` directives**: `@./relative/path`, `@~/home`, `@/absolute`, recursive up to depth 5.
 - **Conditional rules**: `.md` files with `paths:` frontmatter, glob-matched to decide inclusion.
-- **HTML comment stripping**: block-level only, via the marked lexer.
-- **MEMORY.md truncation**: lines after 200 are dropped.
+- **HTML comment stripping**: block-level HTML comments are stripped.
+- **`MEMORY.md` truncation**: lines after 200 are dropped.
 
 ## Context Injection Channels
 
-Claude Code splits dynamic context across two API surfaces, which keeps the cached prompt prefix stable.
+Claude Code splits dynamic context across two API surfaces to keep the cached prompt prefix stable. Both system context and user context are memoized once per conversation.
 
 ### System Parameter → Static Content
 
-The request's `system` field holds only static, cacheable content, assembled from `getSystemPrompt()` sections and `getSystemContext()`, which `buildSystemPromptBlocks()` marks with `global` or `org` scope:
+The `system` field holds cacheable prompt content marked with `global` or `org` scope, plus appended system context:
 
-- Identity prefix (separate block for API validation).
-- Billing attribution header.
-- Tool usage guidance, task guidance, tone / style instructions.
-- Session-specific guidance, MCP instructions, output style.
-- Git status and cache-breaker (appended via `appendSystemContext()`).
+- Billing attribution header and identity prefix (separate blocks for API validation).
+- Tool usage, task, and tone / style guidance.
+- Session guidance, MCP instructions, and output style.
+- System context: git status (skipped in remote sessions) and a cache-breaker.
 
 ### Messages[0] → Dynamic User Context
 
-CLAUDE.md content, the current date, and other user-facing context go into a synthetic user message that `prependUserContext()` puts at the front of the `messages` array:
+CLAUDE.md content and the current date go into a synthetic user message prepended to `messages`:
 
 ```json
 {
@@ -71,43 +67,34 @@ CLAUDE.md content, the current date, and other user-facing context go into a syn
 }
 ```
 
-The message is marked `isMeta: true`, hidden from the UI and visible to the model, and holds named sections (`# claudeMd`, `# currentDate`) inside the `<system-reminder>` wrapper. The split serves two ends:
+The message is marked `isMeta: true` (hidden from the UI, visible to the model) and wraps named sections (`# claudeMd`, `# currentDate`) in `<system-reminder>`. Splitting user context out of `system` serves two purposes:
 
-1. **Prompt caching.** Static system blocks stay identical across turns and sessions, so the server reuses the cached prefix. With CLAUDE.md in `system`, any edit would bust the cache for the entire prompt (~20K+ tokens).
-2. **Per-conversation memoization.** `getUserContext()` is memoized once per conversation, so the CLAUDE.md walk and date computation happen once.
-
-### Context Sources
-
-| Function             | Returns                     | Injected via                                 |
-| -------------------- | --------------------------- | -------------------------------------------- |
-| `getSystemContext()` | `gitStatus`, `cacheBreaker` | `appendSystemContext()` → `system` parameter |
-| `getUserContext()`   | `claudeMd`, `currentDate`   | `prependUserContext()` → `messages[0]`       |
-
-Both are memoized per conversation, and `getSystemContext()` skips git status in remote sessions.
+1. **Prompt caching.** Static system blocks stay identical across turns and sessions, avoiding busting ~20K+ cached tokens whenever CLAUDE.md changes.
+2. **Per-conversation memoization.** The CLAUDE.md walk and date computation run once per conversation.
 
 ## XML Tag Conventions
 
-Claude Code marks structured metadata in message content with XML-like tags, and the model is told to treat them as system-generated. Key tags:
+Claude Code marks structured metadata in message content with XML-like tags that the model is instructed to treat as system-generated:
 
-| Tag                      | Purpose                                                   | Where used                  |
-| ------------------------ | --------------------------------------------------------- | --------------------------- |
-| `<system-reminder>`      | Wraps injected context (CLAUDE.md, tool results metadata) | User messages, tool results |
-| `<local-command-caveat>` | Marks locally-run command output (not a user prompt)      | User messages               |
-| `<local-command-stdout>` | Stdout from local `!` commands                            | User messages               |
-| `<local-command-stderr>` | Stderr from local `!` commands                            | User messages               |
-| `<bash-stdout>`          | Tool result stdout                                        | Tool results                |
-| `<bash-stderr>`          | Tool result stderr                                        | Tool results                |
-| `<command-name>`         | Skill / slash command identifier                          | User messages               |
-| `<task-notification>`    | Background task completion                                | User messages               |
-| `<teammate-message>`     | Inter-agent communication                                 | User messages               |
+| Tag                      | Purpose                                                  | Where used                  |
+| ------------------------ | -------------------------------------------------------- | --------------------------- |
+| `<system-reminder>`      | Wraps injected context (CLAUDE.md, tool result metadata) | User messages, tool results |
+| `<local-command-caveat>` | Marks locally-run command output (not a user prompt)     | User messages               |
+| `<local-command-stdout>` | Stdout from local `!` commands                           | User messages               |
+| `<local-command-stderr>` | Stderr from local `!` commands                           | User messages               |
+| `<bash-stdout>`          | Tool result stdout                                       | Tool results                |
+| `<bash-stderr>`          | Tool result stderr                                       | Tool results                |
+| `<command-name>`         | Skill / slash command identifier                         | User messages               |
+| `<task-notification>`    | Background task completion                               | User messages               |
+| `<teammate-message>`     | Inter-agent communication                                | User messages               |
 
-The system prompt describes `<system-reminder>` tags this way:
+System prompt guidance for `<system-reminder>`:
 
 > "Tool results and user messages may include `<system-reminder>` or other tags. Tags contain information from the system. They bear no direct relation to the specific tool results or user messages in which they appear."
 
 ## API Request Metadata
 
-Each API request includes a `metadata` field whose `user_id` is a JSON object passed through `JSON.stringify()`, so the API receives a string:
+Each request includes `metadata.user_id` as a JSON-stringified object:
 
 ```json
 {
@@ -117,21 +104,19 @@ Each API request includes a `metadata` field whose `user_id` is a JSON object pa
 }
 ```
 
-- `session_id`: a UUID v4 from `randomUUID()`, generated once per session and again on conversation clear.
-- `device_id`: 64 hex characters from `randomBytes(32)`, created once and saved as `userID` in `~/.claude.json` by `getOrCreateUserID()` (2.1.87).
-- `account_uuid`: the OAuth account UUID under OAuth, and an empty string under API-key auth.
+- `session_id`: UUID v4, generated once per session and regenerated on conversation clear.
+- `device_id`: 64 hex characters (32 random bytes), created once and saved as `userID` in `~/.claude.json` (2.1.87).
+- `account_uuid`: OAuth account UUID under OAuth, empty string under API-key auth.
 
 ## Tool Definitions
 
-Tool schemas go in the API `tools` parameter, and the system prompt holds only tool guidance and which tools are enabled. Claude Code and opencode agree on this.
-
-## Prompt Caching
-
-`cache_control` on `TextBlockParam` blocks enables prompt caching, with the scopes and invariance rule that [Anthropic API § Prompt Caching Scope](anthropic.md#prompt-caching-scope) gives. The `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker separates cacheable from non-cacheable content, and caching works only while the static prefix stays identical across requests. [Client](../../design/client.md) covers which hosts oxide-code sends the global scope to.
+Tool schemas go in the API `tools` parameter, while the system prompt carries only tool guidance and enabled-tool descriptions. Claude Code and opencode follow the same split.
 
 ## System Block Layout
 
-Claude Code turns its flat section array into the block layout the API receives, consuming the boundary marker so it never reaches the request (`splitSysPromptPrefix` in `src/utils/api.ts` of the frozen 2.1.87 source, checked 2026-10-21). [System Prompt](../../design/prompt.md) and [Client](../../design/client.md#request-shape) cover oxide-code's block assembly and base-URL gating. Agentic streaming emits this 4-block shape: billing / attribution, identity, static, and dynamic. The billing block ships on every base URL, and only the static block's `cache_control` varies by base URL.
+Prompt caching attaches `cache_control` to `TextBlockParam` blocks following the scopes and invariance rules in [Anthropic API § Prompt Caching Scope](anthropic.md#prompt-caching-scope). Caching requires the static prefix to stay identical across requests. [System Prompt](../../design/prompt.md) and [Client](../../design/client.md#request-shape) cover oxide-code's block assembly and base-URL gating.
+
+Agentic streaming emits four system blocks (verified 2026-10-21 for Claude Code 2.1.87): the billing attribution header (`x-anthropic-billing-header`), the identity prefix (`"You are Claude Code, Anthropic's official CLI for Claude."`), static sections, and dynamic sections. The billing block ships on every base URL, and only the static block's `cache_control` varies by base URL.
 
 **First-party base URL** (`api.anthropic.com`), global cache active:
 
@@ -151,19 +136,15 @@ Claude Code turns its flat section array into the block layout the API receives,
 | 2 | Static sections joined (`\n\n`)  | `{ type: "ephemeral", ttl: "1h" }` |
 | 3 | Dynamic sections joined (`\n\n`) | -                                  |
 
-The third-party shape omits `scope` because org is the absent-field default, and that is the shape the Anthropic SDK ships for non-global ephemeral caches. `ttl` follows `prompt_cache_ttl`: the tables show `"1h"`, and `"5m"` omits the field as the server default.
-
-The static sections are intro, system, doing tasks, actions, tools, tone / style, and output efficiency. The dynamic sections include session guidance, environment, language, and MCP instructions.
-
-The attribution header is the billing `x-anthropic-billing-header` block, and the identity prefix is `"You are Claude Code, Anthropic's official CLI for Claude."`, matched by `CLI_SYSPROMPT_PREFIXES`.
+The third-party shape omits `scope` because org is the absent-field default (matching the Anthropic SDK for non-global ephemeral caches). `ttl` follows `prompt_cache_ttl`: the tables show `"1h"`, while `"5m"` omits the field as the server default.
 
 ## Request Headers
 
-Claude Code sends these headers on every Messages API request:
+Claude Code sends these headers on every Messages API request, with `?beta=true` on the URL:
 
 | Header                                      | Value                                  | Notes                              |
 | ------------------------------------------- | -------------------------------------- | ---------------------------------- |
-| `User-Agent`                                | `claude-cli/{VERSION} (external, cli)` | `getUserAgent()` in http.ts        |
+| `User-Agent`                                | `claude-cli/{VERSION} (external, cli)` |                                    |
 | `x-app`                                     | `cli`                                  |                                    |
 | `x-claude-code-session-id`                  | UUID v4 per session                    |                                    |
 | `anthropic-version`                         | `2023-06-01`                           |                                    |
@@ -173,24 +154,4 @@ Claude Code sends these headers on every Messages API request:
 | `x-stainless-os`                            | `MacOS` / `Linux` / etc.               | Anthropic SDK auto-injected        |
 | `x-stainless-arch`                          | `arm64` / `x64` / etc.                 | Anthropic SDK auto-injected        |
 
-[Anthropic API § Per-model beta sets](anthropic.md#per-model-beta-sets) lists the beta sequence Claude Code sends on agentic Claude 5.5 requests. Other betas join conditionally: `oauth-2025-04-20` for subscribers, tool-search headers when tool search is on, and `redact-thinking-*` for thinking redaction, among others.
-
-The URL includes a `?beta=true` query parameter.
-
-## Sources
-
-- `claude-code/src/bootstrap/state.ts`: `getSessionId()`, UUID v4 session ID generation
-- `claude-code/src/constants/prompts.ts`: section content, `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`, `<system-reminder>` guidance
-- `claude-code/src/constants/systemPromptSections.ts`: section caching system
-- `claude-code/src/constants/xml.ts`: XML tag constants (`<system-reminder>`, `<local-command-*>`, etc.)
-- `claude-code/src/context.ts`: `getUserContext()` (CLAUDE.md + date), `getSystemContext()` (git status)
-- `claude-code/src/query.ts`: `prependUserContext` / `appendSystemContext` wiring at query time
-- `claude-code/src/services/api/claude.ts`: `queryModel`, `buildSystemPromptBlocks`, `getAPIMetadata()`, `getCacheControl()`
-- `claude-code/src/utils/api.ts`: `splitSysPromptPrefix`, `prependUserContext`, `appendSystemContext`, cache scope assignment
-- `claude-code/src/utils/claudemd.ts`: `getMemoryFiles`, `@include`, conditional rules
-- `claude-code/src/utils/config.ts`: `getOrCreateUserID()` (`device_id`)
-- `claude-code/src/utils/context.ts`: token budgeting, `getUserContext`
-- `claude-code/src/utils/betas.ts`: `getAllModelBetas`, `getMergedBetas`, `shouldUseGlobalCacheScope`
-- `claude-code/src/utils/http.ts`: `getUserAgent()` (`claude-cli/VERSION (USER_TYPE, ENTRYPOINT)`)
-- `claude-code/src/utils/systemPrompt.ts`: `buildEffectiveSystemPrompt`, priority logic
-- `claude-code/src/utils/userAgent.ts`: `getClaudeCodeUserAgent()` (`claude-code/VERSION`)
+[Anthropic API § Per-Model Beta Sets](anthropic.md#per-model-beta-sets) lists the beta sequence for agentic Claude 5.5 requests. Additional betas join conditionally, including `oauth-2025-04-20` for subscribers, tool-search headers when tool search is enabled, and `redact-thinking-*` for thinking redaction.

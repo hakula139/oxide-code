@@ -4,13 +4,13 @@ Follow the [shared release procedure](https://github.com/hakulab/plugins/blob/ma
 
 ## Versioning
 
-- **Through 0.1.0:** tag `v0.1.0-alpha.N` from `main` whenever a user-visible batch or a fix for shipped behavior lands. Once the [rc gates](#stable-gates-for-010) are met, tag `v0.1.0-rc.1`. There is no beta stage.
-- **Soak:** each rc starts a seven-day soak. A bug found during the soak joins the next rc's milestone, its fix ships in the next rc, and the soak restarts. Once a soak ends without a new bug, tag `main` as `v0.1.0`.
-- **Main during a soak:** merge only `fix`, `docs`, `test`, and `chore(release)` PRs. Feature and refactor PRs wait for the stable tag, so the stable commit matches the soaked rc plus its fixes. Renovate automerges dependency bumps, so set `"enabled": false` in `.github/renovate.json` when the soak starts and revert it after the stable tag, both through `ci(renovate)` PRs.
-- **After 0.1.0:** a breaking change to the [stability surface](#stability-surface) bumps the minor version, and every other change bumps the patch version. Prereleases of the next minor (`v0.2.0-alpha.N`) follow the rules above.
-- **Milestones:** each planned release batch, including a patch release or prerelease, has its own milestone, such as `v0.2.0` or `v0.2.0-alpha.1`.
-- **Breaking changes:** a PR that breaks the stability surface marks its title with [`!`](docs/conventions/github.md#commit-titles) both before and after 0.1.0. Before 0.1.0, the version still advances within the prerelease sequence.
-- **MSRV:** the CI MSRV job checks `rust-version`. A bump affects `cargo install` users and Nix source builds, so it ships as a normal change that names the new floor in its PR title. The Nix jobs fail when the floor passes the Rust release of the flake's nixpkgs.
+- **Through 0.1.0:** tag `v0.1.0-alpha.N` from `main` for each user-visible batch or fix. Once the [rc gates](#stable-gates-for-010) pass, tag `v0.1.0-rc.1` (no beta stage).
+- **Soak:** each rc starts a seven-day soak. Any bug found joins the next rc's milestone, ships in the next rc, and restarts the soak. After a soak ends without a new bug, tag `main` as `v0.1.0`.
+- **Main during a soak:** merge only `fix`, `docs`, `test`, and `chore(release)` PRs so the stable commit matches the soaked rc plus its fixes, holding feature and refactor PRs until after the tag. Disable Renovate automerges by setting `"enabled": false` in `.github/renovate.json` at soak start and reverting after the stable tag (both via `ci(renovate)` PRs).
+- **After 0.1.0:** breaking changes to the [stability surface](#stability-surface) bump the minor version, and other changes bump the patch version. Prereleases of the next minor (`v0.2.0-alpha.N`) follow the same rules.
+- **Milestones:** each planned release batch (including patches and prereleases) gets its own milestone, such as `v0.2.0` or `v0.2.0-alpha.1`.
+- **Breaking changes:** mark stability-surface breaks with [`!`](docs/conventions/github.md#commit-titles) in the PR title both before and after 0.1.0 (before 0.1.0, versions still advance within prereleases).
+- **MSRV:** CI's MSRV job checks `rust-version`. Bumps affect `cargo install` and Nix source builds, so ship them as normal changes naming the new floor in the PR title (Nix jobs fail when the floor exceeds the flake's nixpkgs Rust release).
 
 ### Stability Surface
 
@@ -25,19 +25,17 @@ Within a minor version, stable releases keep these compatible:
 
 The TUI layout, prompt text, slash-command output wording, and log format are outside the surface.
 
-Before 0.1.0, config, environment variable, and session format changes may freely break earlier setups and files, with no migration hints, legacy fallbacks, or compatibility shims.
+Before 0.1.0, config, environment variable, and session formats may break freely with no migration hints, legacy fallbacks, or compatibility shims.
 
 ## Release Preparation
 
-Use devkit's shared changelog configuration.
-
-Security fixes describe the gap, affected releases, and published advisory as [SECURITY.md](SECURITY.md) promises. Add an advisory published later to every affected changelog section through a correction PR.
+Use devkit's shared changelog configuration. Security fixes describe the gap, affected releases, and published advisory as [SECURITY.md](SECURITY.md) promises (add later-published advisories to every affected changelog section via a correction PR).
 
 1. Set `[workspace.package].version` in `Cargo.toml`, then run `cargo update --workspace`.
 
 2. Set the `VERSION=` line in `docs/guide/install.md` to the release tag.
 
-3. For a stable tag, add the release's two [session resume fixtures](docs/design/persistence.md#compatibility), the SQL dump and the export snapshots with their insta headers deleted by `sed` from the first line through the second `---` line. `INSTA_UPDATE=unseen` then records how the new fixtures resume, while still failing if an earlier release's fixture now resumes differently:
+3. For a stable tag, add the two [session resume fixtures](docs/design/persistence.md#compatibility) by stripping insta headers (`sed` through the second `---`) from the SQL dump and export snapshots, then record them with `INSTA_UPDATE=unseen` (still failing if an earlier release's fixture resumes differently):
 
    ```bash
    session=crates/ox-core/src/session
