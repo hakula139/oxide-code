@@ -41,7 +41,7 @@ Run `ox`, type a task, and press **Enter**:
 
 ## Approve Tool Calls
 
-In the default `auto` permission mode, a separate model approves routine tool calls and asks for your confirmation on the rest. The approval prompt takes these keys:
+In the default `auto` permission mode, a separate model approves routine tool calls and prompts on the rest:
 
 | Key     | Effect                                                        |
 | ------- | ------------------------------------------------------------- |
@@ -51,13 +51,13 @@ In the default `auto` permission mode, a separate model approves routine tool ca
 | **F**   | Deny with a note the model reads                              |
 | **Esc** | Deny and end the turn                                         |
 
-When offered, **A** opens the pattern it will allow, such as `cargo test`, which you can edit before pressing **Enter**, for example to widen it to `cargo test *`. [Permissions](permissions.md) covers the other modes, your own rules, and the pattern syntax.
+When offered, **A** opens the proposed pattern (such as `cargo test`) for editing before **Enter** (for example widening to `cargo test *`). See [Permissions](permissions.md) for modes, rules, and pattern syntax.
 
 ## Tasks and Background Commands
 
-- **Task list**: For multi-step work, the assistant keeps a task list that the TUI shows above the input. It clears once every task is done and stays with the session through `/compact` and resume.
-- **Background shells**: The assistant can run a dev server, watcher, or long build in the background and read its output with `bash_output` while it keeps working. `/status` lists open shells. They survive **Esc** and end when you exit or start another session with `/clear`, `/archive`, or `/resume`. To stop one sooner, ask the assistant.
+- **Task list**: For multi-step work, the assistant tracks tasks above the input. The list clears once every task is done and persists across `/compact` and resume.
+- **Background shells**: The assistant can run a dev server, watcher, or long build in the background and read output via `bash_output` while continuing. `/status` lists open shells. They survive **Esc** and stop on exit, `/clear`, `/archive`, or `/resume` (or ask the assistant to stop one sooner).
 
 ## Customize Behavior
 
-Add an `AGENTS.md` file to your project root with project-specific instructions, such as coding conventions and the commands to run after a change. An existing `CLAUDE.md` works too, and `/init` has the assistant draft one from the codebase. [Instruction Files](instructions.md) covers where these files can live and how they combine.
+Add an `AGENTS.md` at your project root for conventions and verification commands (`CLAUDE.md` works too, and `/init` drafts one from the codebase). See [Instruction Files](instructions.md) for locations and precedence.

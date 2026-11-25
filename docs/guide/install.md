@@ -1,14 +1,14 @@
 # Installation
 
-How to install `ox` on macOS, Linux, and Windows. For first-run setup once installed, see the [quickstart](quickstart.md).
+Install `ox` on macOS, Linux, and Windows. See the [quickstart](quickstart.md) for first-run setup.
 
 ## System Requirements
 
 - **macOS**: 12 or later on Apple Silicon.
 - **Linux**: x86_64 Linux with glibc 2.39 or later, such as Ubuntu 24.04, Debian 13, Fedora 40, or RHEL 10.
-- **Windows**: 10 or later on x86_64, with [Git for Windows](https://git-scm.com/downloads/win) and `git.exe` on `PATH`. The `bash` tool runs the `bash.exe` included with Git for Windows.
-- **Other platforms**: ARM Linux, Linux with an older glibc, and musl-based Linux such as Alpine need a source build through [Cargo](#from-source-via-cargo) or [Nix](#nix). Intel Macs need a source build through Cargo, since the flake does not support them.
-- **Network**: Outbound HTTPS access to `api.anthropic.com` or your [LLM gateway](authentication.md#llm-gateways). Claude account logins also exchange and refresh tokens through `platform.claude.com`.
+- **Windows**: 10 or later on x86_64 with [Git for Windows](https://git-scm.com/downloads/win) and `git.exe` on `PATH` (the `bash` tool uses its `bash.exe`).
+- **Other platforms**: ARM Linux, older glibc, and musl Linux (such as Alpine) require a source build via [Cargo](#from-source-via-cargo) or [Nix](#nix). Intel Macs require Cargo (unsupported by the flake).
+- **Network**: Outbound HTTPS to `api.anthropic.com` or your [LLM gateway](authentication.md#llm-gateways). Claude account logins also contact `platform.claude.com`.
 
 ## Install `ox`
 
@@ -21,7 +21,7 @@ How to install `ox` on macOS, Linux, and Windows. For first-run setup once insta
 
 ### Homebrew
 
-The formula installs the prebuilt release binary on Apple Silicon macOS and x86_64 Linux:
+Installs the prebuilt release binary on Apple Silicon macOS and x86_64 Linux:
 
 ```bash
 brew install hakulab/tap/oxide-code
@@ -29,7 +29,7 @@ brew install hakulab/tap/oxide-code
 
 ### Prebuilt Binary
 
-Download the archive for your platform from [Releases](https://github.com/hakulab/oxide-code/releases), extract it, and move the `ox` binary to a directory on your `PATH`. Set `VERSION` to the newest tag listed on that page:
+Download the archive for your platform from [Releases](https://github.com/hakulab/oxide-code/releases), extract it, and place `ox` on `PATH` (set `VERSION` to the latest tag):
 
 ```bash
 VERSION=v0.1.0-alpha.13
@@ -49,9 +49,7 @@ mkdir -p ~/bin
 mv ox.exe ~/bin/
 ```
 
-Each archive contains `ox`, `LICENSE`, and `THIRD-PARTY-NOTICES`. Each release also publishes an `oxide-code-<target>.sha256` checksum alongside the archive.
-
-Each release includes a build provenance attestation linking each archive to the release workflow run that built it. To verify an archive with the GitHub CLI, download it to disk before extracting it:
+Each archive contains `ox`, `LICENSE`, and `THIRD-PARTY-NOTICES`. Each release also publishes an `oxide-code-<target>.sha256` checksum and a build provenance attestation alongside the archive. To verify an archive with the GitHub CLI before extracting:
 
 ```bash
 curl -fsSLO "https://github.com/hakulab/oxide-code/releases/download/$VERSION/oxide-code-aarch64-apple-darwin.tar.gz"
@@ -67,11 +65,11 @@ Requires [Rust](https://www.rust-lang.org/tools/install) 1.91 or later.
 cargo install --git https://github.com/hakulab/oxide-code --locked
 ```
 
-This builds the `main` branch and installs `ox` to `~/.cargo/bin`. To pin a release, pass `--tag vX.Y.Z`.
+Builds `main` into `~/.cargo/bin`. Pass `--tag vX.Y.Z` to pin a release.
 
 ### Nix
 
-The repo includes a flake whose packages are available from the `hakula` Cachix cache. Nix builds from source when a matching cached package is unavailable:
+The flake's packages are cached on the `hakula` Cachix cache and build from source when unavailable:
 
 ```bash
 nix run github:hakulab/oxide-code                     # One-shot
@@ -79,18 +77,18 @@ nix profile install github:hakulab/oxide-code         # Install to user profile
 nix profile install github:hakulab/oxide-code/vX.Y.Z  # Install a specific release
 ```
 
-Or as a flake input from another project:
+Or as a flake input:
 
 ```nix
 inputs.oxide-code.url = "github:hakulab/oxide-code";
 # Outputs: packages.${system}.{default, oxide-code}, overlays.default, homeModules.default
 ```
 
-A ref without a tag builds the `main` branch. Tags from `v0.1.0-alpha.2` onward include the flake, so adding a `/vX.Y.Z` suffix to the flake input pins a release.
+Without a tag suffix, Nix builds `main`. Append `/vX.Y.Z` to pin any tag from `v0.1.0-alpha.2` onward.
 
 ### Home Manager
 
-The flake's Home Manager module installs `ox` and writes its configuration from Nix options. Keep oxide-code's nixpkgs input pinned upstream to reuse its cached package. Point the other `follows` at your own input of that name and drop those you don't have:
+The Home Manager module installs `ox` and generates its config from Nix options. Keep oxide-code's `nixpkgs` input pinned upstream to reuse cached binaries, and keep only the `follows` inputs you use:
 
 ```nix
 inputs.oxide-code = {
@@ -103,7 +101,7 @@ inputs.oxide-code = {
 };
 ```
 
-Then import the module in your Home Manager configuration:
+Import the module in Home Manager:
 
 ```nix
 imports = [ inputs.oxide-code.homeModules.default ];
@@ -123,17 +121,15 @@ programs.oxide-code = {
 | `settings`    | `{ }`                         | Write nonempty settings to `ox/config.toml` |
 | `context`     | `""`                          | Set user instructions in `ox/AGENTS.md`     |
 
-The check defaults to `true` when `package != null` and the build platform can run host binaries.
+`checkConfig` defaults to `true` when `package != null` and the build platform can run host binaries. A `context` string writes inline text, while a Nix path or package links as `ox/AGENTS.md`.
 
-A `context` string is inline text. A Nix path or package is linked as `ox/AGENTS.md`.
+- **Files**: Paths are relative to `$XDG_CONFIG_HOME` (default `~/.config`). Put local overrides in `ox/config.d/` so they take precedence over the module-managed `config.toml`.
 
-- **Files**: Paths are relative to `$XDG_CONFIG_HOME`, which defaults to `~/.config`. The module owns `config.toml`, so keep local overrides in `ox/config.d/`, where they take precedence.
+- **Wrapping the package**: The default `package` comes directly from the flake and ignores overlays on `pkgs.oxide-code`. Apply `inputs.oxide-code.overlays.default` and pass your wrapper around `pkgs.oxide-code` to `package`.
 
-- **Wrapping the package**: The default `package` is built from the flake directly, so an override applied to `pkgs.oxide-code` does not reach it. Apply `inputs.oxide-code.overlays.default` to your package set and set `package` to your wrapper around `pkgs.oxide-code`.
+- **`checkConfig`**: Runs [`ox config check`](configuration.md#checking-the-config) on the generated `config.toml` so typos or invalid values fail `home-manager switch`. It runs as a Nix build user with an empty scratch home and no credentials (inside a sandbox where Nix enables one, unlike macOS by default), so wrappers must run without your home or secrets. Because `~` resolves to the scratch home, pass theme files as Nix paths (`tui.theme.base = ./theme.toml`) and extra roots under home with `~/`, or set `checkConfig = false` if a runtime-only path is rejected.
 
-- **`checkConfig`**: The module runs the package's [`ox config check`](configuration.md#checking-the-config) on the generated `config.toml`, so a typo or an invalid value fails `home-manager switch` with `ox`'s own error. The check runs as a Nix build user with an empty scratch home directory and no credentials, inside the build sandbox where Nix enables one (macOS does not by default), so a wrapper `package` must start without your home directory or secrets. Since `~` there names the scratch home, give a theme file as a Nix path, such as `tui.theme.base = ./theme.toml`, and write an extra root under your home directory with `~/`. Set `checkConfig = false` if the check still rejects a path that exists where `ox` runs.
-
-- **Credentials**: Generated settings enter the Nix store, so keep credentials in a separate secret file, which the check never opens. Set `client.auth.file` to a quoted runtime path and its `type` as [Fixed Credentials](authentication.md#fixed-credentials) describes:
+- **Credentials**: Generated settings enter the Nix store, so keep secrets in a separate file (never opened by `checkConfig`). Set `client.auth.file` to a quoted runtime path with its `type` ([Fixed Credentials](authentication.md#fixed-credentials)):
 
   ```nix
   settings.client.auth = {

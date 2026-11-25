@@ -1,6 +1,6 @@
 # Theming
 
-Pick one of the bundled Catppuccin or Material palettes for the TUI, point at a TOML theme file you wrote, or patch individual color slots on top of either.
+Pick a bundled Catppuccin or Material palette for the TUI, load a custom TOML theme file, or patch individual color slots.
 
 ## Quick Start
 
@@ -17,7 +17,7 @@ error = "#ff0000"
 accent = { bold = false }
 ```
 
-Both `[tui.theme]` keys are optional. Without them the default is `mocha` (Catppuccin Mocha) with no overrides.
+Both keys are optional. The default is `mocha` (Catppuccin Mocha) with no overrides.
 
 ## Built-In Themes
 
@@ -29,24 +29,24 @@ Both `[tui.theme]` keys are optional. Without them the default is `mocha` (Catpp
 | `latte`     | Catppuccin | Light                 |
 | `material`  | Material   | Dark M2 baseline      |
 
-Each ships as a TOML file [in the source tree](https://github.com/hakulab/oxide-code/tree/main/crates/ox-tui/themes), which doubles as a starting point for a custom theme.
+Each ships as a TOML file [in the source tree](https://github.com/hakulab/oxide-code/tree/main/crates/ox-tui/themes), useful as a starting point for custom themes.
 
 ## Custom Theme Files
 
-In your user config or a drop-in, `base` accepts the path of a TOML file shaped like the built-in themes:
+In user config or a drop-in, `base` accepts a path to a TOML file matching the built-in schema:
 
 ```toml
 [tui.theme]
 base = "~/.config/ox/themes/dark-extra.toml"
 ```
 
-- **Paths**: A leading `~/` expands to your home directory, and nothing else expands, so `$HOME`, `${XDG_CONFIG_HOME}`, and `%USERPROFILE%` fail to read. A relative path resolves against the directory you launched `ox` from.
-- **Project config**: A project's config may only name a built-in theme, since a path there would have `ox` read a file the repository chooses.
-- **Limits**: A value that is neither a built-in name nor a readable regular file of at most 64 KiB stops `ox` at startup with an error.
+- **Paths**: Leading `~/` expands to your home directory. Environment variables (`$HOME`, `${XDG_CONFIG_HOME}`, `%USERPROFILE%`) do not expand. Relative paths resolve from the launch working directory.
+- **Project config**: Must name a built-in theme, since a file path would let a repository choose what `ox` reads.
+- **Limits**: Any value that is neither a built-in name nor a readable regular file of at most 64 KiB stops TUI startup.
 
 ## Slot Value Formats
 
-Every `fg` / `bg` value, and every bare-string slot, accepts:
+Every `fg` / `bg` value and bare-string slot accepts:
 
 | Form              | Example      | Maps to                                                                           |
 | ----------------- | ------------ | --------------------------------------------------------------------------------- |
@@ -55,16 +55,16 @@ Every `fg` / `bg` value, and every bare-string slot, accepts:
 | Indexed 256-color | `"ansi:174"` | 256-color palette index                                                           |
 | Terminal default  | `"reset"`    | The terminal default for the channel (`fg` or `bg`) it is set to                  |
 
-ANSI 16-color names ignore case:
+ANSI 16-color names are case-insensitive:
 
 - **Standard**: `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `gray` (alias `grey`).
 - **Bright**: `dark_gray` (alias `dark_grey`), `bright_red` (alias `light_red`), `bright_green` (alias `light_green`), `bright_yellow` (alias `light_yellow`), `bright_blue` (alias `light_blue`), `bright_magenta` (alias `light_magenta`), `bright_cyan` (alias `light_cyan`), `white` (alias `bright_white` / `light_white`).
 
 ## Slot Definitions
 
-A theme file is a flat TOML document with one entry per slot plus an optional [`syntax_theme`](#code) key. It must define **every slot**, so a missing slot or a typo is a parse error. To change only some slots, use [overrides](#overrides). Each slot takes one of two shapes:
+A theme file is a flat TOML table defining **every slot** plus an optional [`syntax_theme`](#code). Missing slots or unknown keys fail parsing. Use [overrides](#overrides) to change a subset of slots. Each slot accepts two forms:
 
-- **Bare color string**: Sets the slot's own channel with no modifiers. That channel is `fg` for a foreground slot and `bg` for a background-only slot:
+- **Bare color string**: Sets `fg` on foreground slots and `bg` on background-only slots, with no modifiers:
 
   ```toml
   user = "#fab387"
@@ -72,7 +72,7 @@ A theme file is a flat TOML document with one entry per slot plus an optional [`
   surface = "reset"
   ```
 
-- **Inline table**: Sets `fg` / `bg` and any modifier flags, while a background-only slot accepts only `bg`:
+- **Inline table**: Sets `fg`, `bg`, and modifier flags (`bold`, `italic`, `underlined`, `dim`, `reversed`, defaulting to `false`). Background-only slots accept only `bg`:
 
   ```toml
   accent = { fg = "#89b4fa", bold = true }
@@ -80,11 +80,9 @@ A theme file is a flat TOML document with one entry per slot plus an optional [`
   diff_add = { bg = "#2a3a37" }
   ```
 
-The modifier keys are `bold`, `italic`, `underlined`, `dim`, and `reversed`, which default to `false` in a theme file. An unknown key fails a theme file's parse and makes an override [fall back](#errors).
+Unknown keys fail theme-file parsing and cause an override to [fall back](#errors).
 
 ## Slots
-
-Each slot styles one role in the TUI.
 
 ### Text Hierarchy
 
@@ -94,7 +92,7 @@ Each slot styles one role in the TUI.
 | `muted` | Secondary text, labels, and line numbers                                         |
 | `dim`   | Low-emphasis text such as tool output, hints, modal footers, and unselected rows |
 
-`dim` is the faintest color for text people read, so keep it readable against your background. The built-ins give it at least the contrast of `tool_border`, and at least 4:1 on their dark backgrounds, while `border_unfocused`, `horizontal_rule`, `table_border`, and `separator` can sit a step fainter because they only frame content.
+Keep `dim` readable against your background, since it is the faintest text color. Built-ins give it at least `tool_border`'s contrast (and ≥ 4:1 on dark backgrounds), while `border_unfocused`, `horizontal_rule`, `table_border`, and `separator` sit fainter because they only frame content.
 
 ### Surfaces
 
@@ -130,7 +128,7 @@ Each slot styles one role in the TUI.
 | `effort_xhigh`  | `xhigh` on the effort slider  |
 | `effort_max`    | `max` on the effort slider    |
 
-The built-ins use ANSI `blue`, `cyan`, `green`, `magenta`, and `red`, so the gradient follows your terminal palette, and a hex override pins a level to the theme's own colors.
+Built-ins use ANSI `blue`, `cyan`, `green`, `magenta`, and `red` to follow your terminal palette. Hex overrides pin levels to explicit colors.
 
 ### Code
 
@@ -139,13 +137,13 @@ The built-ins use ANSI `blue`, `cyan`, `green`, `magenta`, and `red`, so the gra
 | `code`        | Fenced code blocks with no recognized language |
 | `inline_code` | Inline `code` spans (between backticks)        |
 
-Fenced code with a recognized language takes its token colors from a bundled [syntect](https://github.com/trishume/syntect) theme, chosen by the optional top-level `syntax_theme` key in a theme file:
+Fenced code with a recognized language uses a bundled [syntect](https://github.com/trishume/syntect) theme set by top-level `syntax_theme` in a theme file:
 
 ```toml
 syntax_theme = "InspiredGitHub"
 ```
 
-Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use, while `latte` uses `InspiredGitHub`. The accepted names are `base16-ocean.dark`, `base16-eighties.dark`, `base16-mocha.dark`, `base16-ocean.light`, `InspiredGitHub`, `Solarized (dark)`, and `Solarized (light)`, and any other name is a parse error. Overrides patch slots only, so changing `syntax_theme` on a built-in base means copying that theme's TOML into a custom file.
+Defaults to `base16-ocean.dark` (used by dark built-ins, while `latte` uses `InspiredGitHub`). Accepted values: `base16-ocean.dark`, `base16-eighties.dark`, `base16-mocha.dark`, `base16-ocean.light`, `InspiredGitHub`, `Solarized (dark)`, and `Solarized (light)`. Other names fail parsing. Because overrides patch slots only, changing `syntax_theme` on a built-in requires copying its TOML to a custom file.
 
 ### Diff Backgrounds (Background Only)
 
@@ -193,11 +191,11 @@ Unset, it defaults to `base16-ocean.dark`, which the dark built-ins use, while `
 | `separator`        | Color and modifiers of the fixed status-line segment separator (`│`) |
 | `selection`        | Chat text selected with the mouse (bg-only)                          |
 
-Pick a `selection` background that leaves `dim` and `thinking` text at a contrast of at least 3:1.
+Choose a `selection` background that keeps `dim` and `thinking` text at ≥ 3:1 contrast.
 
 ### Status-Line Segments
 
-Each status-line segment uses one of the slots above, so to restyle a segment, override its slot.
+Each status-line segment uses one or more slots above. Override the slot to restyle it.
 
 | Segment               | Slot                                      |
 | --------------------- | ----------------------------------------- |
@@ -223,13 +221,13 @@ Each status-line segment uses one of the slots above, so to restyle a segment, o
 | `theme`               | `muted`                                   |
 | `current-time`        | `dim`                                     |
 
-- **`context-used`, `five-hour-limit`, and `weekly-limit`** use `text` until the share they show reaches 70%, then `warning`, and `error` from 90%.
-- **`permission-mode`** uses `muted` for `auto` and `manual`, `accent` for `plan`, and `error` for `yolo`.
-- **`pull-request-checks` and `pull-request-review`** use `success` for passing checks or an approval, `warning` for pending checks or a required review, `error` for failing checks or requested changes, and `muted` for cancelled checks.
+- **`context-used`, `five-hour-limit`, and `weekly-limit`**: `text` below 70%, `warning` from 70%, `error` from 90%.
+- **`permission-mode`**: `muted` for `auto` and `manual`, `accent` for `plan`, `error` for `yolo`.
+- **`pull-request-checks` and `pull-request-review`**: `success` (passing / approved), `warning` (pending / required), `error` (failing / changes requested), `muted` (cancelled).
 
 ## Overrides
 
-`[tui.theme.overrides]` maps slot names to patches. A patch applies only the fields it lists to the base slot:
+`[tui.theme.overrides]` patches named slots on top of the base theme, changing only the fields you list:
 
 ```toml
 [tui.theme.overrides]
@@ -241,18 +239,14 @@ accent = { bold = false }
 link = { fg = "#ff79c6", bold = true }
 ```
 
-A bare string patches `fg` on a foreground slot and `bg` on a background-only slot, so `selection = "#393a4c"` recolors the highlight without touching the text it covers. A background-only slot ignores `fg` or a modifier in its patch with a notice.
+Bare strings patch `fg` on foreground slots and `bg` on background-only slots (`selection = "#393a4c"` recolors only the highlight). Passing `fg` or modifiers to a background-only slot emits a chat notice and ignores that slot's override. Omitted modifiers keep the base value, `true` sets them, and `false` clears them (so `accent = { bold = false }` clears bold while keeping the base color, and `accent = { italic = true }` adds italic while keeping bold). Empty patches (`accent = {}`) warn and fall back to the base.
 
-An omitted modifier keeps the base value, `true` sets it, and `false` clears it. So `accent = { bold = false }` removes bold from the base accent without changing its color, and `accent = { italic = true }` adds italic while keeping the base bold. An empty patch (`accent = {}`) warns and falls back to the base, since it is almost always a typo.
-
-Overrides also apply to every built-in that [`/theme`](slash-commands.md#pickers) previews or switches to, so they last for the whole session.
-
-Overrides from every [config layer](configuration.md#layers) merge by slot name, so a project can patch `error` while your user config patches `accent`. When two layers patch the same slot with inline tables, their fields combine and the later layer wins each field. Otherwise the later layer's patch replaces the earlier one.
+Overrides persist across [`/theme`](slash-commands.md#pickers) previews and switches for the session, and merge by slot across [config layers](configuration.md#layers). Two inline-table patches for the same slot merge field by field (later layer wins). Otherwise the later patch replaces the earlier one.
 
 ## Errors
 
-- **Theme selection errors** stop the TUI at startup with a message naming the problem: an unknown built-in name with no matching file, a file path set in a project file, a path that is not a regular file of at most 64 KiB, an unreadable file, or a parse error in the theme file, which gives its line and column without quoting the source line. `-p` runs never load the theme, so a theme error does not stop them.
-- **Per-slot override errors** show a notice in the chat, and the slot keeps the base value while the TUI still launches. They cover an unparsable color, an unknown slot name, a patch that is neither a color string nor a table of `fg`, `bg`, and modifier flags, an empty inline patch, and `fg` or a modifier on a background-only slot.
+- **Theme selection errors** stop TUI startup with the cause: an unknown built-in name with no matching file, a file path in project config, a non-regular file or file over 64 KiB, an unreadable file, or a TOML parse error (line and column only, without quoting the source line). `-p` runs skip theme loading.
+- **Per-slot override errors** emit a chat notice and keep the base slot without blocking startup: unparsable color, unknown slot, invalid patch type, empty inline patch, or `fg` / modifier on a background-only slot.
 
 ## Examples
 
@@ -269,7 +263,7 @@ link = { fg = "#8be9fd", underlined = true }
 
 ### Use the Terminal's Foreground for Primary Text
 
-This helps on transparent or non-truecolor terminals, where an RGB foreground fights your terminal scheme:
+Useful on transparent or non-truecolor terminals where RGB foregrounds clash with the terminal palette:
 
 ```toml
 [tui.theme.overrides]
@@ -278,7 +272,7 @@ text = "reset"
 
 ### Tint the Chat Panel Background
 
-`surface` defaults to the terminal background (`reset`). Set a `bg` to give the chat, input, and status panels an opaque tint on a transparent terminal:
+`surface` defaults to the terminal background (`reset`). Set `bg` for an opaque tint on transparent terminals:
 
 ```toml
 [tui.theme.overrides]

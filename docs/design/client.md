@@ -1,57 +1,57 @@
 # Client
 
-The client turns one conversation request into the wire shape the Anthropic API or a compatible gateway expects. It owns the request headers, the per-model beta set, the system and message prefix, the cache breakpoints, base-URL gating, and retry classification. [Authentication](../guide/authentication.md) covers credentials and gateway settings, and [Compaction](compaction.md) covers the summarizer request that reuses this path.
+The client turns each conversation request into the wire format expected by the Anthropic API or a compatible gateway, owning headers, per-model beta sets, system and message prefixes, cache breakpoints, base-URL gating, and retry classification. [Authentication](../guide/authentication.md) covers credentials and gateways, and [Compaction](compaction.md) covers the summarizer reusing this path.
 
 ## Request Shape
 
-Every request goes to `<base_url>/v1/messages?beta=true` with `anthropic-version: 2023-06-01`, the `anthropic-beta` list, `x-app: cli`, the Stainless telemetry headers, a `User-Agent` of `claude-cli/<version> (external, cli)`, and the credential header. The system prompt is an array of text blocks, where the identity prefix and the attribution block each occupy their own block before the rest of the prompt, which [System Prompt](prompt.md) covers. The API validates the first non-attribution block, so folding the identity text into the body changes the request the server sees.
+Requests target `<base_url>/v1/messages?beta=true` with `anthropic-version: 2023-06-01`, `anthropic-beta`, `x-app: cli`, Stainless telemetry headers, `User-Agent: claude-cli/<version> (external, cli)`, and the credential header. The system prompt is an array of text blocks placing the attribution block and identity prefix in their own leading blocks before the prompt body ([System Prompt](prompt.md)), because the API validates the first non-attribution block.
 
 ## Beta Sets
 
-Agentic turns on the supported models send the sequence Claude Code sends for them, captured from `claude -p` with an API key, so it includes betas for features this client leaves unused. Fable 5.1, which that capture lacks, sends the Opus 5.5 sequence. Haiku 5.5 moves the `claude-code-20250219` tag later in the sequence. On other model IDs, an agentic turn sends `claude-code-20250219`, `oauth-2025-04-20` under OAuth, and `prompt-caching-scope-2026-01-05`, and adds no effort, thinking, or context-management betas. Side queries, such as session titles, carry at most the `claude-code-20250219` tag and the OAuth extension. The thinking betas derive from the request body's `thinking` field, so the header and the body cannot disagree.
+Agentic turns on catalog models send the beta sequence captured from `claude -p` with an API key (including unused feature betas): Fable 5.1 reuses Opus 5.5's sequence, and Haiku 5.5 moves `claude-code-20250219` later in the list. Unknown model IDs send only `claude-code-20250219`, `oauth-2025-04-20` under OAuth, and `prompt-caching-scope-2026-01-05` (no effort, thinking, or context-management betas). Side queries (such as session titles) send at most `claude-code-20250219` and OAuth. Thinking betas derive directly from the request body's `thinking` field so headers and body cannot disagree.
 
 ## Thinking Display
 
-Every request sends `thinking.display`, since an upstream's default can differ from the API's. `show_thinking` selects `"summarized"`, and otherwise the supported models that write progress notes ask for `"updates"`, which adds the `thinking-display-updates-2026-08-18` beta, while Haiku 5.5 asks for `"omitted"`. The stream keeps thinking text only when the request asked for it, so an upstream that sends text anyway shows none, and a resumed session reads no progress notes from the reasoning of a catalog model that writes none.
+Every request sends `thinking.display` explicitly because upstream defaults vary: `show_thinking` sets `"summarized"`, catalog models that emit progress notes otherwise ask for `"updates"` (adding `thinking-display-updates-2026-08-18`), and Haiku 5.5 asks for `"omitted"`. The stream keeps thinking text only when requested, and resume reads no progress notes from catalog models that emit none.
 
 ## Thinking Block Binding
 
-Every adaptive thinking request sets `thinking.block_binding` to `{"prefix_mismatch_behavior": "drop_block"}` and appends the `thinking-binding-controls-2026-08-01` beta header, so a change to the system prompt, tools, or earlier messages drops only the affected replayed blocks for that request.
+Adaptive thinking requests set `thinking.block_binding` to `{"prefix_mismatch_behavior": "drop_block"}` with `thinking-binding-controls-2026-08-01`, dropping only affected replayed blocks after a system-prompt, tool, or earlier-message change.
 
-The Anthropic wire replays every Anthropic `thinking` and `redacted_thinking` block unchanged across model swaps and credential changes, letting the API drop or ignore blocks the active model or account cannot read. Requests end on a user message, or on a paused reply that a `pause_turn` continuation must send back as-is, so the client strips no trailing thinking blocks, and it does not read `input_transformations` from the response.
+The wire replays every Anthropic `thinking` and `redacted_thinking` block unchanged across model swaps and credential changes, letting the API drop unreadable blocks. Because requests end on a user message or a `pause_turn` reply that must replay verbatim, the client strips no trailing thinking blocks and ignores `input_transformations`.
 
 ## Cache Breakpoints
 
-A request carries two ephemeral breakpoints, both with the configured [`prompt_cache_ttl`](../guide/configuration.md#prompt_cache_ttl-cache-duration):
+Requests set two ephemeral breakpoints using [`prompt_cache_ttl`](../guide/configuration.md#prompt_cache_ttl-cache-duration):
 
-- **The static prefix.** The first breakpoint sits on the static system-prompt prefix block, and it carries `scope: "global"` only on a first-party base URL.
-- **The conversation tail.** The second sits on the last content block of the final message without a scope, so each turn reads the previous turn's transcript from cache.
+- **Static prefix.** Placed on the static system-prompt block, adding `scope: "global"` only on first-party hosts.
+- **Conversation tail.** Placed unscoped on the last content block of the final message when `Request::cache_tail` is set (`conversation_request` sets it for turns and initial compaction summaries, while overflow retries clear it because their trimmed prefix is never extended).
 
-Invalidation follows the API's order, `tools` then `system` then `messages`, so the prompt context is built once per session and the tools and system blocks stay stable from turn to turn. The caller decides the second breakpoint through `Request::cache_tail`, which `conversation_request` sets for every conversation round. The first compaction summary request reuses that request, so it reads the conversation's cache. An overflow retry sends a trimmed prefix that no later request extends, so it clears `cache_tail`.
+Cache invalidation follows `tools` → `system` → `messages`, so prompt context is built once per session and tools and static system blocks stay stable across turns.
 
 ## Base-URL Gating
 
-The body-side `cache_control.scope: "global"` is the one part of the request shape gated on the host. A base URL whose host is `api.anthropic.com` or `api-staging.anthropic.com` sends it, and every other host sends `{"type": "ephemeral"}` without the scope field. The `prompt-caching-scope-2026-01-05` header still ships everywhere, and without the body field it is a server-side no-op. The gate keeps requests valid on gateways that reject a global scope after tool definitions.
+For prompt-caching scope, only the body-side `cache_control.scope: "global"` is host-gated: `api.anthropic.com` and `api-staging.anthropic.com` send it, while custom base URLs send `{"type": "ephemeral"}` (avoiding gateways that reject global scope after tool definitions). The `prompt-caching-scope-2026-01-05` header ships everywhere as a no-op without the body field.
 
-The attribution block follows the same split. A first-party request carries the per-request `cch` hash, while a custom base URL carries the block without it, so a gateway that caches on the request body sees a stable prefix. Stored logins are sent only to a first-party endpoint, as [Authentication](../guide/authentication.md) describes.
+Similarly, first-party requests include the per-request `cch` hash in the attribution block while custom base URLs omit it so body-caching gateways see a stable prefix. Stored logins go only to first-party hosts ([Authentication](../guide/authentication.md)).
 
 ## Retries
 
-`with_retry` classifies each failed attempt:
+`with_retry` classifies failed attempts:
 
-- **Retried.** A transport failure and a 408, 409, 429, or 5xx status retry with exponential backoff and jitter, up to five retries, and an `x-should-retry` header overrides the status rule.
-- **Fatal.** A builder error and every other status fail at once, as does a server-requested `retry-after` longer than a minute, so the user sees an exhausted quota promptly. Failing to produce a credential is fatal unless the token refresh failed transiently, so a later attempt may complete it.
+- **Retried.** Transport errors and HTTP 408, 409, 429, and 5xx retry up to five times with exponential backoff and jitter, overridden by `x-should-retry`.
+- **Fatal.** Builder errors, other HTTP statuses, `retry-after` over 60 s (surfacing exhausted quotas promptly), and permanent credential errors fail immediately, while transient token-refresh failures retry.
 
 ## Design Decisions
 
-1. **Send the conversation's captured beta sequence.** Reproducing Claude Code's sequence, including betas for features this client leaves unused, keeps a gateway that fingerprints the client from rejecting the request. A test pins the release the sequence was captured from, so a version bump fails until it is recaptured.
-2. **Two breakpoints with one TTL.** The static prefix and the conversation tail are the two levels that change independently. Capping tool output when the tool returns keeps the prefix stable, so the breakpoint pays cache-read rates for most of the input.
-3. **Gate only the body-side scope on the base URL.** The header alone is a server-side no-op, so sending it everywhere costs nothing, while the scope field is what a gateway can reject.
-4. **Classify before retrying.** A malformed request cannot succeed on a later attempt, and retrying it hides the error behind a minute of backoff. The classification reads the status and the server's own hint, so reworded message text changes nothing.
+1. **Send the conversation's captured beta sequence.** Matching Claude Code's sequence avoids rejections from gateways fingerprinting the client, pinned by a test tied to the captured CLI version.
+2. **Two breakpoints with one TTL.** Separates the static prefix from the growing transcript tail, while capping tool output on return keeps prefix cache reads intact.
+3. **Gate only the body-side scope on the base URL.** The header alone is a no-op, whereas the body field triggers gateway rejections.
+4. **Classify before retrying.** Retrying malformed requests wastes a minute hiding the error, and keying on HTTP status and `x-should-retry` stays immune to error-text changes.
 
 ## Out of Scope
 
-- **A different beta set for a gateway.** Configure the applicable header and endpoint instead.
+- **A different beta set for a gateway.** Set the applicable header and endpoint in config.
 
 ## Sources
 

@@ -13,9 +13,9 @@ nix flake check            # Build the package and run the Home Manager and over
 nix build                  # Build ox without running the tests
 ```
 
-A hook that fixes files fails the commit, so stage its fixes and commit again. A commit that touches Rust files runs Clippy over the whole workspace.
+If a hook modifies files, stage its fixes and commit again. Commits touching Rust files run workspace-wide Clippy.
 
-With [direnv](https://direnv.net), run `direnv allow` once, and `.envrc` loads the dev shell, the gitignored `.envrc.local`, and `.env.local` whenever you enter the repository.
+With [direnv](https://direnv.net), run `direnv allow` once so `.envrc` loads the dev shell, gitignored `.envrc.local`, and `.env.local` on entry.
 
 ## Toolchain
 
@@ -49,8 +49,8 @@ Dev and test builds keep line tables for the workspace crates and no debug info 
 
 The [CI workflow](../../.github/workflows/ci.yml) defines the jobs and calls devkit's [shared checks](https://github.com/hakulab/devkit/blob/v3/docs/ci.md). The [release workflow](../../.github/workflows/release.yml) requires a passing run on the tagged commit.
 
-Branch protection requires CI Result and Codecov's `codecov/patch`. Add each new job to CI Result's `needs`, since the gate runs once those jobs finish and skips any job still running, and give each new job a `timeout-minutes` several times its usual duration, since a hung test otherwise holds the runner for six hours. libtest names any test still running after 60 s, so a timed-out job's log shows which test hung.
+Branch protection requires CI Result and Codecov's `codecov/patch`. Add new jobs to CI Result's `needs` (the gate runs once listed jobs finish and skips any job still running), and set `timeout-minutes` to several times normal duration so hung tests cannot hold a runner for six hours (libtest names any test still running after 60 s).
 
-Every job but Windows and CI Result reads the `hakula` Cachix cache, and a Cachix failure never fails a job. A download that stalls without failing still runs the job into its timeout, which [#715](https://github.com/hakulab/oxide-code/issues/715) tracks.
+Every job except Windows and CI Result reads the `hakula` Cachix cache. Cache errors never fail a job, though stalled downloads can still hit the job timeout ([#715](https://github.com/hakulab/oxide-code/issues/715)).
 
 [Hermetic Tests](testing.md#hermetic-tests) covers tests whose environment affects their result.

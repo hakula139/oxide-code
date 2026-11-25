@@ -1,21 +1,19 @@
 # Task List
 
-The `tasks` tool lets the model maintain a task list for multi-step work. The engine owns the list, which every frontend displays and which persists across resume and compaction.
+The `tasks` tool lets the model maintain an ordered task list for multi-step work, owned by the engine, rendered across frontends, and preserved across resume and compaction.
 
 ## Tool
 
-Each call sends the full list in order, replacing the session's previous list.
+Each call replaces the session's list with the full ordered list:
 
-- **Validation.** Each task's content is collapsed onto one line. A task with blank content, an unknown status, or a second `in_progress` status rejects the call with an error explaining the fix, and a rejected call leaves the list unchanged.
-- **Clearing.** The list clears when every task is completed or when the model sends an empty list.
-- **Result.** The chat block lists the tasks sent in the call, so the step that finished the list stays visible after the list clears.
-- **Permission.** The tool belongs to the `read` class because it changes nothing in the workspace, so it runs without approval in every mode, `plan` included. A path-scoped `read` rule never matches it, while a class-wide `read` deny blocks it.
+- **Validation.** Task content collapses to one line. Blank content, unknown statuses, or a second `in_progress` task reject the call with a fix message, leaving the list unchanged.
+- **Clearing.** Completing every task or sending an empty list clears the list.
+- **Result.** The chat block renders the submitted list so the finishing step stays visible after clearing.
+- **Permission.** Belongs to `read` (no workspace effects), running without approval in every mode including `plan`. Path-scoped `read` rules never match it, while a class-wide `read` deny blocks it.
 
 ## Engine Flow
 
-The engine emits `TasksUpdated` after each successful call and adopts the last list set during the turn, even if the turn is cancelled or fails, because the call's result is already in the transcript.
-
-`/clear` starts the new session with an empty list. After a resumed session restores a non-empty list, `Engine::spawn` and `/resume` emit `TasksUpdated`. A frontend clears its copy on `SessionRolled` and `SessionResumed`, then replaces the list on each event without merging.
+The engine emits `TasksUpdated` after each successful call and adopts the turn's latest list even if the turn fails or cancels (since the result is already in the transcript). `/clear` resets to empty, and `Engine::spawn` / `/resume` emit `TasksUpdated` when restoring a non-empty list. Frontends clear on `SessionRolled` and `SessionResumed` and replace without merging on each `TasksUpdated`.
 
 ## Frontends
 
@@ -24,22 +22,20 @@ The engine emits `TasksUpdated` after each successful call and adopts the last l
 | TUI      | Task panel and optional `task-progress` status-line segment                                          |
 | Headless | Task list on stderr and [task events and result views](../guide/headless.md#events) in `stream-json` |
 
-## Persistence
+## Persistence and Compaction
 
-The list has no dedicated entry type. On resume, the loader takes the last successful `tasks` call on the resolved chain, or else the `tasks` field of the last `compact` entry, or else starts empty. Restoring it from the transcript keeps each branch's list independent in a forked session.
+The list has no dedicated DB column. Resume restores it from the last successful `tasks` call on the active chain, falling back to the compaction root's `tasks` field (otherwise empty), keeping forked branches independent.
 
-## Compaction
-
-Manual and automatic compaction both pass the engine's list to `Engine::replace_with_summary`, and the `compact` entry records it because the summary replaces the calls that built it. The synthetic summary message carries a `<system-reminder>` block after the summary that lists each task and its status and asks the model to keep the list current. The engine keeps the list, so the panel and status line stay unchanged across the boundary.
+Manual and automatic compaction store the current list in the `compact` entry via `Engine::replace_with_summary`, append a `<system-reminder>` listing tasks and statuses to the synthetic summary message, and keep the engine's live list unchanged across the boundary.
 
 ## Design Decisions
 
-1. **Replace the whole list.** Claude Code's `TodoWrite` and Codex's `update_plan` both take the complete list on every call. The model restates every status, so calls cannot leave stale items behind and tasks need no IDs. oh-my-pi's `todo` edits phases through operations, which works well for long plans but requires a larger schema.
-2. **Reject a second task in progress.** Claude Code and Codex ask the model in the tool prompt to keep one task in progress but do not enforce it, and oh-my-pi demotes extra tasks to pending. Rejecting the call tells the model which rule it broke and preserves the list it sent, while a silent repair could mark the wrong task as active.
-3. **Clear a finished list.** Claude Code's `TodoWrite` also drops the list once every task is completed, so the panel shows only the work that remains. Its description also asks the model to remove tasks that no longer apply and send an empty list when the user changes course, since otherwise a stale list would stay on screen.
-4. **Use the transcript as the source of truth.** The call's input already records the list, so a dedicated entry would duplicate it and could disagree with the resolved branch. Claude Code's `extractTodosFromTranscript` restores the list from the last `TodoWrite` call, while oh-my-pi rehydrates it from the branch's tool results.
-5. **Remind the model once at the boundary.** Compaction is the only point where the calls that built the list leave the model's context, so a single reminder in the summary message restores it. Claude Code's periodic nudges resend the list on turns when the model can already see it.
-6. **Count hidden tasks like every other overflow.** The panel's last row uses the `... +N` wording of the chat's overflow footers and the queued-prompt preview, so every cut-off list in the TUI reads the same. The window can hide tasks on both sides of it, which the count does not tell apart, while the chat's block for the latest `tasks` call lists every task in the expanded view.
+1. **Replace the whole list.** Matches Claude Code's `TodoWrite` and Codex's `update_plan`: restating all statuses prevents stale items and avoids task IDs (whereas oh-my-pi's phase-editing `todo` needs a larger schema).
+2. **Reject a second task in progress.** Claude Code and Codex state the rule in prompts only, and oh-my-pi demotes extras silently. Rejecting tells the model what broke without silently activating the wrong task.
+3. **Clear a finished list.** Matches Claude Code's `TodoWrite` so the panel shows only remaining work, with the description asking the model to send an empty list when changing course.
+4. **Use the transcript as the source of truth.** Call inputs already record the list, avoiding duplicate state that could diverge from the active branch, matching Claude Code (last `TodoWrite` call) and oh-my-pi (branch tool results).
+5. **Remind the model once at the boundary.** Compaction is the only time prior `tasks` calls drop from context, avoiding Claude Code's periodic reminders while the list is still visible.
+6. **Count hidden tasks like every other overflow.** Uses `... +N` to match chat footers and queued prompts (the expanded `tasks` chat block always shows every item even when the panel window hides items on both sides).
 
 ## Sources
 

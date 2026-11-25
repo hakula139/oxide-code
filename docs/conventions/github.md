@@ -38,6 +38,6 @@ Follow the [shared Git workflow](https://github.com/hakulab/plugins/blob/main/pl
 
 ### Project
 
-When the maintainer selects work for an agent, add the existing issue to the `Oxide Code` project in `hakulab` if needed and set it to `Ready`. Before taking an item, check its open dependencies, linked pull requests, and active worktrees or sessions for overlapping work.
+When the maintainer selects work for an agent, add the issue to the `Oxide Code` project in `hakulab` if needed and set it to `Ready`. Before starting, check open dependencies, linked PRs, and active worktrees or sessions for overlapping work.
 
-Move the item to `In Progress` when you start. If you hand it back, use `Ready` when another agent can take it, or `Todo` while a blocker recorded on the issue remains open. Close completed issues through the normal merge workflow. Setting `Done` manually also closes the issue. If you cannot update the project, report the pending status change in the handoff.
+Move the item to `In Progress` when starting. When handing back, set `Ready` if another agent can take it, or `Todo` while a recorded blocker remains open. Close completed issues via the normal merge workflow (setting `Done` manually also closes the issue). Report pending status updates in the handoff if you cannot update the project.

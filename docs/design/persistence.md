@@ -1,6 +1,6 @@
 # Session Persistence
 
-`ox` stores every session in one SQLite database, commits each write to a session under its state's lock, and rebuilds the transcript on resume from the chain its head names. JSONL is the interchange form that `ox export` writes and `ox -r <file>` imports.
+`ox` stores every session in one SQLite database, commits each write under the session state's lock, and rebuilds the transcript on resume from the chain its head names. JSONL is the interchange format for `ox export` and `ox -r <file>`.
 
 ## Storage Layout
 
@@ -12,20 +12,18 @@ $XDG_DATA_HOME/ox/
 └── locks/sessions.db.lock        # Held while a process sets up the store
 ```
 
-The data directory has mode `0700`. On Unix the store creates `sessions.db` with mode `0600` before SQLite opens it, since SQLite gives the `-wal` and `-shm` files the main file's mode. WAL [does not work over a network filesystem](https://www.sqlite.org/wal.html), and SQLite cannot detect one reliably, so the [guide](../guide/sessions.md#where-sessions-live) states the local-filesystem requirement and the store does not probe for it.
-
-`store::artifact_dir` names a session's artifact directory, which holds its [spilled tool output](truncation.md#spill-files), and `SessionStore::delete` removes the directory with the rows.
+The data directory has mode `0700`. On Unix, the store creates `sessions.db` with mode `0600` before SQLite opens it so `-wal` and `-shm` inherit that mode. WAL [does not work over a network filesystem](https://www.sqlite.org/wal.html), and SQLite cannot detect one reliably, so the [guide](../guide/sessions.md#where-sessions-live) documents the local-filesystem requirement without runtime probing. `store::artifact_dir` locates [spilled tool output](truncation.md#spill-files), and `SessionStore::delete` removes the directory with the rows.
 
 ## Connection
 
-- **Bundled SQLite.** `rusqlite` builds SQLite from source, so every platform gets the fix for the WAL-reset bug that corrupts a database when connections in separate processes write or checkpoint concurrently ([how to corrupt](https://www.sqlite.org/howtocorrupt.html), fixed in [3.51.3](https://www.sqlite.org/releaselog/3_51_3.html)). `ox` runs in exactly that multi-process case, and the system SQLite on macOS and older distributions predates the fix.
-- **Open.** Each process opens the store once at startup, and the TUI's `/resume` picker reuses that handle. `SessionStore::open` holds an exclusive lock on `locks/sessions.db.lock` while `schema::open` switches a fresh file to WAL and creates its schema, because leaving rollback mode upgrades a read lock to a write lock, which SQLite fails at once without calling the busy handler. A store already at this revision opens without the write lock, and only a migration runs under `BEGIN IMMEDIATE`. A file SQLite cannot read fails the open with the recovery steps of the [sessions guide](../guide/sessions.md#where-sessions-live), in the same order. The open reads only the header and the schema, so deeper damage surfaces at the first write or listing that reaches it.
-- **Per connection.** `synchronous = NORMAL`, `checkpoint_fullfsync = ON`, a 5 s busy timeout, and `foreign_keys = ON`. In WAL mode, `NORMAL` survives a process crash, while power loss may roll back the last commits but leaves the file intact as long as each checkpoint reaches the disk in order. macOS orders a sync only with `F_FULLFSYNC`, which `checkpoint_fullfsync` turns on for checkpoints at the cost of one full flush each, and other systems ignore it.
-- **Transactions.** Writes run under `BEGIN IMMEDIATE`, so a commit's head check and the writes that depend on it happen under the write lock. Reads use deferred transactions and never write.
+- **Bundled SQLite.** `rusqlite` compiles SQLite from source so every platform gets the WAL-reset corruption fix for concurrent multi-process writes and checkpoints ([how to corrupt](https://www.sqlite.org/howtocorrupt.html), fixed in [3.51.3](https://www.sqlite.org/releaselog/3_51_3.html)), which macOS and older system SQLite builds lack.
+- **Open.** Each process opens the store once at startup and reuses that handle in `/resume`. `SessionStore::open` takes an exclusive lock on `locks/sessions.db.lock` while `schema::open` switches a fresh file to WAL and creates the schema (leaving rollback mode upgrades a read lock to a write lock and fails immediately without invoking the busy handler). An existing store at the current revision opens without the write lock, and migrations run under `BEGIN IMMEDIATE`. Unreadable files fail to open with the recovery steps from the [sessions guide](../guide/sessions.md#where-sessions-live). Because open inspects only the header and schema, deeper corruption surfaces on the first write or listing that hits it.
+- **Per connection.** Sets `synchronous = NORMAL`, `checkpoint_fullfsync = ON`, a 5 s busy timeout, and `foreign_keys = ON`. In WAL mode, `NORMAL` survives process crashes and keeps the database intact across power loss (at most rolling back recent commits) as long as checkpoints reach disk in order. `checkpoint_fullfsync` enables `F_FULLFSYNC` on macOS checkpoints and is a no-op elsewhere.
+- **Transactions.** Writes run under `BEGIN IMMEDIATE` so the head check and dependent writes share one write lock. Reads use deferred transactions and never write.
 
 ## Schema
 
-Columns hold what SQL filters, sorts, joins, or compares. JSON text holds the payloads only Rust reads, through their serde types, so content blocks evolve under the rules in [Compatibility](#compatibility). Timestamps are Unix milliseconds, and every table is `STRICT`.
+Columns store fields SQL filters, sorts, joins, or compares, while JSON text columns store serde payloads evolving under [Compatibility](#compatibility). Timestamps are Unix milliseconds, and every table is `STRICT`.
 
 | Table      | Row                    | Notable columns                                                                                                   |
 | ---------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------- |
@@ -33,100 +31,83 @@ Columns hold what SQL filters, sorts, joins, or compares. JSON text holds the pa
 | `messages` | One per message        | Commit-order `seq`, `parent_id`, content JSON, and the `context`, `compact` boundary, and `tool_metadata` JSON    |
 | `usage`    | One per billed request | Request ID and the usage record JSON                                                                              |
 
-1. **Immutable rows and a head pointer.** Rows never change once written, and only deleting their session removes them. `head_id` names the tip of the active branch, so rewind, compaction, and fork move the head while abandoned rows stay for export. The chain from the head back to the nearest NULL parent, which is the session start or the last compaction root, is the transcript resume reads.
-2. **Parents first.** `messages` keys on `(session_id, id)`, and a composite foreign key on `(session_id, parent_id)` makes "a message never precedes its parent, and both belong to one session" a database invariant.
-3. **Last activity.** `updated_at` changes only when the head moves, so renaming or archiving a session keeps its place in listings.
+1. **Immutable rows and a head pointer.** Written rows never change and leave only when their session is deleted. `head_id` marks the active branch tip, so rewind, compaction, and fork move the head while preserving abandoned rows for export. Resume walks back from `head_id` to the nearest NULL parent (session start or last compaction root).
+2. **Parents first.** `messages` keys on `(session_id, id)` with a composite foreign key on `(session_id, parent_id)`, enforcing that a parent precedes its child within the same session.
+3. **Last activity.** `updated_at` changes only when the head moves, keeping listing order stable across renames and archives.
 
-Prompt-history recall walks user-role rows in original `(created_at, id, seq)` order, newest first, in bounded batches through the revision 2 partial index `messages_by_prompt_time`. It checks format and project eligibility before decoding content, and only ordinary text blocks contribute. Each batch advances past every row it examined, filtered ones included, so a page can be empty before the history is exhausted. Logical message IDs deduplicate fork and import copies, while separate submissions of the same text stay distinct. The walk includes archived sessions and rows that rewind or compaction detached, and deleting a session removes only its own copies.
+Prompt-history recall walks user-role rows newest-first in `(created_at, id, seq)` order via bounded batches on the revision 2 partial index `messages_by_prompt_time`. It filters by format and project before decoding JSON, collects only ordinary text blocks, and advances past every examined row (so a batch may be empty before exhaustion). Logical message IDs deduplicate fork and import copies while keeping separate identical submissions distinct. The walk includes archived and detached rows, and deleting a session removes only its own copies.
 
 ## Compatibility
 
-The store follows the [stability surface](../../RELEASING.md#stability-surface) through two version numbers:
+The store enforces the [stability surface](../../RELEASING.md#stability-surface) with two version numbers:
 
-- **Revision** (`PRAGMA user_version`). A revision only adds tables, indexes, and nullable or defaulted columns. A newer binary migrates under `BEGIN IMMEDIATE`, and an older binary keeps working on a newer revision, since nothing it relies on changed. An incompatible schema change would write a new file, such as `sessions-2.db`, so an older binary keeps the file it understands.
-- **Content format** (`sessions.format`). Every message commit stores the binary's `CONTENT_VERSION`, which bumps when an older binary would misread a newer payload: when a closed serde enum, such as a content block `type` or a task `status`, gains a value, or when a field older binaries require goes away. Listings and `ox -c` hide sessions of a newer format, and loading or importing one fails with an upgrade message.
+- **Revision** (`PRAGMA user_version`). Additive only (new tables, indexes, and nullable or defaulted columns). Newer binaries migrate under `BEGIN IMMEDIATE`, and older binaries continue working unchanged. An incompatible schema change would use a new file such as `sessions-2.db`.
+- **Content format** (`sessions.format`). Every message commit records `CONTENT_VERSION`, bumped whenever an older binary would misread a payload (such as a new closed serde enum variant or a dropped required field). Listings and `ox -c` hide newer-format sessions, and loading or importing one fails with an upgrade prompt.
 
-Within a format, a newer binary reads an older payload as long as each change adds a field that defaults when absent, removes a field the loader ignores, or changes a shape the loader still reads in its old form.
+Within one format version, newer binaries read older payloads by defaulting added fields, ignoring removed fields, or accepting old shapes.
 
-A reasoning block stores the `wire` and `model` that produced it beside a `payload` only that wire can read, such as an Anthropic `thinking` block's `signature`. The Anthropic wire sends every Anthropic block back unchanged whichever model produced it, as Anthropic's guide to [switching models](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#switching-models) asks, so the recorded `model` changes no request. Which blocks a model reads depends on the platform, and the API drops or ignores the rest, as the [research note](../research/api/extended-thinking.md#constraints) details.
+Reasoning blocks store `wire`, `model`, and wire-specific `payload` (such as an Anthropic `thinking` signature). The Anthropic wire replays every Anthropic block unchanged regardless of `model`, following Anthropic's [switching models](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#switching-models) guidance, letting the API drop unreadable blocks ([extended-thinking research](../research/api/extended-thinking.md#constraints)). Server tool results (such as `web_search_tool_result`) persist as `server_tool_result` with the API block type in `kind` and all other fields intact for verbatim replay. Generated text blocks carry an optional `origin` (omitted on the wire) so displays hide reminders, render interruptions, and show compact summaries once, while unattributed text stays visible even if it contains reminder tags or interruption markers.
 
-A server tool's result, such as a `web_search_tool_result`, is stored as a `server_tool_result` block that keeps the API's block type in `kind` and every other field unchanged, so the Anthropic wire sends it back as the API returned it.
+Release fixtures in `crates/ox-core/src/session/fixtures/` lock compatibility since `v0.1.0` via tests in `session/handle.rs`:
 
-Generated text blocks carry an optional `origin`, which the provider request omits while keeping the text. Transcript displays use it to hide reminders, render interruptions, and show a compact summary once. Text without an origin stays visible even when it contains a reminder tag or interruption marker.
-
-Tests in `session/handle.rs` enforce the guarantee for stable releases from two fixtures per release since `v0.1.0`, named after the tag in `crates/ox-core/src/session/fixtures/`:
-
-- **Fixture source.** One test writes a session holding every row kind and content block, with messages, prompt contexts, and metadata after its compaction so a resume reads them. `session_format::writes_every_row_kind` snapshots a deterministic SQL dump of the store, schema then rows, with per-run UUIDs and timestamps masked, and `session_format::exports_every_row_kind` snapshots the session's masked export. Each stable release PR copies the two snapshots as `{tag}.sql` and `{tag}.jsonl`, as [Release Preparation](../../RELEASING.md#release-preparation) describes.
-- **Resume check.** `session_format::resumes_from_every_release_fixture` fills each fixture's masks with fixed values, loads the dump or imports the export into a fresh store, then lists and resumes the session. It snapshots what the listing and the resume recovered: the title, branch, archive state, compaction, prompt context, transcript, tool metadata, recorded usage, tasks, and file snapshots. It then appends a message and checks that it continues the resumed chain. The same check runs on the dump this build writes, so a PR that changes the format also shows how its sessions will resume.
-- **Changed behavior.** A change that alters how an old release's session resumes fails that fixture's snapshot. Fixtures are frozen release output, so never edit them, and accept a changed fixture snapshot only when this section allows the change.
+- **Fixture source.** One test writes a session covering every row kind and content block, including post-compaction messages, prompt contexts, and metadata. `session_format::writes_every_row_kind` and `session_format::exports_every_row_kind` snapshot masked deterministic SQL dumps and JSONL exports, which each stable release copies to `{tag}.sql` and `{tag}.jsonl` ([Release Preparation](../../RELEASING.md#release-preparation)).
+- **Resume check.** `session_format::resumes_from_every_release_fixture` unmasks each fixture into a fresh store, lists and resumes it, snapshots all recovered state (title, branch, archive state, compaction, prompt context, transcript, tool metadata, usage, tasks, file snapshots), and appends a message continuing the chain. Running on the current dump also verifies new format changes.
+- **Changed behavior.** Never edit frozen release fixtures. Accept a changed resume snapshot only when allowed by this section.
 
 ## Session Lifecycle
 
 ### Locked Writes
 
-Each open session keeps one `SessionState` behind a mutex that every `SessionHandle` clone shares. A write runs on a `spawn_blocking` thread, where it takes the lock, applies its change to the state, and commits what the change queued as one transaction, so waiting on another process's write lock leaves the async runtime free. The state owns one connection, opened by its first commit. The engine and the title task are the only writers, and each awaits its own writes in order, so their writes run in lock order, which the in-state manual-title check makes safe. A caller that stops waiting leaves its write to finish on the blocking thread. A write that panics while holding the lock stops persistence as a failed commit does and also reaches the caller, so a panicking engine write ends `ox` with the panic, and the recovered lock mainly keeps the conversation going after a panicking title-task write.
+Each open session shares one mutex-guarded `SessionState` across all `SessionHandle` clones. Writes run on `spawn_blocking`, locking the state, applying changes, and committing queued records in one transaction (opening the state's connection on first commit) so lock waits stay off the async runtime. Only the engine and title task write, each awaiting its own writes in order, with the in-state manual-title check guarding interleavings. Dropping a caller leaves its write to finish on the blocking thread. A panic under the lock stops persistence like a failed commit and propagates to the caller (ending `ox` for engine writes, while recovering the lock lets conversation continue after a title-task panic).
 
-`agent_turn` records a tool round with one `SessionHandle::record_round` write, which saves the assistant row and then the row of the tool results answering it, with their metadata. One commit holds the whole round, so a resumed session always reads the assistant turn before its results, and resume sanitization drops a tool call whose result is missing.
-
-### Lazy Materialization
-
-A fresh session's row, title included, is inserted from the in-memory state in the transaction of its first message. A session that exits before any message leaves no row, and a `/rename` before the first message lands with it.
+A fresh session's row (including any early `/rename`) inserts lazily in the transaction of its first message, so empty sessions leave no row. `agent_turn` persists each tool round via one `SessionHandle::record_round` commit storing the assistant message followed by its tool-result message and metadata, keeping calls and results atomic.
 
 ### Write Failures
 
-A failed commit rolls back its whole transaction and stops persistence for the rest of the process's session, while the conversation continues in memory. Nothing is retried, since a later commit would chain onto rows that never landed, and the failures SQLite still reports, such as a full disk or a lock held past the busy timeout, do not clear on a blind retry. Every later commit with records fails with a stopped-persistence error naming the first failure, and a later resume continues from the last commit. Each failed commit is logged on its blocking thread, including one whose caller stopped waiting.
+A failed commit rolls back its transaction and disables persistence for the rest of the process's session while conversation continues in memory. Nothing retries because later rows cannot chain onto missing parents and post-busy-timeout errors (such as a full disk) are persistent. Later commits fail with a stopped-persistence error naming the first failure, resume continues from the last committed row, and every failure logs on its blocking thread even if the caller dropped.
 
-Each write returns a `WriteReport`, whose `failure` the engine turns into one `Event::Error`:
+Each write returns a `WriteReport` whose `failure` the engine emits as `Event::Error`:
 
-- A failure is reported once per session, by the first write that fails.
-- An archive reports every failure, since a bare `/archive` rolls to a fresh session only once its archive commits.
-- A compaction always takes effect in memory, and its boundary is on disk exactly when its commit landed. The engine reports the compaction's write error after `SessionCompacted`, which clears the TUI's chat, so the notice stays visible.
+- Reported once per session on the first failed write.
+- Archive reports every failure, since bare `/archive` rolls to a new session only after committing.
+- Compaction always takes effect in memory, and its write error emits after `SessionCompacted` (which clears chat) so the notice stays visible.
 
 ### Resume and Sanitization
 
-`ox -c`, `ox -r`, and `/resume` take the session's liveness lock, read its row, and walk the chain from `head_id` with a recursive CTE until a NULL parent, at a cost proportional to the chain since the last compaction. The newest `context` on the chain is replayed, the root's `compact` gives the boundary, `tool_metadata` merges along the chain, and every `usage` row of the session is summed.
+`ox -c`, `ox -r`, and `/resume` take the session's liveness lock, read its row, and walk `head_id` via recursive CTE back to a NULL parent (cost proportional to the chain since last compaction). The loader replays the newest `context`, reads the root's `compact` boundary, merges `tool_metadata`, sums all `usage` rows, and restores the [task list](tasks.md) from the last successful `tasks` call on the chain (falling back to the compaction root's `tasks` field).
 
-Sanitization then drops tool calls without results and results without calls, and injects head / tail sentinels. It keeps message boundaries, including adjacent messages with the same role, which the [Messages API](https://platform.claude.com/docs/en/api/messages/create) accepts. A client call pairs with a user `tool_result`, and a server call with the result block in the same or a later reply. A server call that a `pause_turn` left waiting is dropped, because the next prompt closes the turn and the API rejects a call without its result.
+Sanitization drops unmatched tool calls and orphan results, injects head / tail sentinels, and preserves message boundaries including adjacent same-role messages accepted by the [Messages API](https://platform.claude.com/docs/en/api/messages/create). Client calls pair with user `tool_result` blocks, server calls pair with result blocks in the same or a later reply, and server calls left waiting by `pause_turn` are dropped because the next prompt closes the turn.
+
+Resume marks the first-prompt title opportunity spent once the chain has a user prompt or starts at a compaction root, and a manual title skips it ([AI-Generated Titles](#ai-generated-titles)).
 
 ### Refused Turns
 
-The API keeps refusing while a refused turn stays in the conversation, so when the model stops with `refusal`, the engine rolls back the whole turn, meaning its prompt, the queued prompts it took in, and its tool rounds:
+Because the API keeps refusing while a refused turn remains in history, a `refusal` stop rolls back the entire turn (prompt, drained queued prompts, and tool rounds):
 
-- It truncates the live transcript to its length before the prompt and restores what the model had seen of the user context and the file tracker.
-- It moves the session's head back to the message the prompt chained from, so a resume leaves the turn out too. The next prompt chains from that message and records the prompt context again if the refused prompt first carried it.
-- A rewind to before the first prompt stops that prompt's title request, so the next prompt titles the session unless the user named it manually.
-- It emits `TurnRolledBack` before the turn's `TurnFailed`, and the TUI hands the refused prompt back into the empty input and the queued prompts to the head of the queue, which waits for the user.
+- Truncates the live transcript to its pre-prompt length and restores seen user context and file tracker state.
+- Rewinds `head_id` to the pre-prompt parent so resume excludes the turn and the next prompt re-records prompt context if the refused prompt first carried it.
+- Aborts the first-prompt title task if rewinding before the first prompt, leaving auto-titling active unless manually named.
+- Emits `TurnRolledBack` before `TurnFailed`, returning the prompt to the empty input and drained prompts to the queue head (held for the user).
 
-A turn that compacted partway through rolls back only to the compaction's synthetic message. The summary already covers the prompts the turn took in before the compaction, so the TUI hands back only those it took in after. The turn's requests stay in the session's cost estimate, and its tool calls' effects, such as changed files and started background shells, remain.
-
-Resume derives the first-prompt title opportunity from what it read: the opportunity is used once the chain holds a user prompt or starts at a compaction root. A manual title skips it, as [AI-Generated Titles](#ai-generated-titles) describes.
+A turn that compacted partway rolls back only to the compaction root, returning only prompts drained after compaction. Request costs and external tool effects (file edits, started background shells) remain.
 
 ### Prompt Context
 
-A session records its prompt context: the environment section, the first message's rendered user context, and what the model has seen of it. [System Prompt](prompt.md) covers what the context holds and how later changes reach the model.
-
-- **Record with the carrying message.** The context is stored on the row of the first user message that carries it, and a compaction records the refreshed context on its synthetic root the same way.
-- **Replay the resolved branch.** On resume, the newest context on the chain is replayed verbatim, so the request sends the same cached system prompt and first message.
-
-### Task List
-
-The session's [task list](tasks.md) needs no column of its own. On resume, the loader takes it from the last successful `tasks` call on the chain, or else from the `tasks` field of the root's compaction record, which holds the list the summarized transcript left.
+Sessions record the environment section, first rendered user context, and seen state ([System Prompt](prompt.md)) on the first carrying user message (and refreshed context on each compaction root). Resume replays the newest context on the chain verbatim to preserve the cached system prompt and prefix.
 
 ### Archiving
 
-`archived_at` decides whether default listings and `ox -c` skip the session, and archiving leaves `updated_at` alone. One conditional update moves a session only out of the other state, so an archive keeps its first archive time, and the update's row count tells two processes archiving one session which of them changed it.
+`archived_at` hides sessions from default listings and `ox -c` without changing `updated_at`. A conditional update transitions only from the opposite state, preserving the first archive timestamp and letting concurrent archivers see which call changed the row.
 
-Bare `/archive` archives the live session before the roll that finalizes it. `/archive <prefix>`, `/unarchive <prefix>`, and Ctrl+X in the `/resume` picker update another session's row, named by an ID or prefix that the engine resolves. The engine owns the archive through completion and runs the update on a blocking worker, so input and rendering stay available while another process holds the write lock. Later session operations wait for that completion, and the result reaches chat even after the picker closes. Resuming an archived session unarchives it.
+Bare `/archive` archives the live session before rolling. `/archive <prefix>`, `/unarchive <prefix>`, and Ctrl+X in `/resume` resolve another session in the engine and run the update on a blocking worker so UI input stays responsive while another process holds the write lock. Later session ops wait on completion, results reach chat even after the picker closes, and resuming an archived session unarchives it.
 
 ### Liveness Locks
 
-A process that opens a session for writing takes a shared lock on `locks/{session-id}.lock` and holds it until its last handle on the session drops, at a roll or at exit. The kernel releases the lock when the process dies, so no stale-lock cleanup exists. `/delete` takes a non-blocking exclusive lock on the same file and refuses a session another process has open. Resume takes the lock before it reads the row, so a racing delete either sees the lock or finishes first and the resume finds no session. Delete commits the row removal first and then removes the artifacts and the lock file, so a failure leaves at most orphaned files.
-
-The lock serves delete alone, since two processes holding one session open is the normal case the lazy fork handles.
+Opening a session for writing acquires a shared lock on `locks/{session-id}.lock` until the last handle drops on roll or exit (automatically released by the kernel on crash, needing no stale-lock cleanup). `/delete` acquires a non-blocking exclusive lock and refuses open sessions. Resume acquires the lock before reading the row so a racing delete either sees the lock or completes first. Delete commits row removal before deleting artifacts and the lock file, so crashes leave at most orphaned files. The lock guards delete alone, since concurrent writers are handled by lazy fork.
 
 ### Lazy Fork
 
-A commit that moves the head first compares `head_id` with its base, the head this process last committed or loaded. Rows are immutable, so a matching head means the active branch is exactly the one this process holds in memory, and the commit lands in place. A different head means another process moved it since, so the commit forks. The check runs under `BEGIN IMMEDIATE` with the writes that follow, and it needs no owner row, lease, or clock.
+Any commit that moves `head_id` checks whether the stored head still matches this process's base head (the last head it committed or loaded) inside `BEGIN IMMEDIATE`. Because rows are immutable, a match commits in place while a mismatch forks, requiring no owner row, lease, or clock.
 
 | Sequence on session S                                     | Result                                                |
 | --------------------------------------------------------- | ----------------------------------------------------- |
@@ -137,15 +118,15 @@ A commit that moves the head first compares `head_id` with its base, the head th
 | B renames or archives S, then A writes                    | A continues S because metadata does not move the head |
 | B rewinds S to exactly the head A last saw, then A writes | A continues S, as that head names A's branch          |
 
-In the same transaction, the forking process takes the fork's liveness lock, inserts the fork's row with `forked_from` set to S and the title and manual flag copied from S, copies its base chain back to the nearest NULL parent with the message IDs unchanged, and writes its records there. It then adopts the fork's title and manual flag as the commit left them and releases S's lock. Pre-compaction rows, other branches, and usage stay in S, so each request is counted once, in the session that made it. Keeping the message IDs keeps the process's chain tip and rewind checkpoints valid in the fork.
+In the same transaction, the forking process takes the new lock, inserts the fork row (`forked_from = S`, copying title and manual flag), copies its base chain back to the nearest NULL parent with original message IDs intact (preserving chain tip and rewind checkpoints), writes its new records, adopts the fork's title and manual flag, and releases S's lock. Pre-compaction rows, other branches, and usage stay in S so each request is billed once.
 
-The handle's shared state holds the live session ID and artifact directory, so `session_id()` and `artifact_dir()` follow the fork from the next request and tool call. New spills land under the fork, while spill paths in copied tool results still name S's directory. The report of the forking write carries `Fork { from, to }`, and the engine emits `Event::SessionForked`. The TUI moves its status bar to the fork, the headless driver prints the fork notice to stderr and reports the fork's ID in its result, and [Several Processes on One Session](../guide/sessions.md#several-processes-on-one-session) covers the user-facing notices and labels. File snapshots at finish describe the files as of the head, so they are written only while the session's head still equals the process's base.
+Shared handle state updates `session_id()` and `artifact_dir()` to the fork for later requests and spills (copied tool results still reference S's spills). The `WriteReport` carries `Fork { from, to }`, emitting `Event::SessionForked` (updating the TUI status bar and printing a stderr notice in headless runs, as [Several Processes on One Session](../guide/sessions.md#several-processes-on-one-session) describes). Finish-time file snapshots write only if `head_id` still equals the process's base.
 
 ### Export and Import
 
-`ox export` writes a session as JSONL to stdout: a `session` record, then every `message` record in commit order (branches and pre-compaction messages included), then every `usage` record, with RFC 3339 timestamps. `ox -r <file>` imports an export and resumes the session that holds its head, as [Moving a Session Between Machines](../guide/sessions.md#moving-a-session-between-machines) describes. Import checks that the input starts with a `session` record of a valid ID and a supported format and that each parent precedes its children, naming the line on error. Rows already present are kept once.
+`ox export` streams JSONL to stdout: one `session` record, all `message` records in commit order (including branches and pre-compaction rows), and all `usage` records with RFC 3339 timestamps. `ox -r <file>` imports and resumes ([Moving a Session Between Machines](../guide/sessions.md#moving-a-session-between-machines)), validating a leading supported-format `session` record with valid ID and parent-before-child ordering (reporting line numbers on error) while deduplicating existing rows.
 
-An export carries every message its session ever had, so the head lands by which messages each side holds, a lookup that compaction roots and rewinds cannot hide the way they cut the chain:
+Because exports include every message, head resolution checks message membership directly so compaction roots and rewinds cannot hide shared ancestry:
 
 | Local store                                  | Result                                                         |
 | -------------------------------------------- | -------------------------------------------------------------- |
@@ -155,48 +136,42 @@ An export carries every message its session ever had, so the head lands by which
 | Neither, and a fork of the session relates   | The newest such fork receives the import by the same two rules |
 | Neither, and no fork relates                 | The import becomes a fork with `forked_from` set to the ID     |
 
-A session the import creates, new or a fork, records the importing store's project and launch directory, so it lists in the project that imported it. A process holding the session open while an import moves its head forks at its next write, as it would for any other writer.
+Newly created or forked imports record the local store's project and launch directory so they appear in the importing project. Any process holding the target session open forks on its next write.
 
 ### AI-Generated Titles
 
-In the TUI, the first user prompt of a fresh session spawns a tokio task that asks Haiku through `Client::complete` for a 3-7 word sentence-case title, constrained by a structured-outputs JSON schema unless `CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS` turns it off. It keeps the reply's first line under the 80-column cap of other titles.
+In the TUI, a fresh session's first prompt spawns a tokio task calling Haiku via `Client::complete` for a 3-7 word sentence-case title (using structured JSON output unless `CLAUDE_CODE_DISABLE_STRUCTURED_OUTPUTS` disables it), keeping the first line within the 80-column cap:
 
-- **Request.** The prompt goes inside `<first_prompt>` tags, and a prompt over 2,000 characters is cut to its first 1,500 and as much of its end as fits around a `... [N characters omitted] ...` line, so a request that leads a long paste survives. The turn ends with an instruction to title the prompt, so an imperative prompt reads as text to title even without the schema.
-- **Lifetime.** The session owns the task, and a rename, a rewind to before the first prompt, or finalizing the session aborts it first, so a late title never reports on a session that was renamed, rewound, or ended. A write the task already started still commits, possibly after the session ends, and after a rename the manual flag refuses a late AI title.
-- **Usage and failures.** Once the API answers, the task records the request's usage before parsing the reply, since a reply without a usable title is billed too. Generation failures only log a warning, while a failed title or usage write surfaces like any other session write error.
+- **Request.** Wraps the prompt in `<first_prompt>` tags (cutting prompts over 2,000 chars to the first 1,500 plus tail around `... [N characters omitted] ...`) and ends with a titling instruction so imperative prompts are titled even without a schema.
+- **Lifetime.** Owned by the session and aborted on rename, rewind before the first prompt, or session finalization. An already-started write still commits, gated by the manual flag.
+- **Usage and failures.** Records usage before parsing so unusable replies are still billed. Generation errors only log a warning, while title or usage write errors surface as session write errors.
 
-The session state's row owns the manual flag, which `/rename`, a resume, or a fork's copy of its source sets, and while it is set, no first-prompt or generated title replaces the manual one. The title commit enforces the same rule, and every commit that writes a title or forks reads the stored title back into the row, so a `/rename` from another process reaches this process at its next title write. The task announces its title only if the title is still the session's once its write commits.
+`/rename` sets `title_manual` (and resume or fork copies the source's flag), blocking automatic overwrites both in state and at commit while set. Every title write or fork refreshes the stored title into state so cross-process renames propagate, and the task announces its title only if that title still holds after commit.
 
 ### Session Cost
 
-Each request behind a turn, a `/compact` or auto-compaction summary, or an AI title adds a `usage` row, keyed by a per-request ID so a request is stored once. Its record holds the request's `model` ID, its `cache_ttl` (`"5m"` or `"1h"`), and the four provider token counts, so the engine prices each request at the rates it ran with, even after a `/model` swap or a TTL change.
-
-On resume, the loader returns every usage row of the session, abandoned branches and pre-compaction requests included, since the session paid for each. The engine sums their estimated cost into the session total, which `/clear` resets with the fresh session. A fork's resumed cost covers only its own requests, while the live status bar keeps the process's running total.
+Each turn, compaction summary, or AI title request inserts a `usage` row keyed by per-request ID (deduplicating storage) with `model`, `cache_ttl` (`"5m"` or `"1h"`), and the four token counts, allowing accurate pricing across model or TTL changes. Resume sums every usage row of the session (including abandoned branches and pre-compaction requests) into the session total, `/clear` resets it, and a fork's resumed cost counts only its own requests while the live status bar keeps the process total.
 
 ## Listing
 
-[Listing Sessions](../guide/sessions.md#listing-sessions) covers the CLI flags, columns, and archive views.
-
-- **Query.** Each page is one indexed query ordered by `updated_at` and then ID, newest first, and the picker's next page continues after the last row through a keyset cursor so pages never overlap. Sessions of a newer content format stay hidden. The picker reads pages on a worker thread.
-- **Prefix lookup.** A prefix holding a character no session ID holds matches nothing, so GLOB metacharacters never reach SQL, and the lookup uses the primary key.
-- **Display safety.** Control characters in titles and project paths, line breaks included, are escaped so each row stays on one line and cannot change the terminal's state.
+[Listing Sessions](../guide/sessions.md#listing-sessions) covers CLI flags, columns, and archive views. Pages use indexed keyset queries ordered by `(updated_at, id)` newest-first (hiding newer content formats, running on a worker thread in the picker) so pages never overlap. Prefix lookups reject characters invalid in session IDs so GLOB metacharacters never reach SQL and queries hit the primary key. Display escapes control characters and line breaks in titles and project paths so each row stays single-line and terminal-safe.
 
 ## Design Decisions
 
-1. **One store.** SQLite holds every session and JSONL is only interchange, so no second copy can drift and no read path reconciles two stores.
-2. **Bundled SQLite.** Every supported platform gets the WAL-reset fix that multi-process use requires.
-3. **JSON payload columns.** Message content, context, compaction info, tool metadata, and usage keep their serde types, so their evolution rules stay as they are and only searchable or sortable fields become columns.
-4. **Immutable rows and a head pointer.** Rewind, compaction, and fork move the head, history stays for export, and the head names its chain exactly, which makes the head check a complete fork detector.
-5. **Lazy fork by head check.** A session forks only when a second process writes after another moved the head, needing no owner, lease, or clock. Codex refuses a second writer at open and oh-my-pi gives the first writer a lease, both deciding before anyone writes.
-6. **Import by membership.** An export holds every message, so whether it saw the local head is a lookup that compaction and rewind leave exact, and reusing a related fork keeps repeated imports of a diverged session on one fork.
-7. **Messages keyed by session and ID.** A fork or diverged import copies rows with their UUIDs, so live checkpoints stay valid without remapping.
-8. **Usage keyed by request and never copied.** Each request is stored once, so totals across sessions stay exact.
-9. **Liveness locks for delete only.** Kernel-held locks vanish with their process, so delete safety needs no stale-lock recovery.
-10. **No retry.** Without torn writes, the remaining failures are persistent, so a failed commit stops persistence with one report.
-11. **Writes under a lock.** Every caller needs its write's checkpoint, title seed, and report before continuing, so a write channel would buy no pipelining. Taking the lock on a blocking thread serializes writes without a separate writer task. Codex queues its rollout writes without an ack, which suits a loop that never waits on disk, and pi appends in the caller, the shape this lock keeps off the async runtime.
-12. **Derived title latch and a persisted manual flag.** The title opportunity follows from the chain, and `title_manual` alone gates every automatic title, so no second copy can disagree with either.
-13. **Fork labels from `forked_from`.** The fork keeps the user's title unchanged, and the label tells the two rows apart.
-14. **Search views preserve native result rows.** A result's `tool_metadata` records the call's title and, when the tool sets one, a `result_view`: either the structured view or a marker that the result reads as plain text. Grep in content mode, Glob, and Edit store their structured view, so complete filenames and line numbers survive even when a path contains colons, newlines, or trailing whitespace, and paths keep their search-time spelling on replay. Search results with notes, and output capped into a spill file, store the text marker, so their warnings and spill locations render with the result text, and errors always render their error text. Read and Tasks store no view and derive it on every render, from the result text and the call's input respectively, because storing it would repeat the file content or the task list. A result without a stored view uses the tool's own derivation.
+1. **One store.** SQLite is the single source of truth and JSONL is interchange only, avoiding drift or reconciliation between two stores.
+2. **Bundled SQLite.** Gives every supported platform the multi-process WAL-reset fix.
+3. **JSON payload columns.** Serde payloads evolve without schema churn while SQL-queried fields remain columns.
+4. **Immutable rows and a head pointer.** Moves the head cleanly across rewind, compaction, and fork while keeping history for export and making the head check an exact fork detector.
+5. **Lazy fork by head check.** Forks only on an actual concurrent write conflict, needing no owner, lease, or clock (where Codex refuses a second writer at open and oh-my-pi assigns a first-writer lease).
+6. **Import by membership.** Message membership stays exact across compaction and rewind, and reusing a related fork keeps repeated diverged imports on one fork.
+7. **Messages keyed by session and ID.** Preserving UUIDs in forks and diverged imports keeps live checkpoints valid without remapping.
+8. **Usage keyed by request and never copied.** Stores each request once so cross-session totals never double-count.
+9. **Liveness locks for delete only.** Kernel locks vanish on process exit, eliminating stale-lock recovery.
+10. **No retry.** With atomic transactions, remaining SQLite failures are persistent, so stopping persistence with one report avoids broken parent chains.
+11. **Writes under a lock.** Callers need checkpoints, title seeds, and write reports synchronously before continuing, so a write channel adds no pipelining. Locking on a blocking thread serializes writes off the async runtime without a separate writer task (Codex queues rollout writes without an ack, while pi appends inline).
+12. **Derived title latch and a persisted manual flag.** Deriving the first-prompt title opportunity from the chain and gating overwrites solely on `title_manual` prevents state drift.
+13. **Fork labels from `forked_from`.** Distinguishes forks while keeping the user's title intact.
+14. **Search views preserve native result rows.** `tool_metadata` records the call's title and optional `result_view` (structured view or plain-text marker). Content-mode Grep, Glob, and Edit persist structured views so filenames with colons, newlines, or trailing whitespace and search-time path spellings survive replay. Results with notes or spilled output store the text marker so warnings and spill paths render, and errors always render error text. Read and Tasks omit stored views (deriving from result text and call input) to avoid duplicating file bodies or task lists, and missing views fall back to each tool's derivation.
 
 ## Out of Scope
 

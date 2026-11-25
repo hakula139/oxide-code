@@ -1,120 +1,110 @@
 # Tool Permissions and Approval
 
-Every tool call passes through a permission gate. Rules place calls in one of three tiers: deny, ask, or allow. The mode decides the calls the rules leave open, and `plan` also denies every `edit`, `exec`, and `net` call. [Permissions](../guide/permissions.md) covers the modes, rule syntax, and settings for users, [Modals](modals.md) and [File Edits](file-edits.md) cover the approval overlay and file-integrity checks, and this page covers how the gate reaches each decision.
+Every tool call passes through a permission gate with three rule tiers (deny, ask, allow) and a mode deciding unmatched calls (`plan` also denies every `edit`, `exec`, and `net` call). [Permissions](../guide/permissions.md) covers user-facing modes, syntax, and settings, [Modals](modals.md) and [File Edits](file-edits.md) cover the approval overlay and file-integrity checks, and this page covers gate evaluation.
 
 ## Rules and Classes
 
-Rules live in three tables under `[permission]`, one per tier, and each table holds a pattern list for each permission class. Each tool declares its class in its `ToolSpec`, and `Tool::spec` has no default, so a new tool cannot inherit a permissive class. No built-in tool belongs to `net` or `mcp` yet, so those lists parse and validate but match no calls, and MCP tools join `mcp` with [#178](https://github.com/hakulab/oxide-code/issues/178).
+`[permission]` holds three tier tables, each mapping permission classes to pattern lists. Every tool must declare its class in `Tool::spec` (no default, preventing accidental permissive defaults). `net` and `mcp` parse and validate now but match no calls yet (MCP tools join `mcp` in [#178](https://github.com/hakulab/oxide-code/issues/178)). Patterns compile at config load, failing startup with the offending file on syntax errors.
 
-A `Rule` pairs a class with a pattern, and the list that holds it sets its tier. Every pattern compiles when the config loads, so a malformed pattern fails startup and names its file.
-
-`OX_PERMISSION_MODE` overrides `permission.mode`, treating an empty value as absent and failing on a typo as `effort` does, and `--mode` overrides both, which `/config` credits to the flag. Each config layer appends its `permission.<tier>.<class>` lists and `extra_roots`, and the merge records each entry's layer for `/config`. A project's `.ox/config.toml` may set only `deny` and `ask` in `[permission]`, which `reject_project_keys` enforces (**Project files tighten only**).
+`OX_PERMISSION_MODE` overrides `permission.mode` (empty treated as absent, typos fail like `effort`), and `--mode` overrides both (attributed to the flag in `/config`). Config layers append `permission.<tier>.<class>` lists and `extra_roots`, recording source layers for `/config`. `reject_project_keys` restricts `[permission]` in project `.ox/config.toml` to `deny` and `ask` only (**Project files tighten only**).
 
 ## Decision Pipeline
 
-`Tool::prepare` validates and resolves input before the gate, so an invalid call ends without classification or approval. Input validation, Read-before-Edit, and checked file publication stay tool contracts.
+`Tool::prepare` validates and resolves inputs before gating so invalid calls end without classification or prompts. Input validation, Read-before-Edit, and checked file publication remain tool contracts.
 
-`Policy::verdict` is synchronous and stops at the first applicable step:
+`Policy::verdict` is synchronous and returns at the first matching step:
 
-1. A configured deny rule denies.
-2. `plan` denies edit, exec, and net calls.
-3. A configured ask rule asks.
-4. A read-class operation with no external target allows, since it acts only on session state.
-5. A configured allow rule or session grant allows.
-6. An unmatched call uses its mode: `auto` returns `Classify`, `manual` asks, `yolo` allows, and `plan` allows the remaining read-only call.
+1. Configured deny rule → deny.
+2. `plan` mode on `edit`, `exec`, or `net` → deny.
+3. Configured ask rule → ask.
+4. `read`-class call with no external target (session-local state only) → allow.
+5. Configured allow rule or session grant → allow.
+6. Mode fallback: `auto` → `Classify`, `manual` → ask, `yolo` → allow, `plan` → allow (remaining reads).
 
-A command-specific allow rule must cover every extracted simple command. Native path rules apply to file tools and search walks, while Bash uses exec rules and the selected mode without inferring filesystem effects.
-
-A `Verdict` carries its `Basis`, which names the matching rule, session grant, mode, session-local capability, or classifier reason. An explicit ask bypasses classification. An unattended call that needs approval becomes `Unapproved` and never emits an approval request nobody would answer.
+A command-specific allow rule must cover every extracted simple command. Native path rules apply to file tools and search walks, while Bash uses exec rules and the active mode without inferring filesystem effects. Every `Verdict` carries a `Basis` (rule, session grant, mode, session-local capability, or classifier reason). Explicit ask rules bypass classification, and unattended calls needing approval resolve directly to `Unapproved`.
 
 ## Automatic Classification
 
-`engine::classifier` sends a side query through the Anthropic `Client::complete` path, reusing the endpoint, credentials, JSON output support, and transport cancellation. `permission.auto.model` defaults to Haiku, and `permission.auto.instructions` adds the user's natural-language policy. Project files cannot set either.
+`engine::classifier` runs a side query via `Client::complete`, reusing endpoint, credentials, JSON output support, and cancellation. `permission.auto.model` defaults to Haiku and `permission.auto.instructions` appends user policy (neither allowed in project config).
 
-The request holds user-authored text from the live transcript, the validated tool name and full input, any resolved native path, the working directory, and the workspace roots. A logical user turn keeps its original prompts across compaction and adds queued user input as it arrives, while a resumed compacted session has only the visible user text and new follow-ups, since its summary replaced the earlier prompts. Generated text, assistant explanations, and tool output stay out. The pending action is never truncated, and the classifier reads no files and calls no tools to investigate it.
+The prompt sends only user-authored transcript text, the validated tool name and full untruncated input, any resolved native path, working directory, and workspace roots. A logical user turn retains its original prompts across compaction plus queued user prompts as they arrive (a resumed compacted session has only visible user text and new follow-ups). Generated text, assistant explanations, and tool output stay excluded, and the classifier reads no files and calls no tools.
 
-The classifier returns `allow` or `ask` with a short reason. On allow, dispatch emits a `Notice`, and on ask it sends the normal approval request with `Basis::Classifier`. A failed request, invalid JSON, an empty reason, a refusal, or an explicit non-final stop requires approval, and a gateway that omits the stop field still needs valid decision JSON.
+The classifier returns `allow` or `ask` with a short reason. `allow` emits a `Notice`, while `ask` triggers the normal approval flow with `Basis::Classifier`. Errors, invalid JSON, empty reasons, refusals, or non-final stops fail closed to approval (gateways omitting the stop field still require valid decision JSON). Usage is recorded before decision parsing (including malformed replies and refusals) under the classifier model, adding to session cost without altering displayed token usage or context estimates. There is no verdict cache, retry, background task, or static-rule fallback.
 
-Response usage is recorded before the decision is read, malformed decisions and refusals included. Its `UsageRecord` names the classifier model and joins the session cost without replacing the main model's displayed token usage or context estimate. The classifier has no verdict cache, retry of its own, background task, or static-rule fallback for a failed request.
-
-`Mailbox::race` handles interruption and shutdown. A mode switch can arrive while the request runs, so dispatch applies the latest mode and reevaluates the policy before using the classifier's result.
+`Mailbox::race` handles interruption and shutdown. If a mode switch arrives mid-request, dispatch applies it and reevaluates the policy before acting on the classifier result.
 
 ## Mode Switches
 
-`Op::SetMode` switches the engine's policy. The TUI sends it from the `/mode` picker, `/mode <mode>`, Tab, and Shift+Tab, while a headless run sends none, since `--mode` reaches the engine through `Config`. The engine confirms each switch with `Event::ModeChanged` on receipt, which the TUI records in its session snapshot and shows in the status line.
+`Op::SetMode` updates the engine's policy (sent by the TUI from `/mode`, Tab, and Shift+Tab, while headless runs pass `--mode` via `Config`) and confirms immediately with `Event::ModeChanged` for the TUI snapshot and status line.
 
-While idle, the engine applies a switch at once. During a turn, a compaction, or a sign-in, the switch waits in the operation's `Mailbox`, and `Mailbox::apply_mode` hands it to the policy before the gate weighs each call, at each round boundary, and before the engine renders the user context for a prompt or a compaction, so the model reads the mode the policy enforces, as [Prompt](prompt.md#user-context) describes. `Engine::serve` applies a switch still waiting once the operation ends, however it ends (**Mode switches wait for the next gate, round boundary, or context render**).
+Idle switches apply immediately. During a turn, compaction, or sign-in, switches queue in the operation's `Mailbox` and apply via `Mailbox::apply_mode` before the next gated call, round boundary, or prompt / compaction user-context render ([Prompt](prompt.md#user-context)), with `Engine::serve` applying any remaining switch when the operation ends (**Mode switches wait for the next gate, round boundary, or context render**).
 
-Tab steps forward and Shift+Tab backward through `Mode`'s declared order, `auto`, `manual`, `plan`, then `yolo`, wrapping at both ends (**The keyboard cycle reaches `plan` before `yolo` and wraps at both ends**). The TUI steps from the last mode it requested, so a second press before the engine confirms the first moves on. The same order lists the modes in the `/mode` picker, its argument completion, `--mode --help`, and error messages, and the keys stay fixed until configurable key bindings land with [#278](https://github.com/hakulab/oxide-code/issues/278).
+Tab and Shift+Tab cycle forward and backward with wrap through `auto` → `manual` → `plan` → `yolo` (**The keyboard cycle reaches `plan` before `yolo` and wraps at both ends**), stepping from the TUI's last requested mode so rapid presses advance before confirmation. The `/mode` picker, argument completion, `--mode --help`, and error messages use the same order, and keys stay fixed until configurable bindings land ([#278](https://github.com/hakulab/oxide-code/issues/278)).
 
 ## Path Targets
 
-A path tool resolves its target in `Tool::prepare`, before any rule runs, against the session's `Workspace` in its `ToolCtx`. `ToolCtx::path_access`, which every path tool and the `grep` and `glob` roots go through, expands a leading `~`, and `Access::for_path` joins the path to the working directory and walks it one component at a time as the kernel does:
+Path tools resolve targets in `Tool::prepare` via `ToolCtx::path_access` against `Workspace`, expanding leading `~`, joining to the working directory, and walking components via `Access::for_path` as the kernel does:
 
-- It follows every symlink, dangling ones included, and applies `..` from the current position, so a `missing/..` detour cannot hide a later symlink.
-- Past the first missing component, the rest applies as `create_dir_all` would build it, and a walk that cannot finish uses the joined spelling.
-- A non-UTF-8 target keeps its exact `PathBuf` for the tool beside the lossy spelling that rules match.
-- On Windows, it expands existing 8.3 short names and drops NTFS stream suffixes, so `GIT~1` and `.git::$INDEX_ALLOCATION` resolve as `.git`.
+- Follows every symlink (including dangling ones) and resolves `..` at each step so `missing/..` cannot hide a symlink.
+- Applies remaining components past the first missing entry as `create_dir_all` would, falling back to the joined spelling if the walk cannot finish.
+- Keeps the exact non-UTF-8 `PathBuf` alongside the lossy string used for rule matching.
+- On Windows, expands existing 8.3 short names and strips NTFS stream suffixes (`GIT~1`, `.git::$INDEX_ALLOCATION` → `.git`).
 
-An approval and the tool's messages name the resolved path, in the title for `edit` and `write` and in the body for `read`, and the file tools open `Access::resolved()`, the path the gate checked (**Native path tools resolve once and act on the result**). They open with no-follow flags, so a symlink swapped into the final component fails the open, and they check size and type on the opened file. `grep` and `glob` keep the path as written, since read deny rules match that spelling, and walk from the resolved root.
-
-Workspace roots anchor relative rules and inform classification, but they allow no edits by themselves.
+Approvals and tool messages display the resolved path (`edit` / `write` in the title, `read` in the body), and file tools open `Access::resolved()` with no-follow flags and check size and type on the opened descriptor (**Native path tools resolve once and act on the result**). `grep` and `glob` preserve the written path for deny matching while walking from the resolved root. Workspace roots anchor relative rules and inform classification without auto-allowing edits.
 
 ## Command Targets
 
-A `bash` call is parsed with tree-sitter-bash into the simple commands its lists and pipelines join. Each segment keeps its words, leading assignments included, and the index where the program begins, while wrappers and literal script arguments stay ordinary words. The parser resolves no paths and infers no effects.
-
-Quote removal and literal-value tracking tie command patterns to words. A dynamic word, a redirection, or an unsupported construct prevents command-specific allow matching, though the whole-class exec rule `*` can still allow any call that passes the deny and ask checks. Other unmatched calls reach the selected mode, and deny and ask rules still inspect the extracted simple commands. [The user guide](../guide/permissions.md#rules) defines the supported syntax.
+`bash` commands parse via tree-sitter-bash into simple-command segments retaining leading assignments and the program word index, treating wrappers and literal script arguments as ordinary words without path resolution or effect inference. Quote removal and literal tracking tie patterns to words. Dynamic words, redirections, and unsupported constructs block command-specific allow rules (while whole-class `*` still applies after deny and ask checks), falling through to the mode while deny and ask still inspect extracted simple commands ([Rules](../guide/permissions.md#rules)).
 
 ## Patterns
 
-[Rules](../guide/permissions.md#rules) gives the user-facing grammar. Allow rules widen what can run, so they match conservatively, while deny and ask rules hold calls back, so they match every spelling a call can have. `MatchDiscipline` carries the two approaches, and the ask tier uses the deny one.
+`MatchDiscipline` separates conservative allow matching from broad deny / ask matching (ask uses the deny discipline, grammar in [Rules](../guide/permissions.md#rules)):
 
-An allow `exec` pattern matches a simple command's words exactly, where a `*` before the last word matches one literal word and a trailing `*` matches the rest. Every segment needs coverage, so `cargo test *` alone cannot allow `cargo test && rm x`. A deny or ask pattern matches the named words, the program words after leading assignments, or the program words without the program's directory. It compares folded words and needs later words only in order, with arguments between them, so `rm -rf *` matches `/bin/rm -rf x`, `RM -RF x`, and `FOO=1 rm -rf x`.
-
-`read` and `edit` patterns work like `.gitignore` entries anchored at each anchor directory, the working directory and each workspace root, unless they start with `/` or `~/`. A leading `/**/` matches under any filesystem root, including a drive or UNC share on Windows (**Gitignore-style paths**). An allow pattern matches the resolved path. A deny or ask pattern also matches the path as the call spells it and through directory aliases, compares folded names, and matches beneath each pattern's literal prefix as written, as resolved when the policy loaded, and as resolved at the check (**Deny and ask rules are the enforced boundary for path tools**). So `.env -> ../shared/.env` cannot route a read around `deny.read = [".env"]`, and `secrets -> ../vault` makes `secrets/**` cover `../vault/key` even when the link appears later.
+- **`exec` allow.** Matches simple-command words exactly (`*` before the last word matches one literal word, trailing `*` matches the rest), requiring every segment to match (`cargo test *` will not allow `cargo test && rm x`).
+- **`exec` deny / ask.** Matches full words, words after leading assignments, or basename-stripped program words, case-folded and ordered with intervening arguments allowed (`rm -rf *` matches `/bin/rm -rf x`, `RM -RF x`, and `FOO=1 rm -rf x`).
+- **`read` / `edit`.** Gitignore-style patterns anchored at the working directory and each workspace root unless starting with `/` or `~/`, with leading `/**/` matching under any root including Windows drives and UNC shares (**Gitignore-style paths**). Allow matches resolved paths. Deny / ask also matches written spellings, directory aliases, folded names, and beneath each pattern's literal prefix as written, at policy load, and at check time (**Deny and ask rules are the enforced boundary for path tools**), blocking symlink detours like `.env -> ../shared/.env` or `secrets -> ../vault`.
 
 ## Search Walks
 
-`grep` and `glob` gate their resolved root before walking, then check every file the walk finds against the `read` deny and ask rules, both where it resolves and as spelled beneath the root. They withhold matching files and end their output with a count of withheld files but no names. A walk does not follow symlinks below its resolved root, so the check needs no I/O.
+`grep` and `glob` gate their resolved root before walking, do not follow symlinks below it, and filter every discovered file (resolved and written spelling) against `read` deny and ask rules without extra I/O, withholding matches and appending only the withheld count (no names).
 
 ## Approval Round-Trip
 
-When the gate asks, the decision travels through the `ops` channel the turn loop polls (**Approval decisions on the op channel**). `run_tool_round` gates calls one at a time, so at most one approval is outstanding, and runs consecutive parallel-safe calls, the read-only `read`, `grep`, and `glob`, together once each passes the gate, so an approval never waits on a running call.
+`run_tool_round` gates calls sequentially so at most one approval is active, then runs consecutive parallel-safe read tools (`read`, `grep`, `glob`) concurrently once gated so approvals never wait on running tools.
 
-For a call that asks, the dispatcher emits `Event::ApprovalRequested` with the call's ID, the basis that made it ask, a session grant, and a preview. The preview is a diff against the file's current content for `edit` and `write`, or of the two strings when an edit cannot apply, and the command for `bash`. `await_approval` waits through `Mailbox::race_or` as the turn's other waits do, so an interrupt or shutdown ends the wait while a queued prompt or mode switch waits in the `Mailbox`, and it matches `Op::Resolve` by ID. Every frontend answers with an `ApprovalDecision`, where `DenyWithFeedback` returns the user's text to the model and `Abort` ends the turn as an interrupt does.
+For an asking call, dispatch emits `Event::ApprovalRequested` with call ID, basis, optional session grant, and preview (a diff against current content for `edit` / `write` or between strings when an edit cannot apply, and the command for `bash`). `await_approval` races `Op::Resolve` (matched by ID) against interrupts and shutdown via `Mailbox::race_or` while queuing prompts and mode switches. Frontends reply with `ApprovalDecision` (`DenyWithFeedback` passes text to the model, and `Abort` interrupts the turn).
 
-In the TUI, an `ApprovalModal` joins the `ModalStack`, and its `on_cancel` hook resolves the call to `Abort` whenever the modal leaves without an answer, so the blocked turn always gets one. Its keys answer only after a 300 ms pause, so a keystroke meant for the input box or a pasted burst cannot approve a call, and the guard restarts when the preview reappears or an editor opens or closes. The preview shows everything it approves: every row wraps, a body over 16 rows scrolls, control and zero-width characters render as escapes, and whitespace runs in a command render as `·`.
+The TUI pushes `ApprovalModal` onto `ModalStack`, whose `on_cancel` resolves `Abort` on dismissal so the turn never hangs. A 300 ms acceptance guard (restarting when the preview reappears or an editor opens / closes) blocks accidental keystrokes or pastes. Previews wrap every row, scroll past 16 rows, escape control and zero-width characters, and render command whitespace runs as `·`.
 
-A session grant lets the user allow the call and every later call it covers:
+Session grants allow the call and matching future calls:
 
-- **Grant.** `Policy::session_grant` derives the narrowest rule naming the call with `Rule::for_call` and offers it only when adding it would allow the call. A call an ask rule matches, an unrecognized command, a command with several simple commands, and a call with a word that expands, globs, or holds a character the editor cannot show offer none, so the user always sees the exact rule they grant.
-- **Editor.** The user can widen or narrow the pattern before accepting it, and `SessionGrant::accept` requires it to still cover the call.
-- **Engine check.** A frontend's check is advisory, so the gate admits the answered rule against its own grant with `SessionGrant::admit` and denies the call if the rule fails.
-- **Lifetime.** An admitted rule joins the engine's policy as an allow rule and lives only in memory until `/clear`, `/archive`, or a successful `/resume` (**Approvals stay in process**). `Event::SessionRulesUpdated` carries the list to the frontend for `/status`.
+- **Grant.** `Policy::session_grant` derives the narrowest rule via `Rule::for_call` and offers it only when adding it would allow the call (omitted for ask-rule hits, unrecognized or multi-command shells, or words with expansions, globs, or non-displayable characters).
+- **Editor.** Users may widen or narrow the pattern, provided `SessionGrant::accept` confirms it still covers the call.
+- **Engine check.** Frontend validation is advisory, so dispatch verifies the returned rule with `SessionGrant::admit` and denies on failure.
+- **Lifetime.** Admitted rules join the in-memory policy until `/clear`, `/archive`, or successful `/resume` (**Approvals stay in process**), synced to frontends via `Event::SessionRulesUpdated` for `/status`.
 
 ## Headless Runs
 
-Headless `-p` runs render engine events through `run_op`. `main` calls `Config::set_unattended`, so the policy settles calls that would need approval before they reach the frontend, and stream JSON carries the call's result. `TextState::render` escapes control characters in model and tool text.
+`-p` runs call `Config::set_unattended` in `main` so calls needing approval settle before reaching the frontend, `run_op` renders events (`stream-json` carries results), and `TextState::render` escapes control characters in model and tool output.
 
 ## Design Decisions
 
-1. **Explicit rules precede model judgment.** Deny and ask express a standing user boundary. Classification applies only to unmatched calls and cannot widen that boundary.
-2. **The classifier can allow or ask.** Uncertainty leaves the decision with the user. Explicit deny, read-only mode, user rejection, and unavailable approval can prevent execution.
-3. **User intent has explicit provenance.** Assistant explanations and tool output can contain untrusted instructions, so they cannot supply authorization.
-4. **Classification is a side query.** Reusing the existing client keeps authentication, gateway behavior, cancellation, and billing in their owning layers without introducing another provider framework.
-5. **Native path tools resolve once and act on the result.** This binds permission matching to the path the tool uses, and a no-follow open makes a symlink swapped into the final component fail. A swap in an intermediate directory needs `openat`-style traversal or an OS sandbox ([#133](https://github.com/hakulab/oxide-code/issues/133)). File integrity checks stay independent of approval.
-6. **Project files tighten only.** A checkout may add deny or ask rules while classifier settings and permission grants stay user-controlled.
-7. **Approvals stay in process.** Session grants disappear when the session changes and are never restored from persisted tool output. A persisted grant has no disk ground truth to revalidate on resume, unlike a `FileSnapshot` rehash, so restoring it would regress trust.
-8. **Gitignore-style paths.** Patterns work like `.gitignore` entries, so `.env` and `target` need no `**/` prefix and cover what is beneath them. Anchoring at every anchor directory applies a project rule to each workspace root, while `/` and `~/` keep exact absolute rules available.
-9. **Deny and ask rules are the enforced boundary for path tools.** Matching every spelling and alias of a path, at load and at the check, keeps a symlink from routing a path tool around a rule. The rules do not cover a symlink swapped into an intermediate directory after the check or files a `bash` command touches, so an untrusted model still needs an OS sandbox.
-10. **Approval decisions on the op channel.** Routing approvals through `ops` and the `ModalStack` reuses the turn loop's cancel, quit, and queue semantics, so approvals need no second channel or control-flow path.
-11. **Mode switches wait for the next gate, round boundary, or context render.** A switch mid-turn changes how the remaining calls are weighed without revisiting calls that already passed the gate, which would mean cancelling a running command or a pending approval. Applying it at a round boundary or before a context render as well means the model's next request names the mode the policy enforces, even when no call reaches the gate first. Confirming the switch on receipt keeps the status line honest about the mode the next call meets.
-12. **The keyboard cycle reaches `plan` before `yolo` and wraps at both ends.** Stepping forward from the default `auto` passes the stricter modes before the most permissive one, and the footer names the mode Tab selects next, so `yolo` is announced before a forward press reaches it. Shift+Tab steps backward through the same order, so either key undoes an overshoot, and wrapping keeps every mode reachable from any start. That wrap lets one Shift+Tab press from `auto` reach `yolo` although the footer names only Tab's target, a cost the cycle accepts to keep an overshoot reversible from either end.
+1. **Explicit rules precede model judgment.** Deny and ask are standing user boundaries that classification cannot widen.
+2. **The classifier can allow or ask.** Uncertainty stays with the user, while deny rules, `plan`, user rejection, and unattended mode block execution.
+3. **User intent has explicit provenance.** Excluding assistant text and tool output stops untrusted instructions from authorizing calls.
+4. **Classification is a side query.** Reusing `Client::complete` shares auth, gateways, cancellation, and billing without another provider stack.
+5. **Native path tools resolve once and act on the result.** Binds matching to the opened path and blocks final-component symlink swaps. Intermediate-directory swaps require `openat` traversal or an OS sandbox ([#133](https://github.com/hakulab/oxide-code/issues/133)). File-integrity checks stay separate from approval.
+6. **Project files tighten only.** Untrusted checkouts may add `deny` or `ask` rules while allow rules and classifier settings remain user-owned.
+7. **Approvals stay in process.** Persisted grants lack disk ground truth to revalidate on resume (unlike `FileSnapshot` rehashing), so restoring them would regress trust.
+8. **Gitignore-style paths.** Lets `.env` or `target` match subtrees without `**/`, anchors project rules at every workspace root, and keeps exact `/` and `~/` rules available.
+9. **Deny and ask rules are the enforced boundary for path tools.** Matching written spellings, aliases, and load- and check-time resolutions blocks symlink bypasses for path tools, while intermediate-directory races and `bash` filesystem access still require an OS sandbox.
+10. **Approval decisions on the op channel.** Routing through `ops` and `ModalStack` reuses turn cancellation, shutdown, and queuing with no second control path.
+11. **Mode switches wait for the next gate, round boundary, or context render.** Avoids cancelling already-approved calls or pending approvals while ensuring the model's next request reflects the enforced mode and immediate confirmation keeps the status line accurate.
+12. **The keyboard cycle reaches `plan` before `yolo` and wraps at both ends.** Stepping forward from `auto` passes stricter modes before `yolo` (announced in the footer beforehand), and Shift+Tab reverses any overshoot with wrap (accepting that Shift+Tab from `auto` reaches `yolo` in one press).
 
 ## Out of Scope
 
-- **An OS sandbox.** It would enforce a filesystem boundary that the rules cannot reach, covering files a `bash` command touches and intermediate-directory swaps ([#133](https://github.com/hakulab/oxide-code/issues/133)).
+- **An OS sandbox.** Needed to enforce filesystem boundaries across `bash` commands and intermediate-directory symlink races ([#133](https://github.com/hakulab/oxide-code/issues/133)).
 
 ## Sources
 

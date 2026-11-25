@@ -1,45 +1,42 @@
 # Slash Commands
 
-A slash command is an input line that starts with `/`, which the TUI runs itself by opening a modal, printing a note, forwarding an op to the engine, or starting a turn with a prompt the command builds. [Slash Commands](../guide/slash-commands.md) lists the commands and what each one does, and [Compaction](compaction.md), [Init](init.md), [Login](login.md), [Modals](modals.md), [Permissions](permissions.md#mode-switches), [Persistence](persistence.md#archiving), and [Resume](resume.md) cover the commands with mechanisms of their own.
+A slash command is an input line starting with `/` that the TUI handles by opening a modal, printing a note, forwarding an op, or starting a turn with a generated prompt. [Slash Commands](../guide/slash-commands.md) lists all commands, and [Compaction](compaction.md), [Init](init.md), [Login](login.md), [Modals](modals.md), [Permissions](permissions.md#mode-switches), [Persistence](persistence.md#archiving), and [Resume](resume.md) cover dedicated mechanisms.
 
-## Registry
+## Registry and Completion
 
-Each command implements `SlashCommand` in its own `slash/<name>.rs` file, or one file per pair such as `/login` and `/logout`, and `BUILT_INS` lists them in alphabetical order. `ox-core`'s `command` module holds the command table, with each name's aliases and the parsers for its typed forms, so the TUI resolves command names and arguments.
+Each command (or pair like `/login` and `/logout`) implements `SlashCommand` in `slash/<name>.rs`, listed alphabetically in `BUILT_INS`. `ox-core::command` owns the command table, aliases, and typed-argument parsers.
 
-## Completion
-
-The popup lists the matching commands in two columns, the name and the description, ranked by name prefix, then alias prefix, then name substring, then alias substring, alphabetically within each tier. It splits the line with the `split_slash` that `parse_slash` uses, so both agree on every name, including namespaced ones such as `/plugin:cmd`. Once a space follows the name, the input shows the command's usage, dim at the cursor, until an argument starts.
+The completion popup shows names and descriptions ranked by name prefix → alias prefix → name substring → alias substring (alphabetical within each tier). It parses via the same `split_slash` as `parse_slash` (supporting namespaced names like `/plugin:cmd`) and displays dim usage text after a space until an argument begins.
 
 ## `/diff`
 
-`/diff` pushes the uncommitted changes and untracked files into the chat as a `GitDiffBlock`, since a diff needs the scrollback a modal would crop.
+`/diff` writes uncommitted changes and untracked files to chat as a `GitDiffBlock` (needing scrollback a modal would crop):
 
-- **Git calls.** It resolves the work tree root on each run and runs git there, because `ls-files` lists only the paths under its working directory. After the first commit it diffs against `HEAD`, and before it combines the staged and unstaged diffs. Untracked paths come from `ls-files` with `--directory --no-empty-directory`, so a wholly untracked directory lists once, as `git status` shows it. Each call skips git's optional locks and pins the config that shapes the output, such as `core.quotePath` and external diff drivers.
-- **Output.** The output parses once into a `WorkingTreeDiff` of typed rows, capped at 64 KiB on a line boundary with a note naming the command that prints what the cap cut.
-- **Errors.** When git refuses the repository, as for dubious ownership, the error carries git's own message and the fix it names.
+- **Git calls.** Runs from the resolved work-tree root (so `ls-files` sees the full tree), diffing against `HEAD` (or combining staged and unstaged diffs before the first commit), listing untracked entries with `ls-files --directory --no-empty-directory`, skipping optional locks, and pinning config such as `core.quotePath` and external diff drivers.
+- **Output and errors.** Parses once into typed `WorkingTreeDiff` rows capped at 64 KiB on a line boundary (naming the git command for truncated output). Repository rejections such as dubious ownership pass through git's message and fix.
 
 ## `/delete`
 
-`/delete <id-prefix>` forwards `Op::FindSaved`, and the engine answers with `SavedFound`, which opens `ConfirmDeleteSessionModal` ([Modals](modals.md)) for the session it resolved or prints why no single session matched. Ctrl+D in the `/resume` picker opens the same modal for the cursor row. Y sends `Op::DeleteSaved` with the session's ID, and the engine deletes the session's rows and artifact directory, then emits `SavedDeleted`. Three layers refuse the live session, one on each path a target takes: the picker filters it out of every page, `saved::find` resolves a prefix with the live session excluded, and `saved::delete` refuses the live ID whichever op names it, so no frontend's check is load-bearing. The store also refuses a session another process holds open ([Liveness Locks](persistence.md#liveness-locks)).
+`/delete <id-prefix>` sends `Op::FindSaved` → `SavedFound` to open `ConfirmDeleteSessionModal` ([Modals](modals.md)) or report ambiguity / miss (Ctrl+D in `/resume` opens the same modal). Confirming sends `Op::DeleteSaved` → `SavedDeleted`, removing rows and artifacts. Three layers block deleting the live session (picker filtering, `saved::find` prefix resolution, and `saved::delete` ID check), and the store rejects sessions held by another process ([Liveness Locks](persistence.md#liveness-locks)).
 
 ## Design Decisions
 
-1. **Trait registry.** `SlashCommand` mirrors `tool::Tool`, so adding a command is one file and one `BUILT_INS` entry, with no central match to extend.
-2. **Command output reuses the chat's blocks.** Confirmations and notes print as a `SystemMessageBlock` and errors as an `ErrorBlock`, so commands add no block types. `/diff` is the one exception, `GitDiffBlock`, since its rows need diff styling.
-3. **One return type carries every effect.** Commands read a borrowed `LiveSessionInfo` and write nothing, and the App applies the returned `SlashOutcome` in one place on both the idle and busy paths, so no command reaches into `ChatView` or the modal stack.
-4. **Only commands that can start a turn or an idle-only op wait for idle.** `idle_only` holds for a command when any of its forms builds a prompt or sends an op `Op::is_idle_only` holds for, directly or from the modal it opens. A command that only reads, such as `/status`, stays useful during a long turn, as do TUI-only changes such as `/theme` and ops the engine takes mid-turn, such as `/mode` and `/exit`. The engine's op contract already decides which ops race a turn, so the TUI keeps no category of its own for them. Registry tests check that no form running mid-turn starts a turn, forwards an idle-only op, or opens a modal that sends one, and that a turn starts only from a `Prompt` outcome whose line the chat echoes.
-5. **The chat clears when the engine confirms the roll.** `/clear` forwards `Op::Clear`, and the App drops the chat only when `SessionRolled` arrives, and bare `/archive` shares that path, so an archive the engine refuses, as on a session with no messages, leaves the chat intact. `SessionTitleUpdated` names the session it titles, so a slow title request that straddles `/clear` cannot repaint the new session.
-6. **Background outcomes die with their session.** Each result carries the count of session switches when its command was typed, and the App drops a result from before the latest switch, so a slow `/diff` never prints into the next session's chat, even when its result was already queued at the switch. A switched-away command still runs to completion, which costs only the read it was making, since commands write nothing.
-7. **Swap the model and effort in the engine's `ModelSettings`.** `/model <id>`, `/effort <level>`, and both pickers emit the same `Op::SetModel`, whose `ConfigPick` names a model, an effort, or both, so the typed forms and the modals share one resolver. Each request carries the engine's current settings, so betas and `output_config` follow the swap, and `Engine::set_model` re-resolves the compaction threshold for the new model.
-8. **Slash commands never write user config files.** State is session-only, so a restart reverts to the configured values. Session commands should feel reversible, and any write that outlives the session requires an explicit user action.
-9. **Aliases resolve to canonical but display by surface.** `/clear` is canonical, while `/new` and `/reset` are aliases. The alias table lives in `command`, so the TUI registry resolves aliases, and the popup shows only the alias the user typed.
-10. **`/exit` quits, with `/quit` as its alias.** Claude Code, Codex, and pi all accept a typed quit command, so users reach for one before they learn the keys. It forwards `Op::Shutdown`, which the engine takes mid-turn, so it quits during a turn, while Ctrl+D quits only from an empty idle input and only on a second press, because typing the command is deliberate where a habitual EOF press is not.
-11. **A command suppresses its echo when its response stands alone.** `SlashCommand::echoes_input(args)` defaults to true. Modal-only forms, such as `/status`, `/config`, `/help`, and the bare pickers, override it to false because the modal is the response, and the typed `/foo` line would be orphaned in history once the modal closes. Bare `/unarchive` and `/delete` also override it so the error explaining the missing argument stands alone. Typed forms keep echoing, so the chat records the command above its confirmation. Bare `/init` echoes too, because it usually sends its prompt at once, and the line then heads the turn it starts.
-12. **Typed forms parse in core.** TUI commands other than `/init`, which [Init](init.md) covers, run their typed forms through `command::typed_form`. The TUI supplies prompt titles, error prefixes, and pickers for bare forms.
+1. **Trait registry.** Mirrors `tool::Tool`: adding a command is one file and one `BUILT_INS` entry with no central match.
+2. **Command output reuses the chat's blocks.** Notes use `SystemMessageBlock` and errors use `ErrorBlock`, with `GitDiffBlock` for `/diff` as the sole custom block.
+3. **One return type carries every effect.** Commands read a borrowed `LiveSessionInfo` and return `SlashOutcome`, applied centrally in `App` for both idle and busy paths so commands never mutate `ChatView` or `ModalStack`.
+4. **Only commands that can start a turn or an idle-only op wait for idle.** `idle_only` applies when any form builds a prompt or emits an `Op::is_idle_only` op (directly or via its modal), keeping read-only commands (`/status`), TUI-local changes (`/theme`), and mid-turn ops (`/mode`, `/exit`) usable during turns without a duplicate category. Registry tests enforce this invariant and ensure turns start only from echoed `Prompt` outcomes.
+5. **The chat clears when the engine confirms the roll.** `/clear` (`Op::Clear`) and bare `/archive` clear chat only on `SessionRolled`, leaving chat intact if an archive fails (such as an empty session). `SessionTitleUpdated` carries its session ID so late titles never overwrite a rolled session.
+6. **Background outcomes die with their session.** Results tag the session-switch counter from dispatch time and drop if a switch occurred, preventing slow `/diff` output from leaking into a new session while letting the read finish safely.
+7. **Swap the model and effort in the engine's `ModelSettings`.** Typed `/model`, `/effort`, and both pickers share `Op::SetModel` with `ConfigPick`, updating `ModelSettings` and the compaction threshold in `Engine::set_model` so later requests derive matching betas and `output_config`.
+8. **Slash commands never write user config files.** Keeps session commands reversible on restart and reserves config writes for explicit user edits.
+9. **Aliases resolve to canonical but display by surface.** `command` maps aliases (such as `/new`, `/reset` → `/clear`), and completion shows only the typed alias.
+10. **`/exit` quits, with `/quit` as its alias.** Matches Claude Code, Codex, and pi. Sends mid-turn `Op::Shutdown`, whereas Ctrl+D requires two presses on an empty idle input because typing `/exit` is deliberate.
+11. **A command suppresses its echo when its response stands alone.** `SlashCommand::echoes_input(args)` defaults to true, overridden to false for modal-only forms (`/status`, `/config`, `/help`, bare pickers) and bare `/unarchive` / `/delete` errors so orphaned `/cmd` lines do not clutter history. Typed forms and bare `/init` keep echoing to head their confirmation or turn.
+12. **Typed forms parse in core.** Non-`/init` typed forms run through `command::typed_form` ([Init](init.md) covers `/init`), while the TUI supplies pickers, prompt titles, and error prefixes.
 
 ## Out of Scope
 
-- **User-defined commands.** `BUILT_INS` is the entire registry, and skills as commands are tracked in [#163](https://github.com/hakulab/oxide-code/issues/163).
+- **User-defined commands.** `BUILT_INS` is the full registry, and skills as commands are tracked in [#163](https://github.com/hakulab/oxide-code/issues/163).
 
 ## Sources
 

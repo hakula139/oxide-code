@@ -1,69 +1,67 @@
 # Modal UI
 
-A modal is an overlay that takes keyboard focus, owns its render, emits a typed result, and dismisses. A slash command, a tool call that needs approval, a mid-turn question from `ask`, or `ox --resume` at startup opens one, and it draws in the band between the chat scroll and the input area, the rows the slash popup uses. Chat blocks persist in the transcript, while modals are ephemeral.
-
-Three needs drove the abstraction: `/theme` swaps palettes as the user arrows through choices and snaps back on Esc, the combined `/model + /effort` picker and the confirm-delete modal nested in `/resume` take several steps, and a tool call that needs approval emits `Event::ApprovalRequested` and blocks until the App pushes an `ApprovalModal` and routes the decision back as `Op::Resolve`.
+A modal is an ephemeral overlay drawn in the band between chat and input (the slash-popup region) that takes keyboard focus, renders itself, emits a typed action, and dismisses. Slash commands, tool approvals, mid-turn `ask` questions, and bare `ox --resume` open modals, supporting live `/theme` preview with Esc revert, multi-step stacks (`/model + /effort`, confirm-delete over `/resume`), and blocking `Event::ApprovalRequested` → `Op::Resolve` round-trips.
 
 ## Trait Shape
 
-The [`Modal` trait and its result types](../../crates/ox-tui/src/modal.rs) define rendering, input handling, and typed actions. A modal is `Send`, since the App lives on tokio, but not `Sync`, since modals own mutable state and are never shared across threads. The App dispatches their engine or TUI actions. A pushed child leaves its parent on the stack, so focus returns to the parent when the child closes.
+[`Modal` and its result types](../../crates/ox-tui/src/modal.rs) define rendering, input, and typed actions. Modals are `Send` (for tokio) and `!Sync` (owning unshared mutable state). `App` dispatches returned `ModalAction`s, and pushing a child leaves its parent on the stack to regain focus when the child closes.
 
 ## Hooks
 
-- **`on_cancel`.** Fires whenever a modal leaves the stack without submitting, by the stack-level Esc / Ctrl+C, a `Cancelled` outcome, or `ModalStack::clear`, and returns an optional `ModalAction` the App dispatches as the modal leaves. `ApprovalModal` and `QuestionModal` emit an abort decision so the blocked turn always gets an answer, the `ox --resume` picker emits `Op::Shutdown` because dismissing it quits `ox`, and the `/theme` picker emits `Action::RevertThemePreview` to restore the theme it previewed over.
-- **`on_engine`.** Tells every open modal about each op `dispatch_op` admits (`EngineUpdate::Admitted`) and each event the engine reports (`EngineUpdate::Event`), so a modal that sent an op learns whether it left and how it ended. Prompts go through the prompt queue and never reach modals. The `UpdateReply` says whether the modal shows the update, closes on it with a replacement action, or leaves it for the App to report. The App skips its own report of an archive or delete result a modal shows, and applies the actions of the modals an admitted op closes only after it sends that op.
-- **`on_page`.** Session and prompt pages reach the stack through the closed `ModalPage` app event, and `ModalStack::deliver_page` offers each result from the top until the picker awaiting its request takes it, so a picker keeps loading under a confirm dialog. Shared typed `Pages` workers return the walk with each bounded page. While one page runs, query or scope changes keep only the latest desired walk, which starts once the old result returns, and globally unique request IDs discard completions for closed pickers.
-- **`tick` and `next_tick`.** The frame tick calls `tick` on the top modal, and `next_tick` tells the loop when its time-driven state, such as an expiring notice, next changes, so an idle modal does not keep the loop awake.
+- **`on_cancel`.** Runs whenever a modal leaves without submitting (stack Esc / Ctrl+C, `Cancelled`, or `ModalStack::clear`) and may return a `ModalAction`: `ApprovalModal` and `QuestionModal` emit abort so blocked turns always unblock, startup `ox --resume` emits `Op::Shutdown`, and `/theme` emits `Action::RevertThemePreview`.
+- **`on_engine`.** Delivers every `dispatch_op`-admitted op (`EngineUpdate::Admitted`) and engine event (`EngineUpdate::Event`) to all open modals (prompts use the prompt queue and skip modals). `UpdateReply` indicates whether the modal displays the update, closes with a replacement action, or leaves it for `App` (which suppresses duplicate chat notices for handled archive / delete results and runs actions from modals closed by an admitted op after sending that op).
+- **`on_page`.** Delivers `ModalPage` background worker results from top to bottom via `ModalStack::deliver_page` so a covered picker still loads under a confirm dialog. Shared `Pages` workers keep only the latest query / scope change while a page is in flight and discard completions for closed pickers via unique request IDs.
+- **`tick` and `next_tick`.** Ticks the top modal and reports its next deadline (such as notice expiry) so idle modals keep the event loop asleep.
 
 ## Key Routing
 
-The stack routes keys before any component sees them. A modal whose `captures_esc` returns true takes Esc itself, while Ctrl+C still cancels. The stack drops every key held with a modifier other than Shift unless `binds_modified_key` claims it, so a picker's `j` or Enter never fires as Alt+J or Ctrl+Enter. Bracketed pastes reach `handle_paste`, which text fields implement, and a paste never answers a confirm or approval prompt.
+The stack intercepts keys before any component. Modals returning true from `captures_esc` handle Esc themselves while Ctrl+C still cancels. Keys with modifiers other than Shift drop unless `binds_modified_key` claims them (preventing Alt+J or Ctrl+Enter from acting like `j` or Enter). Bracketed pastes route to `handle_paste` in text fields and never answer confirm or approval prompts.
 
 ## Shared Primitives
 
-- `list_picker`: cursor, navigation, and rendering for a fixed roster, which `/mode`, `/theme`, `/init`, and the `/model + /effort` picker embed.
-- `searchable_list`: a substring filter over paged rows, shared by session and prompt history pickers.
+- `list_picker`: fixed-roster cursor, navigation, and rendering (`/mode`, `/theme`, `/init`, `/model + /effort`).
+- `searchable_list`: substring-filtered paged rows (session and prompt history pickers).
 - `pages`: typed bounded page workers and request routing for both pickers.
-- `kv_overview`: a sectioned read-only table, behind `/status`, `/config`, and `/help`.
-- `line_editor`: the single-line text field behind `/rename`, the picker search, the approval rule and feedback editors, and the question answer field. It keeps its text in a `ratatui-textarea` buffer and edits through the prompt's grapheme-aware table.
-- `chrome`: the title header and hint footer, which cuts trailing hints on a narrow row, so callers list the essential hints first.
-- `acceptance`: the visibility check and type-ahead guard that the confirm-delete, approval, and question modals share, so a key typed before the prompt appeared cannot answer it.
-- `ox_tui::keymap`: named actions with their keys and hint labels, so the `/resume` picker's keys and footer come from one table.
+- `kv_overview`: sectioned read-only tables (`/status`, `/config`, `/help`).
+- `line_editor`: single-line `ratatui-textarea` field using the prompt's grapheme editing table (`/rename`, search, approval rule / feedback, question answers).
+- `chrome`: header and hint footer dropping trailing hints on narrow rows (callers put essential hints first).
+- `acceptance`: visibility and type-ahead guard shared by confirm-delete, approval, and question modals.
+- `ox_tui::keymap`: named actions uniting keys and footer hints (`/resume`).
 
 ## Modals
 
-- **`/model + /effort` picker.** It sets the model and the effort in one `Op::SetModel` whose `ConfigPick` carries only the changed axes.
-- **`/effort` slider.** It is a Speed ↔ Intelligence scale of the five levels, colored by the five `effort_*` theme slots.
-- **`/mode`, `/theme`, and `/init` pickers.** They list the permission modes, the built-in themes, and the instruction files `/init` can create.
-- **`/rename` editor.** It is a `LineEditor` prefilled with the title, which submits through `command::rename`, the typed form's parser.
-- **`/resume` picker.** It is a `SearchableList` of saved sessions, which [Resume](resume.md) covers.
-- **Prompt history picker.** It lists retained ordinary user prompts with an escaped, scrollable multiline preview. Enter recalls exact text as an undoable composer edit, while cancellation leaves the editor untouched.
-- **Confirm-delete modal.** It is a Y / N gate for deleting a saved session, pushed by `/delete <id-prefix>` and by the `/resume` picker. A failure stays inline until a retry replaces it or the modal closes, so a stray key cannot wipe the diagnostic.
-- **Approval modal.** It gates a tool call that needs approval, showing the command or the diff it would apply. [Permissions](permissions.md) covers its choices and guard.
-- **Question modal.** It handles mid-turn questions from the `ask` tool, offering suggested choices and a freeform `LineEditor` answer with optional deadline hints and the shared `Acceptance` guard. [Terminal UI](../guide/terminal-ui.md#answer-questions) covers its controls.
-- **`/status`, `/config`, and `/help` overviews.** They are `KvOverview` tables of the session, the resolved config with each value's source, and the registered commands.
+- **`/model + /effort` picker.** Submits one `Op::SetModel` whose `ConfigPick` carries only changed axes.
+- **`/effort` slider.** Five-level Speed ↔ Intelligence scale colored by `effort_*` theme slots.
+- **`/mode`, `/theme`, and `/init` pickers.** Fixed rosters for permission modes, built-in themes, and `/init` targets.
+- **`/rename` editor.** Prefilled `LineEditor` submitting through `command::rename`.
+- **`/resume` picker.** Paged `SearchableList` of saved sessions ([Resume](resume.md)).
+- **Prompt history picker.** Retained ordinary user prompts with escaped scrollable multiline preview. Enter recalls exact text as an undoable composer edit, and cancel leaves the draft intact.
+- **Confirm-delete modal.** Y / N gate pushed by `/delete <id-prefix>` and `/resume`. Errors stay inline until retry or close so stray keys cannot clear diagnostics.
+- **Approval modal.** Shows command or diff preview for gated tool calls ([Permissions](permissions.md)).
+- **Question modal.** Handles mid-turn `ask` prompts with choices, freeform `LineEditor`, optional deadline hints, and `Acceptance` guard ([Terminal UI](../guide/terminal-ui.md#answer-questions)).
+- **`/status`, `/config`, and `/help` overviews.** `KvOverview` tables for session state, layered config with sources, and commands.
 
 ## Design Decisions
 
-1. **Trait per modal.** Each concrete modal is its own type implementing `Modal`, so adding one is a new file plus a constructor with no central match arm.
-2. **Stack-based ownership (`Vec<Box<dyn Modal>>`).** The `Vec` lets an overlay stack on an open modal without a redesign, such as the confirm-delete modal over the `/resume` picker or an approval prompt over a read-only overview.
-3. **Typed result delivery via `ModalAction`.** `ModalStack::handle_key` returns the outcome a modal reports, and `App::apply_modal_action` dispatches the action it carries. Boxed `FnOnce` callbacks would add lifetime and `Send` complexity and hide the dispatch graph.
-4. **Commands build modals from read-only App state.** Each command runs on a borrow of the current `LiveSessionInfo`, title included, and returns the modal as its outcome, where imperative `dialog.show()` calls would need a handle to the stack outside it. The App clears every modal on resume and after manual or pre-turn compaction, while a mid-turn compaction keeps open modals and their previews, since the user may open one at any point during a long turn.
-5. **Layout band sized by `ModalStack::height(width, max_height)`.** An empty stack takes no rows, and an open one shifts the chat upward, as the slash popup does. The App caps the band so the status bar and one chat row stay visible, and pickers and overviews fit the cap by scrolling their bodies between a pinned header and footer.
-6. **Bare `/model` and bare `/effort` open separate modals.** Threading both through one modal would force a single-axis decision through a two-axis interface, so `/model` keeps the combined picker and `/effort` gets its own slider.
-7. **`ListPicker` handles state, navigation, and rendering.** Concrete pickers handle Enter and their own keys and pass the rest to `ListPicker::navigate`, which keeps list selection apart from what Enter dispatches. Each roster is fixed, so `ListPicker::new` rejects an empty one and `selected` always returns a row.
-8. **Read-only overviews share `KvOverview`.** `/status`, `/config`, and `/help` share one shape of a title, sectioned rows, and a footer, so the layout, keys, and dismissal live in one place, and a new overview supplies only its sections.
-9. **Read-only modals don't bind Enter.** Enter commits in a picker, so binding it to dismiss an overview would give one gesture two meanings across modal types. Esc / Ctrl+C dismiss an overview at the stack layer.
-10. **Nested modals use `ModalKey::Push`.** A push outcome keeps `handle_key` returning one value and avoids threading a stack borrow through every modal.
-11. **Modals learn the fate of their ops through one hook.** The engine owns saved-session writes, so `ModalStack` passes every admitted op and every engine event to every modal on the stack through `Modal::on_engine`, and a new modal that sends an op needs only a match arm in that hook. The App does not filter updates per modal, since each modal matches the session ID it acted on and ignores the rest. A covered `/resume` picker updates its rows from the same result that closes the confirm-delete modal above it, without rereading the store when it regains focus. When no modal claims a result, as after the user dismissed the confirm-delete modal mid-delete, the App reports it in the chat. `Admitted` follows `dispatch_op`'s busy check and delivery reservation, so an op the App drops never reaches a modal, and a confirm modal whose delete was dropped still takes Y again.
-12. **The input box stays outside the stack.** A modal that needs text opens its own `LineEditor`, so a modal never shares the prompt's buffer and closing one never disturbs a draft.
+1. **Trait per modal.** Adding a modal is one file and constructor with no central match arm.
+2. **Stack-based ownership (`Vec<Box<dyn Modal>>`).** Supports nested overlays (confirm-delete over `/resume`, approval over an overview) without redesign.
+3. **Typed result delivery via `ModalAction`.** Returning outcomes from `ModalStack::handle_key` to `App::apply_modal_action` avoids boxed `FnOnce` lifetime / `Send` boilerplate and keeps dispatch explicit.
+4. **Commands build modals from read-only App state.** Commands borrow `LiveSessionInfo` and return a modal outcome without holding a stack handle. `App` clears modals on resume and manual or pre-turn compaction, keeping them open across mid-turn compaction.
+5. **Layout band sized by `ModalStack::height(width, max_height)`.** Empty stacks take zero rows, and open ones shift chat up while keeping the status bar and at least one chat row visible (scrolling bodies between pinned header and footer).
+6. **Bare `/model` and bare `/effort` open separate modals.** Avoids forcing a single-axis effort choice through the two-axis model picker.
+7. **`ListPicker` handles state, navigation, and rendering.** Separates navigation from Enter dispatch, and rejecting empty rosters ensures `selected` always returns a row.
+8. **Read-only overviews share `KvOverview`.** Centralizes layout, scrolling, and dismissal so overviews supply only sections.
+9. **Read-only modals don't bind Enter.** Keeps Enter exclusively for committing in pickers while stack Esc / Ctrl+C dismisses overviews.
+10. **Nested modals use `ModalKey::Push`.** Keeps `handle_key` single-return without threading a mutable stack reference.
+11. **Modals learn the fate of their ops through one hook.** Broadcasting `EngineUpdate` to every modal lets each match its own session ID without App-side filtering: a covered `/resume` picker updates rows from the delete result closing the confirm modal above it without re-querying SQLite, unclaimed results fall back to chat, and `Admitted` fires only after `dispatch_op`'s busy check and delivery reservation so dropped deletes remain retryable.
+12. **The input box stays outside the stack.** Giving text modals their own `LineEditor` keeps composer drafts untouched across modal lifecycles.
 
 ## Out of Scope
 
-- **Persistent modals in the chat scroll.** Modals are ephemeral, and output that needs scrollback, such as `/diff`, prints into the chat.
-- **Mouse interaction.** The TUI captures the mouse ([Mouse Interactions](mouse.md)), but a modal receives only the wheel, as Up / Down keys, and stays keyboard-driven.
-- **Concurrent modals on different layers.** A toast over a modal would need a second layer, while the chat's error blocks already cover what toasts would.
-- **User-defined modal commands.** The trait already supports them, and user-invocable skills are tracked in [#163](https://github.com/hakulab/oxide-code/issues/163).
+- **Persistent modals in the chat scroll.** Output needing scrollback (such as `/diff`) writes to chat.
+- **Mouse interaction.** Modals receive wheel events as Up / Down ([Mouse Interactions](mouse.md)) and stay keyboard-driven.
+- **Concurrent modals on different layers.** Chat error blocks cover toast use cases without a second overlay layer.
+- **User-defined modal commands.** Supported by the trait, with user-invocable skills tracked in [#163](https://github.com/hakulab/oxide-code/issues/163).
 
 ## Sources
 

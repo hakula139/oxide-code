@@ -5,7 +5,7 @@ Follow the shared [Rust](https://github.com/hakulab/plugins/blob/main/plugins/ha
 ## Enforced by Tooling
 
 - `[workspace.lints]` in the root `Cargo.toml` sets every crate's lints, and `clippy.toml` allows `unwrap()` in tests.
-- `.cargo/config.toml` denies warnings, so a warning fails builds, tests, Clippy, and `cargo doc`, including rustdoc's link and markup warnings. A denied warning also stops dependent crates from compiling, so set `CARGO_BUILD_WARNINGS=warn` to see every error at once. The MSRV job's older cargo and the Nix build, which leaves out `.cargo/`, don't apply the setting.
+- `.cargo/config.toml` denies warnings across builds, tests, Clippy, and `cargo doc` (including rustdoc link and markup lints). Because a denied warning stops dependent crates from compiling, set `CARGO_BUILD_WARNINGS=warn` to see every error at once. The MSRV job's older cargo and the Nix build (which omits `.cargo/`) ignore this setting.
 - The lints reject `unwrap()` outside tests.
 - Stable rustfmt neither wraps comments nor groups imports.
 
@@ -40,7 +40,7 @@ Follow the shared [Rust](https://github.com/hakulab/plugins/blob/main/plugins/ha
 
 ## Visibility
 
-- In a direct child of a crate root, where `pub(super)` already reaches the whole crate, write `pub(crate)`. Make an item `pub` only when another workspace crate uses it or a `pub` signature names it, and make every module on its path `pub` too, so `pub(crate)` means the item serves its own crate alone. The compiler never reports an unused `pub` item in a library, so a change that removes the last use from another crate also narrows or deletes the item. The binary crate `ox` has no `pub` items.
+- Use `pub(crate)` in direct children of a crate root (where `pub(super)` already reaches the whole crate). Use `pub` only when another workspace crate uses the item or a `pub` signature exposes it, making every module on its path `pub` too so `pub(crate)` strictly means crate-internal. Because the compiler does not flag unused `pub` items in libraries, narrow or delete an item when removing its last cross-crate use. The binary crate `ox` has no `pub` items.
 - Skip scoped forms such as `pub(in super::super)`. When modules outside an item's parent use it, move it into their nearest common module, or into a child of it with `pub(super)`.
 
 ## Modules
