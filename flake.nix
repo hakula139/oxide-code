@@ -48,8 +48,6 @@
     let
       inherit (nixpkgs) lib;
 
-      rustVersion = (lib.importTOML ./Cargo.toml).workspace.package.rust-version;
-
       platformKey = p: {
         inherit (p) config isStatic;
       };
@@ -57,25 +55,17 @@
       mkPackage =
         pkgs:
         let
-          inherit (pkgs) stdenv;
-          hostTarget = stdenv.hostPlatform.rust.rustcTarget;
-          needsCrossTarget = hostTarget != stdenv.buildPlatform.rust.rustcTarget;
-          toolchain =
-            let
-              base =
-                (rust-overlay.lib.mkRustBin { } pkgs.buildPackages).fromRustupToolchainFile
-                  ./rust-toolchain.toml;
-            in
-            if needsCrossTarget then base.override { targets = [ hostTarget ]; } else base;
+          toolchain = (rust-overlay.lib.mkRustBin { } pkgs.buildPackages).fromRustupToolchain {
+            inherit ((lib.importTOML ./rust-toolchain.toml).toolchain) channel;
+            profile = "minimal";
+          };
         in
-        pkgs.callPackage ./nix/package.nix (
-          lib.optionalAttrs (!lib.versionAtLeast pkgs.buildPackages.rustc.version rustVersion) {
-            rustPlatform = pkgs.makeRustPlatform {
-              cargo = toolchain;
-              rustc = toolchain;
-            };
-          }
-        );
+        pkgs.callPackage ./nix/package.nix {
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = toolchain;
+            rustc = toolchain;
+          };
+        };
 
       packageFor =
         pkgs:
@@ -198,13 +188,17 @@
             ];
           };
 
-          msrv = pkgs.mkShell {
-            name = "oxide-code-msrv";
+          msrv =
+            let
+              rustVersion = (lib.importTOML ./Cargo.toml).workspace.package.rust-version;
+            in
+            pkgs.mkShell {
+              name = "oxide-code-msrv";
 
-            packages = [
-              rustBin.stable.${pkgs.lib.versions.pad 3 rustVersion}.minimal
-            ];
-          };
+              packages = [
+                rustBin.stable.${lib.versions.pad 3 rustVersion}.minimal
+              ];
+            };
         };
 
         # ------------------------------------------------------------------------------------------
