@@ -48,6 +48,9 @@
     let
       inherit (nixpkgs) lib;
 
+      msrvVersion = lib.versions.pad 3 (lib.importTOML ./Cargo.toml).workspace.package.rust-version;
+      rustChannel = (lib.importTOML ./rust-toolchain.toml).toolchain.channel;
+
       platformKey = p: {
         inherit (p) config isStatic;
       };
@@ -55,10 +58,7 @@
       mkPackage =
         pkgs:
         let
-          toolchain = (rust-overlay.lib.mkRustBin { } pkgs.buildPackages).fromRustupToolchain {
-            inherit ((lib.importTOML ./rust-toolchain.toml).toolchain) channel;
-            profile = "minimal";
-          };
+          toolchain = (rust-overlay.lib.mkRustBin { } pkgs.buildPackages).stable.${rustChannel}.minimal;
         in
         pkgs.callPackage ./nix/package.nix {
           rustPlatform = pkgs.makeRustPlatform {
@@ -112,8 +112,7 @@
             pkgs.pkgsCross.aarch64-multiplatform;
 
         rustBin = rust-overlay.lib.mkRustBin { } pkgs;
-        rustToolchain = rustBin.fromRustupToolchainFile ./rust-toolchain.toml;
-        rustDevToolchain = rustToolchain.override (prev: {
+        rustDevToolchain = (rustBin.fromRustupToolchainFile ./rust-toolchain.toml).override (prev: {
           extensions = prev.extensions ++ [
             "rust-analyzer"
             "rust-src"
@@ -188,17 +187,13 @@
             ];
           };
 
-          msrv =
-            let
-              rustVersion = (lib.importTOML ./Cargo.toml).workspace.package.rust-version;
-            in
-            pkgs.mkShell {
-              name = "oxide-code-msrv";
+          msrv = pkgs.mkShell {
+            name = "oxide-code-msrv";
 
-              packages = [
-                rustBin.stable.${lib.versions.pad 3 rustVersion}.minimal
-              ];
-            };
+            packages = [
+              rustBin.stable.${msrvVersion}.minimal
+            ];
+          };
         };
 
         # ------------------------------------------------------------------------------------------

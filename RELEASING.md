@@ -10,7 +10,7 @@ Follow the [shared release procedure](https://github.com/hakulab/plugins/blob/ma
 - **After 0.1.0:** breaking changes to the [stability surface](#stability-surface) bump the minor version, and other changes bump the patch version. Prereleases of the next minor (`v0.2.0-alpha.N`) follow the same rules.
 - **Milestones:** each planned release batch (including patches and prereleases) gets its own milestone, such as `v0.2.0` or `v0.2.0-alpha.1`.
 - **Breaking changes:** mark stability-surface breaks with [`!`](docs/conventions/github.md#commit-titles) in the PR title both before and after 0.1.0 (before 0.1.0, versions still advance within prereleases).
-- **MSRV:** CI's MSRV job checks `rust-version`. Bumps affect `cargo install` and Nix source builds, so ship them as normal changes naming the new floor in the PR title.
+- **MSRV:** CI's MSRV job checks `rust-version`. Bumps affect `cargo install`, so ship them as normal changes naming the new floor in the PR title.
 
 ### Stability Surface
 
