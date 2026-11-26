@@ -46,9 +46,36 @@
       home-manager,
     }:
     let
+      inherit (nixpkgs) lib;
+
+      rustVersion = (lib.importTOML ./Cargo.toml).workspace.package.rust-version;
+
       platformKey = p: {
         inherit (p) config isStatic;
       };
+
+      mkPackage =
+        pkgs:
+        let
+          inherit (pkgs) stdenv;
+          hostTarget = stdenv.hostPlatform.rust.rustcTarget;
+          needsCrossTarget = hostTarget != stdenv.buildPlatform.rust.rustcTarget;
+          toolchain =
+            let
+              base =
+                (rust-overlay.lib.mkRustBin { } pkgs.buildPackages).fromRustupToolchainFile
+                  ./rust-toolchain.toml;
+            in
+            if needsCrossTarget then base.override { targets = [ hostTarget ]; } else base;
+        in
+        pkgs.callPackage ./nix/package.nix (
+          lib.optionalAttrs (!lib.versionAtLeast pkgs.buildPackages.rustc.version rustVersion) {
+            rustPlatform = pkgs.makeRustPlatform {
+              cargo = toolchain;
+              rustc = toolchain;
+            };
+          }
+        );
 
       packageFor =
         pkgs:
@@ -64,7 +91,7 @@
         then
           locked
         else
-          pkgs.callPackage ./nix/package.nix { };
+          mkPackage pkgs;
 
       # A key lets the module system deduplicate the module when it is imported twice.
       homeModuleKey = "${self}/flake.nix#homeModules.default";
@@ -94,7 +121,6 @@
           else
             pkgs.pkgsCross.aarch64-multiplatform;
 
-        rustVersion = (pkgs.lib.importTOML ./Cargo.toml).workspace.package.rust-version;
         rustBin = rust-overlay.lib.mkRustBin { } pkgs;
         rustToolchain = rustBin.fromRustupToolchainFile ./rust-toolchain.toml;
         rustDevToolchain = rustToolchain.override (prev: {
@@ -104,7 +130,7 @@
           ];
         });
 
-        oxide-code = pkgs.callPackage ./nix/package.nix { };
+        oxide-code = mkPackage pkgs;
 
         # ------------------------------------------------------------------------------------------
         # Pre-commit Hooks

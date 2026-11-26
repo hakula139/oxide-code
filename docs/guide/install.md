@@ -59,7 +59,7 @@ tar -xzf oxide-code-aarch64-apple-darwin.tar.gz
 
 ### From Source via Cargo
 
-Requires [Rust](https://www.rust-lang.org/tools/install) 1.91 or later.
+Requires [Rust](https://www.rust-lang.org/tools/install) 1.96 or later.
 
 ```bash
 cargo install --git https://github.com/hakulab/oxide-code --locked
