@@ -88,7 +88,7 @@ Without a tag suffix, Nix builds `main`. Append `/vX.Y.Z` to pin any tag from `v
 
 ### Home Manager
 
-The Home Manager module installs `ox` and generates its config from Nix options. Keep oxide-code's `nixpkgs` input pinned upstream to reuse cached binaries, and keep only the `follows` inputs you use:
+The Home Manager module installs `ox` and generates its config from Nix options. Keep oxide-code's `nixpkgs` and `rust-overlay` inputs pinned upstream to reuse cached binaries, and keep only the `follows` inputs you use:
 
 ```nix
 inputs.oxide-code = {
@@ -96,7 +96,6 @@ inputs.oxide-code = {
   inputs = {
     devkit.inputs.git-hooks-nix.follows = "git-hooks-nix";
     home-manager.follows = "home-manager";
-    rust-overlay.follows = "rust-overlay";
   };
 };
 ```

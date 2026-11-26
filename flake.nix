@@ -48,7 +48,8 @@
     let
       inherit (nixpkgs) lib;
 
-      rustVersion = (lib.importTOML ./Cargo.toml).workspace.package.rust-version;
+      msrvVersion = lib.versions.pad 3 (lib.importTOML ./Cargo.toml).workspace.package.rust-version;
+      rustChannel = (lib.importTOML ./rust-toolchain.toml).toolchain.channel;
 
       platformKey = p: {
         inherit (p) config isStatic;
@@ -57,25 +58,14 @@
       mkPackage =
         pkgs:
         let
-          inherit (pkgs) stdenv;
-          hostTarget = stdenv.hostPlatform.rust.rustcTarget;
-          needsCrossTarget = hostTarget != stdenv.buildPlatform.rust.rustcTarget;
-          toolchain =
-            let
-              base =
-                (rust-overlay.lib.mkRustBin { } pkgs.buildPackages).fromRustupToolchainFile
-                  ./rust-toolchain.toml;
-            in
-            if needsCrossTarget then base.override { targets = [ hostTarget ]; } else base;
+          toolchain = (rust-overlay.lib.mkRustBin { } pkgs.buildPackages).stable.${rustChannel}.minimal;
         in
-        pkgs.callPackage ./nix/package.nix (
-          lib.optionalAttrs (!lib.versionAtLeast pkgs.buildPackages.rustc.version rustVersion) {
-            rustPlatform = pkgs.makeRustPlatform {
-              cargo = toolchain;
-              rustc = toolchain;
-            };
-          }
-        );
+        pkgs.callPackage ./nix/package.nix {
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = toolchain;
+            rustc = toolchain;
+          };
+        };
 
       packageFor =
         pkgs:
@@ -122,8 +112,7 @@
             pkgs.pkgsCross.aarch64-multiplatform;
 
         rustBin = rust-overlay.lib.mkRustBin { } pkgs;
-        rustToolchain = rustBin.fromRustupToolchainFile ./rust-toolchain.toml;
-        rustDevToolchain = rustToolchain.override (prev: {
+        rustDevToolchain = (rustBin.fromRustupToolchainFile ./rust-toolchain.toml).override (prev: {
           extensions = prev.extensions ++ [
             "rust-analyzer"
             "rust-src"
@@ -202,7 +191,7 @@
             name = "oxide-code-msrv";
 
             packages = [
-              rustBin.stable.${pkgs.lib.versions.pad 3 rustVersion}.minimal
+              rustBin.stable.${msrvVersion}.minimal
             ];
           };
         };

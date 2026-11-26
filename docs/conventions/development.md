@@ -19,9 +19,8 @@ With [direnv](https://direnv.net), run `direnv allow` once so `.envrc` loads the
 
 ## Toolchain
 
-- `rust-toolchain.toml` pins the Rust release for the dev shell, the hooks, CI's Rust, Rust Lint, and Windows jobs, and release builds. The Windows job and release builds install it with `rustup toolchain install`.
+- `rust-toolchain.toml` pins the Rust release for the Nix package (minimal profile), the dev shell, the hooks, CI's Rust, Rust Lint, and Windows jobs, and release builds. The Windows job and release builds install it with `rustup toolchain install`.
 - Renovate bumps the pin in its automerged flake-inputs group. Fix any new lint failures in that PR.
-- The Nix package builds with nixpkgs' Rust when it meets `rust-version`, and otherwise falls back to the `rust-toolchain.toml` toolchain.
 - `rust-version` in `Cargo.toml` is the minimum supported Rust version, which the `msrv` dev shell builds and [Versioning](../../RELEASING.md#versioning) covers.
 
 ## Nix Style
