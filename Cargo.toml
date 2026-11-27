@@ -59,7 +59,7 @@ open = "5"
 ox-core = { path = "crates/ox-core" }
 ox-tui = { path = "crates/ox-tui" }
 platform-info = "2"
-process-wrap = { version = "10", default-features = false, features = [
+process-wrap = { version = "11", default-features = false, features = [
   "job-object",
   "process-session",
   "tokio1",
