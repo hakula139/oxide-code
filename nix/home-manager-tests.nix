@@ -63,9 +63,12 @@ let
   stub = pkgs.writeShellScriptBin "ox" (builtins.readFile ./config-check-stub.sh);
 
   settings = {
-    client.auth = {
-      type = "bearer";
-      file = "/run/secrets/ox-token";
+    client = {
+      base_url = "https://gateway.example.com/anthropic";
+      auth = {
+        type = "bearer";
+        file = "/run/secrets/ox-token";
+      };
     };
 
     permission.mode = "yolo";

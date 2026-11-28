@@ -1672,7 +1672,7 @@ mod tests {
             ] {
                 let dir = tempfile::tempdir().unwrap();
                 let base_url = if kind == "bearer" {
-                    "base_url = 'https://gateway.example.com'\n"
+                    "base_url = 'https://gateway.example.com'"
                 } else {
                     ""
                 };
@@ -1877,6 +1877,42 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn accepts_api_key_and_oauth_with_the_default_endpoint() {
+            for (config_body, api_key, oauth, expected_source, expected_secret) in [
+                (
+                    Some("client.auth = { type = 'bearer', value = 'lower-bearer' }\n"),
+                    Some("sk-env-key"),
+                    None,
+                    AuthSource::ApiKeyEnv,
+                    "sk-env-key",
+                ),
+                (
+                    None,
+                    None,
+                    Some("oauth-env-token"),
+                    AuthSource::OAuthTokenEnv,
+                    "oauth-env-token",
+                ),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                if let Some(body) = config_body {
+                    write_user_config(dir.path(), body);
+                }
+                let vars = env_vars(vec![
+                    xdg(&dir),
+                    ("ANTHROPIC_API_KEY", api_key.map(str::to_owned)),
+                    ("CLAUDE_CODE_OAUTH_TOKEN", oauth.map(str::to_owned)),
+                ]);
+
+                let config = load_in(&dir, vars, false).await.unwrap();
+
+                assert_auth(&config, expected_source, expected_secret);
+                assert_eq!(config.base_url.to_string(), DEFAULT_BASE_URL);
+                assert_eq!(config.provenance.base_url, Source::Default);
+            }
+        }
+
+        #[tokio::test]
         async fn rejects_bearer_auth_without_an_explicit_endpoint() {
             for (config_body, auth_token, api_key, expected_prefix) in [
                 (
@@ -1925,42 +1961,6 @@ mod tests {
                     message.contains("ANTHROPIC_BASE_URL") && message.contains("client.base_url"),
                     "{message}",
                 );
-            }
-        }
-
-        #[tokio::test]
-        async fn accepts_api_key_and_oauth_with_the_default_endpoint() {
-            for (config_body, api_key, oauth, expected_source, expected_secret) in [
-                (
-                    Some("client.auth = { type = 'bearer', value = 'lower-bearer' }\n"),
-                    Some("sk-env-key"),
-                    None,
-                    AuthSource::ApiKeyEnv,
-                    "sk-env-key",
-                ),
-                (
-                    None,
-                    None,
-                    Some("oauth-env-token"),
-                    AuthSource::OAuthTokenEnv,
-                    "oauth-env-token",
-                ),
-            ] {
-                let dir = tempfile::tempdir().unwrap();
-                if let Some(body) = config_body {
-                    write_user_config(dir.path(), body);
-                }
-                let vars = env_vars(vec![
-                    xdg(&dir),
-                    ("ANTHROPIC_API_KEY", api_key.map(str::to_owned)),
-                    ("CLAUDE_CODE_OAUTH_TOKEN", oauth.map(str::to_owned)),
-                ]);
-
-                let config = load_in(&dir, vars, false).await.unwrap();
-
-                assert_auth(&config, expected_source, expected_secret);
-                assert_eq!(config.base_url.to_string(), DEFAULT_BASE_URL);
-                assert_eq!(config.provenance.base_url, Source::Default);
             }
         }
 

@@ -138,25 +138,28 @@ pub(super) fn check_bearer_endpoint(source: AuthSource, base_url_source: &Source
     if *base_url_source != Source::Default {
         return Ok(());
     }
-    let config = user_config_hint();
-    match source {
-        AuthSource::AuthTokenEnv => bail!(
-            "ANTHROPIC_AUTH_TOKEN requires an explicit endpoint. \
-             Set ANTHROPIC_BASE_URL or `client.base_url` in {config}, \
-             or unset ANTHROPIC_AUTH_TOKEN to use another credential."
+    let (subject, alternative) = match source {
+        AuthSource::AuthTokenEnv => (
+            "ANTHROPIC_AUTH_TOKEN",
+            "unset ANTHROPIC_AUTH_TOKEN to use another credential",
         ),
-        AuthSource::ClientBearer => bail!(
-            "`client.auth` (`type = \"bearer\"`) requires an explicit endpoint. \
-             Set ANTHROPIC_BASE_URL or `client.base_url` in {config}, \
-             or change `client.auth`."
+        AuthSource::ClientBearer => (
+            "`client.auth` (`type = \"bearer\"`)",
+            "change `client.auth`",
         ),
         AuthSource::ApiKeyEnv
         | AuthSource::ClientApiKey
         | AuthSource::ClientOAuth
         | AuthSource::OAuthTokenEnv
         | AuthSource::OxLogin
-        | AuthSource::ClaudeCodeLogin => Ok(()),
-    }
+        | AuthSource::ClaudeCodeLogin => return Ok(()),
+    };
+    let config = user_config_hint();
+    bail!(
+        "{subject} requires an explicit endpoint. \
+         Set ANTHROPIC_BASE_URL or `client.base_url` in {config}, \
+         or {alternative}."
+    );
 }
 
 // ── Stored Login Fallback ──

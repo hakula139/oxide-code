@@ -10,7 +10,7 @@ fn accepts_native_auth_without_reading_credential_files() {
         let missing = root.join("missing-token");
         let missing = missing.display();
         let base_url = if kind == "bearer" {
-            "base_url = 'https://gateway.example.com'\n"
+            "base_url = 'https://gateway.example.com'"
         } else {
             ""
         };
@@ -174,7 +174,7 @@ fn rejects_native_auth_header_conflicts_without_reading_files() {
         let missing = root.join("missing-token");
         let missing = missing.display();
         let base_url = if kind == "bearer" {
-            "base_url = 'https://gateway.example.com'\n"
+            "base_url = 'https://gateway.example.com'"
         } else {
             ""
         };
@@ -182,7 +182,8 @@ fn rejects_native_auth_header_conflicts_without_reading_files() {
             root,
             &formatdoc! {"
                 [client]
-                {base_url}headers = {{ {header} = 'private-header-sentinel' }}
+                {base_url}
+                headers = {{ {header} = 'private-header-sentinel' }}
                 auth = {{ type = '{kind}', file = '{missing}' }}
             "},
         );
@@ -194,6 +195,62 @@ fn rejects_native_auth_header_conflicts_without_reading_files() {
         assert!(stderr.contains("client.headers"), "{stderr}");
         assert!(stderr.contains(header), "{stderr}");
         assert!(stderr.contains("cannot be overridden"), "{stderr}");
+        assert_private_auth_run(root, &output);
+    }
+}
+
+#[test]
+fn rejects_bearer_auth_without_an_explicit_endpoint() {
+    for (config_kind, env_token, expected) in [
+        (
+            None,
+            Some("private-token-sentinel"),
+            "ANTHROPIC_AUTH_TOKEN requires an explicit endpoint.",
+        ),
+        (
+            Some("value"),
+            None,
+            "`client.auth` (`type = \"bearer\"`) requires an explicit endpoint.",
+        ),
+        (
+            Some("file"),
+            None,
+            "`client.auth` (`type = \"bearer\"`) requires an explicit endpoint.",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        match config_kind {
+            Some("value") => {
+                write_user_config(
+                    root,
+                    "client.auth = { type = 'bearer', value = 'private-token-sentinel' }\n",
+                );
+            }
+            Some("file") => {
+                let missing = root.join("missing-token");
+                let missing = missing.display();
+                write_user_config(
+                    root,
+                    &format!("client.auth = {{ type = 'bearer', file = '{missing}' }}\n"),
+                );
+            }
+            _ => {}
+        }
+
+        let mut command = config_check(root);
+        if let Some(token) = env_token {
+            command.env("ANTHROPIC_AUTH_TOKEN", token);
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{config_kind:?}: {output:?}");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{stderr}");
+        assert!(
+            stderr.contains("ANTHROPIC_BASE_URL") && stderr.contains("client.base_url"),
+            "{stderr}",
+        );
         assert_private_auth_run(root, &output);
     }
 }

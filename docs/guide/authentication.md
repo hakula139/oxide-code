@@ -34,6 +34,9 @@ Both commands report the active credential. If an environment variable or `[clie
 Set a fixed credential in user config under `[client.auth]`:
 
 ```toml
+[client]
+base_url = "https://gateway.example.com/anthropic"
+
 [client.auth]
 type = "bearer"
 file = "~/.secrets/gateway-token"
