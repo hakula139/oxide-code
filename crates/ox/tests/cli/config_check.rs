@@ -9,9 +9,16 @@ fn accepts_native_auth_without_reading_credential_files() {
         let root = dir.path();
         let missing = root.join("missing-token");
         let missing = missing.display();
+        let base_url = if kind == "bearer" {
+            "base_url = 'https://gateway.example.com'\n"
+        } else {
+            ""
+        };
         write_user_config(
             root,
             &formatdoc! {"
+                [client]
+                {base_url}
                 [client.auth]
                 type = '{kind}'
                 file = '{missing}'
@@ -166,11 +173,16 @@ fn rejects_native_auth_header_conflicts_without_reading_files() {
         let root = dir.path();
         let missing = root.join("missing-token");
         let missing = missing.display();
+        let base_url = if kind == "bearer" {
+            "base_url = 'https://gateway.example.com'\n"
+        } else {
+            ""
+        };
         write_user_config(
             root,
             &formatdoc! {"
                 [client]
-                headers = {{ {header} = 'private-header-sentinel' }}
+                {base_url}headers = {{ {header} = 'private-header-sentinel' }}
                 auth = {{ type = '{kind}', file = '{missing}' }}
             "},
         );

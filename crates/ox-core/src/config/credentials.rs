@@ -3,11 +3,12 @@
 
 use std::process::Command;
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 
 use super::BaseUrl;
 use super::gateway::CUSTOM_HEADERS_VAR;
 use super::load::user_config_hint;
+use super::provenance::Source;
 use super::schema::{AuthValue, ClientAuth};
 use crate::auth::oauth::{LoginError, login_stores};
 use crate::auth::{Auth, AuthSource, LoginUnavailable};
@@ -131,6 +132,33 @@ pub(super) fn first_explicit(config: Option<ExplicitAuth>) -> Result<Option<Expl
     Ok(None)
 }
 
+/// Rejects a gateway bearer token when no endpoint was explicitly configured, so a gateway token
+/// neither reaches the default Anthropic API nor falls back to a lower-precedence credential.
+pub(super) fn check_bearer_endpoint(source: AuthSource, base_url_source: &Source) -> Result<()> {
+    if *base_url_source != Source::Default {
+        return Ok(());
+    }
+    let config = user_config_hint();
+    match source {
+        AuthSource::AuthTokenEnv => bail!(
+            "ANTHROPIC_AUTH_TOKEN requires an explicit endpoint. \
+             Set ANTHROPIC_BASE_URL or `client.base_url` in {config}, \
+             or unset ANTHROPIC_AUTH_TOKEN to use another credential."
+        ),
+        AuthSource::ClientBearer => bail!(
+            "`client.auth` (`type = \"bearer\"`) requires an explicit endpoint. \
+             Set ANTHROPIC_BASE_URL or `client.base_url` in {config}, \
+             or change `client.auth`."
+        ),
+        AuthSource::ApiKeyEnv
+        | AuthSource::ClientApiKey
+        | AuthSource::ClientOAuth
+        | AuthSource::OAuthTokenEnv
+        | AuthSource::OxLogin
+        | AuthSource::ClaudeCodeLogin => Ok(()),
+    }
+}
+
 // ── Stored Login Fallback ──
 
 /// Credential resolution failure. Messages capture config paths when the error is constructed
@@ -215,8 +243,12 @@ mod tests {
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
 
+    use strum::VariantArray as _;
+
     use super::*;
+    use crate::auth::AuthKind;
     use crate::auth::oauth::Login;
+    use crate::config::provenance::Layer;
     use crate::config::testing::base_url;
     use crate::util::path::local_testing::abs;
 
@@ -309,6 +341,69 @@ mod tests {
                 let err = resolve(&[(var, "bad\nkey")], config).unwrap_err();
 
                 assert_eq!(err.to_string(), expected, "{var}");
+            }
+        }
+    }
+
+    mod check_bearer_endpoint {
+        use super::*;
+
+        #[test]
+        fn accepts_bearer_auth_with_an_explicit_endpoint_source() {
+            let explicit_sources = [
+                Source::Env("ANTHROPIC_BASE_URL"),
+                Source::File(Layer::User(PathBuf::from("/srv/cfg/ox/config.toml"))),
+            ];
+            for auth in [AuthSource::AuthTokenEnv, AuthSource::ClientBearer] {
+                for base_url_source in &explicit_sources {
+                    check_bearer_endpoint(auth, base_url_source)
+                        .unwrap_or_else(|e| panic!("{auth:?} with {base_url_source:?}: {e:#}"));
+                }
+            }
+        }
+
+        #[test]
+        fn accepts_non_bearer_auth_with_the_default_endpoint() {
+            for &auth in AuthSource::VARIANTS {
+                if auth.kind() == AuthKind::AuthToken {
+                    continue;
+                }
+                check_bearer_endpoint(auth, &Source::Default)
+                    .unwrap_or_else(|e| panic!("{auth:?}: {e:#}"));
+            }
+        }
+
+        #[test]
+        fn rejects_bearer_auth_with_the_default_endpoint() {
+            let config = abs("/srv/cfg");
+            let file = Path::new(&config).join("ox").join("config.toml");
+
+            for (auth, expected) in [
+                (
+                    AuthSource::AuthTokenEnv,
+                    format!(
+                        "ANTHROPIC_AUTH_TOKEN requires an explicit endpoint. \
+                         Set ANTHROPIC_BASE_URL or `client.base_url` in {}, \
+                         or unset ANTHROPIC_AUTH_TOKEN to use another credential.",
+                        file.display(),
+                    ),
+                ),
+                (
+                    AuthSource::ClientBearer,
+                    format!(
+                        "`client.auth` (`type = \"bearer\"`) requires an explicit endpoint. \
+                         Set ANTHROPIC_BASE_URL or `client.base_url` in {}, \
+                         or change `client.auth`.",
+                        file.display(),
+                    ),
+                ),
+            ] {
+                let err = temp_env::with_vars([("XDG_CONFIG_HOME", Some(config.as_str()))], || {
+                    check_bearer_endpoint(auth, &Source::Default)
+                })
+                .expect_err("bearer auth requires an explicit endpoint");
+
+                assert_eq!(format!("{err:#}"), expected, "{auth:?}");
             }
         }
     }
