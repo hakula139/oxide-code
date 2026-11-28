@@ -131,9 +131,12 @@ programs.oxide-code = {
 - **Credentials**: Generated settings enter the Nix store, so keep secrets in a separate file (never opened by `checkConfig`). Set `client.auth.file` to a quoted runtime path with its `type` ([Fixed Credentials](authentication.md#fixed-credentials)):
 
   ```nix
-  settings.client.auth = {
-    type = "bearer";
-    file = "/run/secrets/ox-token";
+  settings.client = {
+    base_url = "https://gateway.example.com/anthropic";
+    auth = {
+      type = "bearer";
+      file = "/run/secrets/ox-token";
+    };
   };
   ```
 

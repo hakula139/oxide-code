@@ -34,6 +34,9 @@ Both commands report the active credential. If an environment variable or `[clie
 Set a fixed credential in user config under `[client.auth]`:
 
 ```toml
+[client]
+base_url = "https://gateway.example.com/anthropic"
+
 [client.auth]
 type = "bearer"
 file = "~/.secrets/gateway-token"
@@ -51,7 +54,7 @@ file = "~/.secrets/gateway-token"
 - **`file`**: Absolute or `~/` path. `ox` reads only the winning file once at startup (trimming trailing line endings), so restart after rotating it. `ox config check` validates the declaration without opening the file.
 - **`value`**: Plaintext on disk. Keep the config file private (conventionally mode `0600`). `ox` does not change its permissions.
 
-Fixed OAuth tokens work with custom endpoints, while `"login"` keeps the Anthropic-only restriction for stored logins.
+Fixed OAuth tokens work with custom endpoints, while `"login"` keeps the Anthropic-only restriction for stored logins. `"bearer"` requires an explicit endpoint (`ANTHROPIC_BASE_URL` or `client.base_url`) and fails startup without falling back to lower-precedence credentials when only the default endpoint is in effect.
 
 ## Commands and Credentials
 
@@ -72,7 +75,7 @@ export NODE_EXTRA_CA_CERTS=~/.config/ox/corp-cachain.pem
 Each variable overrides its user-only config key (in parentheses where applicable):
 
 - **`ANTHROPIC_BASE_URL`** ([`client.base_url`](configuration.md#base_url-endpoint)): API endpoint.
-- **`ANTHROPIC_AUTH_TOKEN`**: Sends `Authorization: Bearer` with the API-key request shape (no OAuth beta).
+- **`ANTHROPIC_AUTH_TOKEN`**: Sends `Authorization: Bearer` with the API-key request shape (no OAuth beta). Requires an explicit `ANTHROPIC_BASE_URL` or `client.base_url`, failing startup without falling back to lower-precedence credentials when only the default endpoint is in effect.
 - **`ANTHROPIC_CUSTOM_HEADERS`** (`client.headers`, header-to-string map): One `Name: value` per line, skipping blank lines. Applied after built-in headers so they can replace defaults such as `User-Agent`. Reserved headers fail startup: `anthropic-beta`, `anthropic-version`, `content-type`, `x-claude-code-session-id`, and the active credential header (`x-api-key` for API keys, `Authorization` otherwise). The unused credential header stays free (such as a gateway's `Authorization` alongside an API key). Missing colons, invalid names or values, or reserved / duplicate names fail startup with the line number and never print values. `/config` lists header names only.
 - **`NODE_EXTRA_CA_CERTS`**: Fallback for [`extra_ca_certs`](configuration.md#extra_ca_certs-corporate-trust-anchors) (see precedence there). Because shells often export it for npm, unreadable bundles log a warning and are skipped, matching Node.
 - **`CLAUDE_CODE_ATTRIBUTION_HEADER=0`** (`client.attribution = false`): Drops the `x-anthropic-billing-header` system-prompt block. Sent by default regardless of credential so gateways recognize Claude Code requests. On custom base URLs, omits the per-request `cch` hash (matching Claude Code) so the block stays constant.

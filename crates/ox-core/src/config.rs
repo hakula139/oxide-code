@@ -291,7 +291,7 @@ impl Config {
             check_ca_bundle,
         )?;
 
-        let auth = resolve_explicit_auth(client.auth, &origins, &base_url.value, &gateway)?;
+        let auth = resolve_explicit_auth(client.auth, &origins, &base_url, &gateway)?;
 
         let model_id = env_string("OX_MODEL")
             .or_else(|| origins.sourced("client.model", client.model))
@@ -513,14 +513,16 @@ fn resolve_base_url(base_url: Sourced<String>) -> Result<Sourced<BaseUrl>> {
     Ok(Sourced::new(value, base_url.source))
 }
 
-/// The explicit credential and its source, rejecting a custom header that would replace it. Without
-/// one, the source is the default, since [`Config::resolve_auth`] falls back to a stored login, and
-/// on a first-party URL the header check covers the OAuth header that a stored login or `/login`
-/// sends. A gateway never receives a stored login, so there the missing credential reports itself.
+/// The explicit credential and its source, rejecting a gateway bearer token without an explicit
+/// endpoint or a custom header that would replace the active credential. Without an explicit
+/// credential, the source is the default, since [`Config::resolve_auth`] falls back to a stored
+/// login, and on a first-party URL the header check covers the OAuth header that a stored login or
+/// `/login` sends. A gateway never receives a stored login, so there the missing credential
+/// reports itself.
 fn resolve_explicit_auth(
     file_auth: Option<ClientAuth>,
     origins: &Origins,
-    base_url: &BaseUrl,
+    base_url: &Sourced<BaseUrl>,
     gateway: &ResolvedGateway,
 ) -> Result<Sourced<AuthState>> {
     let config = file_auth
@@ -529,7 +531,10 @@ fn resolve_explicit_auth(
         .flatten();
     let explicit = credentials::first_explicit(config)?;
     let explicit_source = explicit.as_ref().map(credentials::ExplicitAuth::source);
-    if explicit_source.is_some() || base_url.is_first_party() {
+    if let Some(source) = explicit_source {
+        credentials::check_bearer_endpoint(source, &base_url.source)?;
+    }
+    if explicit_source.is_some() || base_url.value.is_first_party() {
         gateway.check_credential_header(explicit_source)?;
     }
 
@@ -1574,6 +1579,9 @@ mod tests {
             write_user_config(
                 dir.path(),
                 &formatdoc! {"
+                    [client]
+                    base_url = 'https://gateway.example.com'
+
                     [client.auth]
                     type = 'bearer'
                     file = '{path}'
@@ -1639,6 +1647,9 @@ mod tests {
             write_user_config(
                 dir.path(),
                 &formatdoc! {"
+                    [client]
+                    base_url = 'https://gateway.example.com'
+
                     [client.auth]
                     type = 'bearer'
                     file = '{path}'
@@ -1660,9 +1671,16 @@ mod tests {
                 ("oauth", AuthSource::ClientOAuth),
             ] {
                 let dir = tempfile::tempdir().unwrap();
+                let base_url = if kind == "bearer" {
+                    "base_url = 'https://gateway.example.com'"
+                } else {
+                    ""
+                };
                 write_user_config(
                     dir.path(),
                     &formatdoc! {"
+                        [client]
+                        {base_url}
                         [client.auth]
                         type = '{kind}'
                         value = ' inline-token '
@@ -1736,6 +1754,10 @@ mod tests {
                 write_user_config(dir.path(), "client.auth = { type = 'login' }\n");
                 let vars = env_vars(vec![
                     xdg(&dir),
+                    (
+                        "ANTHROPIC_BASE_URL",
+                        auth_token.map(|_| "https://gateway.example.com".to_owned()),
+                    ),
                     ("ANTHROPIC_AUTH_TOKEN", auth_token.map(str::to_owned)),
                     ("ANTHROPIC_API_KEY", api_key.map(str::to_owned)),
                     env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token"),
@@ -1796,6 +1818,10 @@ mod tests {
                 });
                 let vars = env_vars(vec![
                     xdg(&dir),
+                    (
+                        "ANTHROPIC_BASE_URL",
+                        auth_token.map(|_| "https://gateway.example.com".to_owned()),
+                    ),
                     ("ANTHROPIC_API_KEY", api_key.map(str::to_owned)),
                     ("ANTHROPIC_AUTH_TOKEN", auth_token.map(str::to_owned)),
                     env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token"),
@@ -1806,6 +1832,135 @@ mod tests {
                 assert_auth(&config, winner, secret);
                 let source = variable.map_or_else(|| Source::File(user.unwrap()), Source::Env);
                 assert_eq!(config.provenance.auth, source, "{winner:?}");
+            }
+        }
+
+        #[tokio::test]
+        async fn accepts_bearer_auth_with_an_explicit_endpoint() {
+            for (use_env_auth, expected_source) in [
+                (true, AuthSource::AuthTokenEnv),
+                (false, AuthSource::ClientBearer),
+            ] {
+                for (use_env_url, url) in [
+                    (true, "https://gateway.example.com"),
+                    (true, DEFAULT_BASE_URL),
+                    (false, "https://gateway.example.com"),
+                    (false, DEFAULT_BASE_URL),
+                ] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let mut lines = Vec::new();
+                    if !use_env_url {
+                        lines.push(format!("base_url = '{url}'"));
+                    }
+                    if !use_env_auth {
+                        lines.push("auth = { type = 'bearer', value = 'bearer-token' }".to_owned());
+                    }
+                    if !lines.is_empty() {
+                        write_user_config(dir.path(), &format!("[client]\n{}\n", lines.join("\n")));
+                    }
+                    let vars = env_vars(vec![
+                        xdg(&dir),
+                        ("ANTHROPIC_API_KEY", None),
+                        ("ANTHROPIC_BASE_URL", use_env_url.then(|| url.to_owned())),
+                        (
+                            "ANTHROPIC_AUTH_TOKEN",
+                            use_env_auth.then(|| "bearer-token".to_owned()),
+                        ),
+                    ]);
+
+                    let config = load_in(&dir, vars, false).await.unwrap();
+
+                    assert_auth(&config, expected_source, "bearer-token");
+                    assert_eq!(config.base_url.to_string(), url);
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn accepts_api_key_and_oauth_with_the_default_endpoint() {
+            for (config_body, api_key, oauth, expected_source, expected_secret) in [
+                (
+                    Some("client.auth = { type = 'bearer', value = 'lower-bearer' }\n"),
+                    Some("sk-env-key"),
+                    None,
+                    AuthSource::ApiKeyEnv,
+                    "sk-env-key",
+                ),
+                (
+                    None,
+                    None,
+                    Some("oauth-env-token"),
+                    AuthSource::OAuthTokenEnv,
+                    "oauth-env-token",
+                ),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                if let Some(body) = config_body {
+                    write_user_config(dir.path(), body);
+                }
+                let vars = env_vars(vec![
+                    xdg(&dir),
+                    ("ANTHROPIC_API_KEY", api_key.map(str::to_owned)),
+                    ("CLAUDE_CODE_OAUTH_TOKEN", oauth.map(str::to_owned)),
+                ]);
+
+                let config = load_in(&dir, vars, false).await.unwrap();
+
+                assert_auth(&config, expected_source, expected_secret);
+                assert_eq!(config.base_url.to_string(), DEFAULT_BASE_URL);
+                assert_eq!(config.provenance.base_url, Source::Default);
+            }
+        }
+
+        #[tokio::test]
+        async fn rejects_bearer_auth_without_an_explicit_endpoint() {
+            for (config_body, auth_token, api_key, expected_prefix) in [
+                (
+                    None,
+                    Some("bearer-token"),
+                    None,
+                    "ANTHROPIC_AUTH_TOKEN requires an explicit endpoint.",
+                ),
+                (
+                    None,
+                    Some("bearer-token"),
+                    Some("sk-lower-precedence"),
+                    "ANTHROPIC_AUTH_TOKEN requires an explicit endpoint.",
+                ),
+                (
+                    Some("client.auth = { type = 'bearer', value = 'bearer-token' }\n"),
+                    None,
+                    None,
+                    "`client.auth` (`type = \"bearer\"`) requires an explicit endpoint.",
+                ),
+                (
+                    Some("client.auth = { type = 'bearer', file = '~/missing-token' }\n"),
+                    None,
+                    None,
+                    "`client.auth` (`type = \"bearer\"`) requires an explicit endpoint.",
+                ),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                if let Some(body) = config_body {
+                    write_user_config(dir.path(), body);
+                }
+                let vars = env_vars(vec![
+                    xdg(&dir),
+                    ("ANTHROPIC_AUTH_TOKEN", auth_token.map(str::to_owned)),
+                    ("ANTHROPIC_API_KEY", api_key.map(str::to_owned)),
+                    env("CLAUDE_CODE_OAUTH_TOKEN", "lower-oauth"),
+                ]);
+
+                let err = load_in(&dir, vars, false)
+                    .await
+                    .expect_err("bearer auth without an explicit endpoint must fail closed");
+
+                let message = format!("{err:#}");
+                assert!(message.starts_with(expected_prefix), "{message}");
+                assert!(
+                    message.contains("ANTHROPIC_BASE_URL") && message.contains("client.base_url"),
+                    "{message}",
+                );
             }
         }
 
@@ -1925,6 +2080,7 @@ mod tests {
             let err = load_with(
                 &dir,
                 &[
+                    ("ANTHROPIC_BASE_URL", "https://gateway.example.com"),
                     ("ANTHROPIC_CUSTOM_HEADERS", "Authorization: Bearer other"),
                     ("ANTHROPIC_AUTH_TOKEN", "gateway-token"),
                 ],
