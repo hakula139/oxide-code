@@ -20,8 +20,14 @@ With [direnv](https://direnv.net), run `direnv allow` once so `.envrc` loads the
 ## Toolchain
 
 - `rust-toolchain.toml` pins the Rust release for the Nix package (minimal profile), the dev shell, the hooks, CI's Rust, Rust Lint, and Windows jobs, and release builds. The Windows job and release builds install it with `rustup toolchain install`.
-- Renovate bumps the pin in its automerged flake-inputs group. Fix any new lint failures in that PR.
 - `rust-version` in `Cargo.toml` is the minimum supported Rust version, which the `msrv` dev shell builds and [Versioning](../../RELEASING.md#versioning) covers.
+
+Update the Rust pin manually so the locked `rust-overlay` provides the selected compiler.
+
+1. Refresh the `rust-overlay` input with `nix flake update rust-overlay`.
+2. Choose a newer stable version available in the updated overlay and set `channel` in `rust-toolchain.toml` to that version.
+3. Confirm the version with `nix develop -c rustc --version` and run `nix develop -c run-hooks`. Fix any new lint failures in the same PR.
+4. Commit the new pin and any corresponding `flake.lock` change together, then open a PR.
 
 ## Nix Style
 
