@@ -1,0 +1,7 @@
+{
+  "config": {
+    "extends": "./.markdownlint/devkit.jsonc",
+  },
+
+  "gitignore": true,
+}
